@@ -1,0 +1,6 @@
+outputs/
+weights/
+libsscan.dylib
+__pycache__/
+*.pyc
+.venv/
