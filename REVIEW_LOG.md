@@ -116,3 +116,16 @@ The reviewer found nothing above low severity and no path for master to report a
 Result: `npm run master` PASS on 8 steps: 150/150 (seed 999617), 40 scenarios, 66/66 branches exercised, 449 phones, 1686 relaunches, 23/23 acceptance items. Sim subagent: seeds 1, 2 and 22 pass 150/150.
 
 First cycle with nothing above low. The loop was stopped here at the user's request, before cycle 5. The master's stop rule calls for one more clean fresh-eyes cycle.
+
+## Cycle 5 — 2026-11-14 (closing fresh-eyes review)
+
+Read-only review of cycle 4's changes, plus an end-to-end pass against the brief. Verdict: **CLEAN**, nothing above low, no path to a false master PASS. Every new scenario caught its mutant (4/4 runs failed).
+
+Open, low (not yet fixed):
+
+| Area | Finding | Suggested fix |
+| --- | --- | --- |
+| phone + sim | expo-sqlite 16 runs `runAsync` on a concurrent iOS queue, so `lastInsertRowId` and `changes` are read connection-wide after the step and can belong to another thread's insert. A C repro on expo's vendored SQLite 3.50.3 got the wrong rowid about 1 in 10,000 under 4-thread load. The sim assumes one queue per connection | Serialize every `exec`/`run`/`first`/`all` in `adapters/expo.ts` through one JS FIFO; correct the sim comment |
+| phone | `addShot`'s read-back by rowid can return another call's shot if the shot is deleted before the read-back and its rowid reused (6/60 in a deterministic repro) | Serialize `addShot`/`deleteShot`/`setOutcome` in `ShotStore`, or let the FIFO above cover both statements |
+
+Stop rule met: cycles 4 and 5 found nothing above low. The review loop is complete.
