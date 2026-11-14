@@ -21,9 +21,10 @@ export function environment(t: TestContext) {
     rmSync(root, { recursive: true, force: true });
   });
 
-  function open() {
+  function open(prepare?: (db: DatabaseSync) => void) {
     const db = new DatabaseSync(path('test.sqlite'));
     connections.add(db);
+    prepare?.(db);
     const adapter: PracticeDatabase = {
       execSync: (sql) => db.exec(sql),
       runSync: (sql, ...args) => db.prepare(sql).run(...args),

@@ -17,9 +17,11 @@ const outcomes: { value: ShotOutcome; label: string }[] = [
   { value: 'made', label: 'Made' }, { value: 'missed', label: 'Missed' }, { value: 'unmarked', label: 'Unmarked' },
 ];
 
-export function ReplayScreen({ initialSession, store, backLabel, onBack, onViewDemo }: {
+export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChanged, backLabel, onBack, onViewDemo }: {
   initialSession: Session;
   store: PracticeStore;
+  cloudUserId: string | null;
+  onShotsChanged: () => void;
   backLabel: string;
   onBack: () => void;
   onViewDemo: () => void;
@@ -40,14 +42,15 @@ export function ReplayScreen({ initialSession, store, backLabel, onBack, onViewD
   function tag(outcome: ShotOutcome) {
     if (!edit) return;
     try {
-      if (edit.existing) store.updateShot(session.id, edit.existing.shotNumber, outcome);
-      else store.addShot(session.id, edit.releaseMs, outcome);
+      if (edit.existing) store.updateShot(session.id, edit.existing.shotNumber, outcome, cloudUserId);
+      else store.addShot(session.id, edit.releaseMs, outcome, cloudUserId);
     } catch (error) {
       setEditorError(message(error, 'Your shot tag could not be saved.'));
       return;
     }
     setEdit(undefined);
     setShots(store.listShots(session.id));
+    onShotsChanged();
   }
 
   function confirmRemove() {
@@ -59,6 +62,7 @@ export function ReplayScreen({ initialSession, store, backLabel, onBack, onViewD
             removeRecording(session, recordingFiles, store);
             setSession({ ...session, videoPath: null });
             setNotice(undefined);
+            onShotsChanged();
           } catch {
             setNotice('The video removal could not be completed. You can retry.');
           }

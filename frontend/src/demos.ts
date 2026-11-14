@@ -1,3 +1,4 @@
+import { apiOrigin, httpsUrl } from './api.ts';
 import { SHOT_TYPE, STORAGE_RESERVE_BYTES } from './practice.ts';
 import type { SavedDemo } from './database.ts';
 
@@ -19,42 +20,32 @@ type DemoStore = {
   saveDemo(demo: SavedDemo): void;
 };
 
-function webUrl(value: string, base?: URL) {
-  try {
-    const url = new URL(value, base);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password
-      ? url
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-export async function fetchDemoCatalog(baseUrl: string | undefined, signal: AbortSignal) {
-  const base = baseUrl && webUrl(baseUrl);
-  if (!base) throw new Error('Set the laptop address in EXPO_PUBLIC_API_URL to download a demo.');
-
+export async function fetchDemoCatalog(baseUrl: string, signal: AbortSignal, request = fetch) {
+  const base = apiOrigin(baseUrl);
   const endpoint = new URL('/v1/demos', base);
   endpoint.searchParams.set('shotType', SHOT_TYPE);
   let response: Response;
   try {
-    response = await fetch(endpoint.href, { signal });
+    response = await request(endpoint.href, { signal, redirect: 'error', headers: { Accept: 'application/json' } });
   } catch {
-    throw new Error('Could not reach the demo server. Check the laptop and Wi-Fi, then retry.');
+    if (signal.aborted) throw new Error('The demo request timed out. Try again.');
+    throw new Error('Could not reach the demo server. Check your connection and try again.');
   }
+  if (response.status === 503) throw new Error('The demo service is temporarily unavailable. Try again shortly.');
   if (!response.ok) throw new Error(`The demo server returned HTTP ${response.status}.`);
 
   const entries: unknown = await response.json().catch(() => null);
+  if (signal.aborted) throw new Error('The demo request timed out. Try again.');
   if (!Array.isArray(entries)) throw new Error('The demo server sent an invalid catalog.');
 
   const options: CatalogDemo[] = [];
   for (const entry of entries) {
     if (!object(entry) || entry.shotType !== SHOT_TYPE ||
-        typeof entry.id !== 'string' || !/^[\da-z][\da-z_-]{0,79}$/i.test(entry.id) ||
+        typeof entry.id !== 'string' || !/^[\da-z][\da-z._-]{0,99}$/i.test(entry.id) || entry.id.includes('..') ||
         typeof entry.version !== 'number' || !Number.isSafeInteger(entry.version) || entry.version < 1 ||
         typeof entry.cue !== 'string' || !entry.cue.trim() || !Array.isArray(entry.assets)) continue;
 
@@ -62,8 +53,8 @@ export async function fetchDemoCatalog(baseUrl: string | undefined, signal: Abor
       if (!object(asset) || asset.format !== 'usdz' || typeof asset.url !== 'string' || !asset.url.trim() ||
           typeof asset.sizeBytes !== 'number' || !Number.isSafeInteger(asset.sizeBytes) || asset.sizeBytes < 1) continue;
 
-      const url = webUrl(asset.url, base);
-      if (!url || (url.origin !== base.origin && url.protocol !== 'https:')) continue;
+      const url = httpsUrl(asset.url, base);
+      if (!url) continue;
 
       options.push({
         id: entry.id, version: entry.version, shotType: SHOT_TYPE, cue: entry.cue.trim(),

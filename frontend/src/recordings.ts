@@ -20,7 +20,7 @@ type RecordingFiles = {
 
 type Sessions = {
   getSession(id: string): Session | null;
-  saveSession(session: Session): void;
+  saveSession(session: Session, cloudUserId?: string | null): void;
   clearVideo(id: string): void;
 };
 
@@ -30,7 +30,7 @@ function recordingPath(draft: RecordingDraft) {
   return `${videoDirectory}/${filename}`;
 }
 
-export function saveRecording(draft: RecordingDraft, files: RecordingFiles, sessions: Sessions) {
+export function saveRecording(draft: RecordingDraft, files: RecordingFiles, sessions: Sessions, cloudUserId: string | null = null) {
   const existing = sessions.getSession(draft.id);
   if (existing) return existing;
 
@@ -49,7 +49,7 @@ export function saveRecording(draft: RecordingDraft, files: RecordingFiles, sess
     durationMs: draft.durationMs,
     sizeBytes: draft.sizeBytes,
   };
-  sessions.saveSession(session);
+  sessions.saveSession(session, cloudUserId);
   return session;
 }
 

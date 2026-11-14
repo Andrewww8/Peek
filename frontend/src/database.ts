@@ -20,6 +20,9 @@ export type SavedDemo = {
   sizeBytes: number;
 };
 
+type CloudShot = Shot & { sessionId: string };
+type CloudState = 'pending' | 'synced' | 'dirty' | 'unavailable';
+
 const schema = `
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY NOT NULL,
@@ -53,24 +56,35 @@ const schema = `
 const sessionColumns = `id, created_at AS createdAt, shot_type AS shotType,
   video_path AS videoPath, duration_ms AS durationMs, size_bytes AS sizeBytes`;
 
+const cloudSchema = `
+  ALTER TABLE sessions ADD COLUMN cloud_user_id TEXT;
+  ALTER TABLE shots ADD COLUMN cloud_state TEXT CHECK (cloud_state IN ('pending', 'synced', 'dirty', 'unavailable'));
+  ALTER TABLE shots ADD COLUMN cloud_outcome TEXT CHECK (cloud_outcome IN ('made', 'missed', 'unmarked'));
+  CREATE INDEX shots_cloud_state ON shots (cloud_state, session_id) WHERE cloud_state IS NOT NULL;
+`;
+
+const SCHEMA_VERSION = 2;
+
 export class PracticeStore {
   private db: PracticeDatabase;
 
   constructor(db: PracticeDatabase) {
     this.db = db;
     db.execSync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 2000;');
-    const version = db.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version;
-    if (version === 0) {
+    const version = db.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
+    if (version > SCHEMA_VERSION) {
+      throw new Error('This practice history requires a newer version of Perspective.');
+    }
+    if (version < SCHEMA_VERSION) {
       db.execSync('BEGIN IMMEDIATE;');
       try {
-        db.execSync(schema);
-        db.execSync('PRAGMA user_version = 1; COMMIT;');
+        if (version < 1) db.execSync(schema);
+        db.execSync(cloudSchema);
+        db.execSync(`PRAGMA user_version = ${SCHEMA_VERSION}; COMMIT;`);
       } catch (error) {
         db.execSync('ROLLBACK;');
         throw error;
       }
-    } else if (version !== 1) {
-      throw new Error('This practice history requires a newer version of Perspective.');
     }
   }
 
@@ -84,12 +98,12 @@ export class PracticeStore {
     );
   }
 
-  saveSession(session: Session) {
+  saveSession(session: Session, cloudUserId: string | null = null) {
     this.db.runSync(
-      `INSERT INTO sessions (id, created_at, shot_type, video_path, duration_ms, size_bytes)
-       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+      `INSERT INTO sessions (id, created_at, shot_type, video_path, duration_ms, size_bytes, cloud_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
       session.id, session.createdAt, session.shotType, session.videoPath,
-      session.durationMs, session.sizeBytes,
+      session.durationMs, session.sizeBytes, cloudUserId,
     );
   }
 
@@ -104,25 +118,65 @@ export class PracticeStore {
     );
   }
 
-  addShot(id: string, releaseMs: number, outcome: ShotOutcome) {
+  addShot(id: string, releaseMs: number, outcome: ShotOutcome, cloudUserId: string | null = null) {
     if (!Number.isSafeInteger(releaseMs) || releaseMs < 0) {
       throw new Error('Choose a moment inside the clip.');
     }
     const { changes } = this.db.runSync(
-      `INSERT INTO shots (session_id, shot_number, release_ms, outcome)
-       SELECT id, COALESCE((SELECT MAX(shot_number) FROM shots WHERE session_id = sessions.id), 0) + 1, ?, ?
+      `INSERT INTO shots (session_id, shot_number, release_ms, outcome, cloud_state, cloud_outcome)
+       SELECT id, COALESCE((SELECT MAX(shot_number) FROM shots WHERE session_id = sessions.id), 0) + 1, ?, ?,
+         CASE WHEN cloud_user_id = ? THEN 'pending' END, CASE WHEN cloud_user_id = ? THEN ? END
        FROM sessions WHERE id = ? AND video_path IS NOT NULL AND ? <= duration_ms`,
-      releaseMs, outcome, id, releaseMs,
+      releaseMs, outcome, cloudUserId, cloudUserId, outcome, id, releaseMs,
     );
     if (!changes) throw new Error('Choose a moment inside an available clip.');
   }
 
-  updateShot(id: string, shotNumber: number, outcome: ShotOutcome) {
+  updateShot(id: string, shotNumber: number, outcome: ShotOutcome, cloudUserId: string | null = null) {
     const { changes } = this.db.runSync(
-      'UPDATE shots SET outcome = ? WHERE session_id = ? AND shot_number = ?',
-      outcome, id, shotNumber,
+      `UPDATE shots SET outcome = ?,
+         cloud_outcome = CASE WHEN sessions.cloud_user_id = ? AND cloud_state IS NOT NULL THEN ? ELSE cloud_outcome END,
+         cloud_state = CASE WHEN sessions.cloud_user_id = ? AND cloud_state = 'synced' AND cloud_outcome <> ?
+                            THEN 'dirty' ELSE cloud_state END
+       FROM sessions WHERE sessions.id = shots.session_id AND shots.session_id = ? AND shot_number = ?`,
+      outcome, cloudUserId, outcome, cloudUserId, outcome, id, shotNumber,
     );
     if (!changes) throw new Error('That shot could not be found.');
+  }
+
+  pendingCloudSessions(userId: string) {
+    return this.db.getAllSync<Session>(
+      `SELECT ${sessionColumns} FROM sessions WHERE cloud_user_id = ? AND EXISTS (
+         SELECT 1 FROM shots WHERE session_id = sessions.id AND cloud_state = 'pending'
+       ) ORDER BY created_at, id`, userId,
+    );
+  }
+
+  hasCloudWork(userId: string) {
+    return !!this.db.getFirstSync(
+      `SELECT 1 FROM shots JOIN sessions ON sessions.id = shots.session_id
+       WHERE cloud_user_id = ? AND cloud_state IN ('pending', 'dirty') LIMIT 1`, userId,
+    );
+  }
+
+  cloudShots(userId: string, state: 'pending' | 'dirty', sessionId?: string) {
+    const filter = sessionId ? 'AND session_id = ?' : '';
+    return this.db.getAllSync<CloudShot>(
+      `SELECT session_id AS sessionId, shot_number AS shotNumber, release_ms AS releaseMs, cloud_outcome AS outcome
+       FROM shots JOIN sessions ON sessions.id = shots.session_id
+       WHERE sessions.cloud_user_id = ? AND cloud_state = ? ${filter}
+       ORDER BY session_id, shot_number`, userId, state, ...(sessionId ? [sessionId] : []),
+    );
+  }
+
+  finishCloudShot(userId: string, shot: CloudShot, previous: 'pending' | 'dirty', result: 'saved' | 'unavailable') {
+    const next: CloudState = result === 'saved' ? 'synced' : 'unavailable';
+    this.db.runSync(
+      `UPDATE shots SET cloud_state = CASE WHEN ? = 'synced' AND cloud_outcome <> ? THEN 'dirty' ELSE ? END
+       WHERE session_id = ? AND shot_number = ? AND cloud_state = ?
+         AND session_id IN (SELECT id FROM sessions WHERE cloud_user_id = ?)`,
+      next, shot.outcome, next, shot.sessionId, shot.shotNumber, previous, userId,
+    );
   }
 
   listSessionSummaries() {

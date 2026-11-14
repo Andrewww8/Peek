@@ -14,10 +14,11 @@ import type { RecordingDraft } from './recordings';
 import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, ui } from './ui';
 
 type Phase = 'idle' | 'recording' | 'stopping' | 'saving' | 'saveFailed';
-type PendingClip = { uri: string; id: string; createdAt: number; draft?: RecordingDraft };
+type PendingClip = { uri: string; id: string; createdAt: number; cloudUserId: string | null; draft?: RecordingDraft };
 
-export function RecordScreen({ store, onBack, onSaved }: {
+export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
   store: PracticeStore;
+  cloudUserId: string | null;
   onBack: () => void;
   onSaved: (session: Session) => void;
 }) {
@@ -70,7 +71,7 @@ export function RecordScreen({ store, onBack, onSaved }: {
     setNotice(undefined);
     try {
       clip.draft ??= await inspectRecording(clip.uri, clip.id, clip.createdAt);
-      const session = saveRecording(clip.draft, recordingFiles, store);
+      const session = saveRecording(clip.draft, recordingFiles, store, clip.cloudUserId);
       pending.current = null;
       onSaved(session);
     } catch (error) {
@@ -100,7 +101,7 @@ export function RecordScreen({ store, onBack, onSaved }: {
         progressUpdateInterval: 0.25,
       });
       if (!result?.uri) throw new Error('No clip was recorded.');
-      pending.current = { uri: result.uri, id: randomUUID(), createdAt };
+      pending.current = { uri: result.uri, id: randomUUID(), createdAt, cloudUserId };
       await savePending();
     } catch {
       transition('idle');

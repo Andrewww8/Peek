@@ -19,6 +19,7 @@ const entry = {
   cue: 'Hold your finish until the ball reaches the rim.',
   assets: [{ format: 'usdz', url: modelPath, sizeBytes: body.length }],
 };
+const cloudOrigin = 'https://perspective.example.test';
 
 async function server(t: TestContext, handle: RequestListener) {
   const fixture = createServer(handle);
@@ -43,6 +44,7 @@ test('queries the correct drill and resolves relative models and absolute HTTPS 
   let requestPath: string | undefined;
   const { url } = await server(t, (request, response) => {
     requestPath = request.url;
+    assert.equal(request.headers.authorization, undefined);
     response.end(JSON.stringify([
       entry,
       { ...entry, version: 2, assets: [{ ...entry.assets[0], url: 'https://cdn.example.com/demo-v2.usdz' }] },
@@ -53,9 +55,10 @@ test('queries the correct drill and resolves relative models and absolute HTTPS 
     ]));
   });
 
-  const result = await fetchDemoCatalog(url, new AbortController().signal);
+  const cloudFixture: typeof fetch = (input, options) => fetch(String(input).replace(cloudOrigin, url), options);
+  const result = await fetchDemoCatalog(cloudOrigin, new AbortController().signal, cloudFixture);
   assert.equal(requestPath, '/v1/demos?shotType=three_point');
-  assert.deepEqual(result, [{ ...modelAt(url, 2), url: 'https://cdn.example.com/demo-v2.usdz' }, modelAt(url)]);
+  assert.deepEqual(result, [{ ...modelAt(cloudOrigin, 2), url: 'https://cdn.example.com/demo-v2.usdz' }, modelAt(cloudOrigin)]);
 });
 
 test('handles bad catalog responses and a server disappearing', async (t) => {
@@ -64,12 +67,13 @@ test('handles bad catalog responses and a server disappearing', async (t) => {
     response.writeHead(status).end('not JSON');
   });
   const signal = new AbortController().signal;
-  await assert.rejects(fetchDemoCatalog(undefined, signal), /EXPO_PUBLIC_API_URL/);
-  await assert.rejects(fetchDemoCatalog(url, signal), /HTTP 500/);
+  const cloudFixture: typeof fetch = (input, options) => fetch(String(input).replace(cloudOrigin, url), options);
+  await assert.rejects(fetchDemoCatalog(url, signal), /EXPO_PUBLIC_API_URL/);
+  await assert.rejects(fetchDemoCatalog(cloudOrigin, signal, cloudFixture), /HTTP 500/);
   status = 200;
-  await assert.rejects(fetchDemoCatalog(url, signal), /invalid catalog/);
+  await assert.rejects(fetchDemoCatalog(cloudOrigin, signal, cloudFixture), /invalid catalog/);
   await close();
-  await assert.rejects(fetchDemoCatalog(url, signal), /Could not reach/);
+  await assert.rejects(fetchDemoCatalog(cloudOrigin, signal, cloudFixture), /Could not reach/);
 });
 
 test('reopens a verified model and cue offline after both SQLite and the HTTP server close', async (t) => {

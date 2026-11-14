@@ -3,6 +3,7 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { openDatabaseAsync } from 'expo-sqlite';
 import { createVideoPlayer } from 'expo-video';
 
+import type { RecordingUploader } from './clip-sync';
 import { PracticeStore } from './database';
 import type { DemoFiles } from './demos';
 import { recoverRecordings } from './recordings';
@@ -32,6 +33,13 @@ export function removeIfPresent(location: string) {
 export function localVideoUri(path: string | null) {
   return path && size(path) > 0 ? fileAt(path).uri : null;
 }
+
+export const uploadRecording: RecordingUploader = async (url, path, headers, signal) => {
+  const task = fileAt(path).createUploadTask(url, { httpMethod: 'PUT', sessionType: 'foreground', headers, signal });
+  const result = await task.uploadAsync();
+  if (!result) throw new Error('The recording upload was interrupted.');
+  return result.status;
+};
 
 export const recordingFiles = {
   listVideos: () => videos.list().filter((entry) => entry instanceof File).map(({ name }) => name),

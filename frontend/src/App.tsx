@@ -2,12 +2,15 @@ import { BarlowCondensed_800ExtraBold } from '@expo-google-fonts/barlow-condense
 import { IBMPlexMono_500Medium } from '@expo-google-fonts/ibm-plex-mono/500Medium';
 import { InstrumentSans_400Regular } from '@expo-google-fonts/instrument-sans/400Regular';
 import { InstrumentSans_600SemiBold } from '@expo-google-fonts/instrument-sans/600SemiBold';
+import type { Session as AuthSession } from '@supabase/supabase-js';
 import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
+import { AccountScreen } from './AccountScreen';
+import { storedSession, supabase } from './auth';
 import type { PracticeStore } from './database';
 import { DemoScreen } from './DemoScreen';
 import { loadPractice, localVideoUri } from './device-storage';
@@ -16,6 +19,7 @@ import type { Session } from './practice';
 import { RecordScreen } from './RecordScreen';
 import { ReplayScreen } from './ReplayScreen';
 import { Button, colors, fonts, Loading, Notice, Page, Panel, StatsGrid, Strip, ui } from './ui';
+import { useClipSync } from './use-clip-sync';
 
 type Tab = 'practice' | 'saved';
 type Detail = { screen: 'record' } | { screen: 'replay'; session: Session };
@@ -73,11 +77,40 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   const [tab, setTab] = useState<Tab>('practice');
   const [detail, setDetail] = useState<Detail>();
   const [demo, setDemo] = useState(false);
+  const [account, setAccount] = useState(false);
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [authReady, setAuthReady] = useState(!supabase);
+  const cloudUserId = session?.user.id ?? null;
+  const scheduleClipSync = useClipSync(store, cloudUserId);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const auth = supabase.auth;
+    const { data: { subscription } } = auth.onAuthStateChange((event, current) => {
+      setSession(event === 'INITIAL_SESSION' && !current ? storedSession() : current);
+      setAuthReady(true);
+    });
+    const appState = AppState.addEventListener('change', (state) => {
+      const pending = state === 'active' ? auth.startAutoRefresh() : auth.stopAutoRefresh();
+      void pending.catch(() => undefined);
+    });
+    return () => {
+      subscription.unsubscribe();
+      appState.remove();
+      void auth.stopAutoRefresh().catch(() => undefined);
+    };
+  }, []);
 
   const tabName = tab === 'practice' ? 'Practice' : 'Saved clips';
-  if (demo) return <DemoScreen backLabel={detail?.screen === 'replay' ? 'Replay' : tabName} store={store} onBack={() => setDemo(false)} />;
+  if (account) {
+    return <AccountScreen session={session} ready={authReady} backLabel={demo ? '3D example' : tabName} onBack={() => setAccount(false)} />;
+  }
+  if (demo) {
+    return <DemoScreen backLabel={detail?.screen === 'replay' ? 'Replay' : tabName} store={store}
+      onBack={() => setDemo(false)} />;
+  }
   if (detail?.screen === 'record') {
-    return <RecordScreen store={store} onBack={() => setDetail(undefined)} onSaved={(session) => setDetail({ screen: 'replay', session })} />;
+    return <RecordScreen store={store} cloudUserId={cloudUserId} onBack={() => setDetail(undefined)} onSaved={(session) => setDetail({ screen: 'replay', session })} />;
   }
   if (detail?.screen === 'replay') {
     return (
@@ -86,6 +119,8 @@ function PracticeApp({ store }: { store: PracticeStore }) {
         backLabel={tabName}
         initialSession={store.getSession(detail.session.id) ?? detail.session}
         store={store}
+        cloudUserId={cloudUserId}
+        onShotsChanged={scheduleClipSync}
         onBack={() => setDetail(undefined)}
         onViewDemo={() => setDemo(true)}
       />
@@ -94,7 +129,10 @@ function PracticeApp({ store }: { store: PracticeStore }) {
 
   return (
     <>
-      <View style={styles.brandBar}><Text style={styles.brand}>Perspective</Text></View>
+      <View style={styles.brandBar}>
+        <Text style={styles.brand}>Perspective</Text>
+        <Button label={session ? 'Account' : 'Sign in'} kind="secondary" onPress={() => setAccount(true)} />
+      </View>
       {tab === 'practice' ? (
         <Page>
           <Strip label="TRAINING" detail="BASKETBALL / 3PT" />
@@ -193,7 +231,7 @@ function TabButton({ label, selected, onPress }: { label: string; selected: bool
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   middle: { flex: 1, justifyContent: 'center', padding: 24, gap: 16 },
-  brandBar: { minHeight: 52, justifyContent: 'center', paddingHorizontal: 24 },
+  brandBar: { ...ui.row, minHeight: 52, paddingHorizontal: 24 },
   brand: { color: colors.text, fontFamily: fonts.display, fontSize: 30, textTransform: 'uppercase' },
   drillDetails: { ...ui.row, borderTopColor: colors.border, borderTopWidth: 1, paddingTop: 14, marginTop: 4 },
   tabs: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 11, marginHorizontal: 24, marginBottom: 8, padding: 4, gap: 4, flexDirection: 'row' },

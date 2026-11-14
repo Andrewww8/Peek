@@ -25,8 +25,8 @@ export const fonts = {
   mono: 'IBMPlexMono',
 };
 
-export function Page({ children }: PropsWithChildren) {
-  return <ScrollView style={styles.page} contentContainerStyle={styles.content}>{children}</ScrollView>;
+export function Page({ children, keyboardShouldPersistTaps }: PropsWithChildren<{ keyboardShouldPersistTaps?: 'handled' }>) {
+  return <ScrollView style={styles.page} contentContainerStyle={styles.content} keyboardShouldPersistTaps={keyboardShouldPersistTaps}>{children}</ScrollView>;
 }
 
 export function Panel({ children, emphasis = false }: PropsWithChildren<{ emphasis?: boolean }>) {

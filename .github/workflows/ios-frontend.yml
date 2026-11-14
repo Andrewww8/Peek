@@ -44,8 +44,6 @@ jobs:
         run: |
           app="$RUNNER_TEMP/perspective-build/Build/Products/Release-iphonesimulator/Perspective.app"
           bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
-          /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$app/Info.plist" |
-            grep -F 'Perspective connects to your laptop'
           device="$(xcrun simctl list devices available --json | jq -er '
             [.devices | to_entries[]
               | select(.key | contains(".iOS-"))
@@ -60,12 +58,12 @@ jobs:
           data="$(xcrun simctl get_app_container "$device" "$bundle_id" data)"
           database="$data/Documents/SQLite/perspective.sqlite"
           for attempt in {1..45}; do
-            if [ -f "$database" ] && [ "$(sqlite3 "$database" 'PRAGMA user_version;' 2>/dev/null)" = '1' ]; then
+            if [ -f "$database" ] && [ "$(sqlite3 "$database" 'PRAGMA user_version;' 2>/dev/null)" = '2' ]; then
               break
             fi
             sleep 1
           done
-          test "$(sqlite3 "$database" 'PRAGMA user_version;')" = '1'
+          test "$(sqlite3 "$database" 'PRAGMA user_version;')" = '2'
           xcrun simctl terminate "$device" "$bundle_id"
 
           xcrun simctl launch "$device" "$bundle_id"

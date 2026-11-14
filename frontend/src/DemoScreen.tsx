@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { apiUrl } from './api';
 import type { PracticeStore, SavedDemo } from './database';
 import { cachedDemo, downloadDemo, fetchDemoCatalog } from './demos';
 import type { CatalogDemo } from './demos';
@@ -8,11 +9,13 @@ import { demoFiles, openModel } from './device-storage';
 import { DRILL_NAME } from './practice';
 import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, ui } from './ui';
 
-const apiUrl = process.env.EXPO_PUBLIC_API_URL;
-
 type DownloadState = 'idle' | 'checking' | 'downloading' | 'opening';
 
-export function DemoScreen({ store, backLabel, onBack }: { store: PracticeStore; backLabel: string; onBack: () => void }) {
+export function DemoScreen({ store, backLabel, onBack }: {
+  store: PracticeStore;
+  backLabel: string;
+  onBack: () => void;
+}) {
   const [saved, setSaved] = useState<SavedDemo | null>(() => cachedDemo(store, demoFiles));
   const [available, setAvailable] = useState<CatalogDemo>();
   const [state, setState] = useState<DownloadState>('idle');
