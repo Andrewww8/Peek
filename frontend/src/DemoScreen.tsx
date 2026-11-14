@@ -1,0 +1,161 @@
+import { useEffect, useRef, useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+
+import type { PracticeStore, SavedDemo } from './database';
+import { cachedDemo, downloadDemo, fetchDemoCatalog } from './demos';
+import type { CatalogDemo } from './demos';
+import { demoFiles, openModel } from './device-storage';
+import { DRILL_NAME } from './practice';
+import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, ui } from './ui';
+
+const apiUrl = process.env.EXPO_PUBLIC_API_URL;
+
+type DownloadState = 'idle' | 'checking' | 'downloading' | 'opening';
+
+export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: () => void }) {
+  const [saved, setSaved] = useState<SavedDemo | null>(() => cachedDemo(store, demoFiles));
+  const [available, setAvailable] = useState<CatalogDemo>();
+  const [state, setState] = useState<DownloadState>('idle');
+  const [progress, setProgress] = useState(0);
+  const [notice, setNotice] = useState<string>();
+  const [info, setInfo] = useState<string>();
+  const active = useRef<AbortController | null>(null);
+  const opening = useRef(false);
+
+  useEffect(() => () => {
+    const operation = active.current;
+    active.current = null;
+    operation?.abort();
+  }, []);
+
+  async function checkCatalogOrDownload() {
+    if (active.current || opening.current) return;
+
+    const operation = new AbortController();
+    active.current = operation;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    setNotice(undefined);
+    setInfo(undefined);
+    setProgress(0);
+    setState('checking');
+
+    try {
+      timeout = setTimeout(() => operation.abort(), 12_000);
+      const catalog = await fetchDemoCatalog(apiUrl, operation.signal);
+      clearTimeout(timeout);
+      if (operation.signal.aborted) throw new Error('The demo request timed out. Try again.');
+      const offers = saved ? catalog.filter(({ id }) => id === saved.id) : catalog;
+      const latest = offers[0];
+      if (!latest && !saved) throw new Error('The server has no downloadable 3D example for this drill.');
+      if (saved && (!latest || latest.version <= saved.version)) {
+        setAvailable(undefined);
+        setInfo('Your saved demo is ready to open.');
+        return;
+      }
+      if (!latest) return;
+
+      if (saved && available?.version !== latest.version) {
+        setAvailable(latest);
+        return;
+      }
+
+      timeout = setTimeout(() => operation.abort(), 120_000);
+      setState('downloading');
+      const downloaded = await downloadDemo(latest, store, demoFiles, (next) => {
+        if (active.current === operation) setProgress(next);
+      }, operation.signal);
+      if (active.current === operation) {
+        setSaved(downloaded);
+        setAvailable(undefined);
+      }
+    } catch (error) {
+      if (active.current === operation) {
+        setNotice(message(error, 'The demo could not be downloaded. Try again.'));
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (active.current === operation) {
+        active.current = null;
+        setState('idle');
+      }
+    }
+  }
+
+  async function openSaved() {
+    if (!saved || opening.current || active.current) return;
+
+    const usable = cachedDemo(store, demoFiles);
+    setSaved(usable);
+    if (!usable) {
+      setNotice('The saved model is missing. Download it again to open it.');
+      return;
+    }
+    opening.current = true;
+    setState('opening');
+    setNotice(undefined);
+    try {
+      await openModel(usable.localPath);
+    } catch {
+      setNotice('Quick Look could not open this model. You can try again or redownload it.');
+    } finally {
+      opening.current = false;
+      setState('idle');
+    }
+  }
+
+  function redownload() {
+    setSaved(null);
+    setAvailable(undefined);
+    setNotice(undefined);
+    setInfo(undefined);
+  }
+
+  return (
+    <>
+      <ScreenHeader title="3D demo" onBack={onBack} backDisabled={state === 'opening'} />
+      <Page>
+        <View style={ui.group}>
+          <Text style={ui.heading} accessibilityRole="header">{DRILL_NAME}</Text>
+          <Text style={ui.body}>Download the example once to open it from this iPhone.</Text>
+        </View>
+        <Placeholder>
+          {state === 'downloading' ? (
+            <View style={styles.progressOuter}>
+              <Text style={ui.text}>Downloading · {Math.round(progress * 100)}%</Text>
+              <View
+                accessible
+                accessibilityRole="progressbar"
+                accessibilityLabel="Model download"
+                accessibilityValue={{ min: 0, max: 100, now: Math.round(progress * 100) }}
+                style={styles.track}
+              >
+                <View style={[styles.fill, { width: `${progress * 100}%` }]} />
+              </View>
+            </View>
+          ) : state === 'checking' || state === 'opening' ? (
+            <Loading text={state === 'checking' ? 'Checking for the model…' : 'Opening Quick Look…'} />
+          ) : (
+            <Text style={ui.text}>{saved ? 'Available offline' : 'Model download required'}</Text>
+          )}
+        </Placeholder>
+        {saved ? <Panel><Text style={ui.label}>DEMO CUE</Text><Text style={ui.text}>{saved.cue}</Text></Panel> : null}
+        {notice ? <Notice>{notice}</Notice> : null}
+        {info ? <Text style={ui.body}>{info}</Text> : null}
+        {saved ? <Button label="Open 3D model" onPress={openSaved} disabled={state !== 'idle'} /> : null}
+        <Button
+          label={available ? 'Download update' : saved ? 'Check for update' : notice ? 'Retry download' : 'Download 3D model'}
+          kind={saved ? 'secondary' : 'primary'}
+          onPress={checkCatalogOrDownload}
+          disabled={state !== 'idle'}
+        />
+        {notice && saved && state === 'idle' ? <Button label="Redownload model" kind="secondary" onPress={redownload} /> : null}
+      </Page>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  progressOuter: { width: '100%', gap: 12 },
+  track: { height: 6, backgroundColor: colors.border, borderRadius: 3, overflow: 'hidden' },
+  fill: { height: '100%', backgroundColor: colors.accent },
+});

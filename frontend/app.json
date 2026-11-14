@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Perspective",
+    "slug": "perspective",
+    "version": "0.1.0",
+    "scheme": "perspective",
+    "platforms": ["ios"],
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "bundleIdentifier": "com.andrewww8.perspective",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Perspective connects to your laptop to download the 3D shooting example.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "plugins": [
+      ["expo-camera", {
+        "cameraPermission": "Perspective uses the camera to record your basketball practice.",
+        "recordAudioAndroid": false,
+        "microphonePermission": false
+      }]
+    ]
+  }
+}

@@ -147,3 +147,18 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Expo local and generated native projects
+.expo/
+/frontend/ios/
+/frontend/android/
+
+# Local practice footage, databases, and 3D working assets
+*.mov
+*.mp4
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.blend
+*.blend1
