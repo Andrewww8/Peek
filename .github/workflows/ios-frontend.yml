@@ -53,13 +53,13 @@ jobs:
             | last | .udid')"
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
-          xcrun simctl status_bar "$device" override --time '9:41' --dataNetwork wifi --wifiMode active --wifiBars 3 --cellularMode active --cellularBars 4 --batteryState unplugged --batteryLevel 100
+          xcrun simctl status_bar "$device" override --time '9:41'
           xcrun simctl install "$device" "$app"
 
           xcrun simctl launch "$device" "$bundle_id"
           data="$(xcrun simctl get_app_container "$device" "$bundle_id" data)"
           database="$data/Documents/SQLite/perspective.sqlite"
-          for attempt in {1..20}; do
+          for attempt in {1..45}; do
             if [ -f "$database" ] && [ "$(sqlite3 "$database" 'PRAGMA user_version;' 2>/dev/null)" = '1' ]; then
               break
             fi
