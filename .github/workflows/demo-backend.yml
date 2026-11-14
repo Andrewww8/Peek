@@ -1,0 +1,42 @@
+name: Demo backend and integration
+
+on:
+  push:
+    branches:
+      - frontend/ios-demo-v5-*
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SIM_SEED: '42'
+      SIM_ITERATIONS: '150'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+        env:
+          FFMPEG_BIN: /usr/bin/ffmpeg
+      - run: npm --prefix mobile ci
+      - run: npm run master
+        env:
+          FFMPEG_PATH: /usr/bin/ffmpeg
+      - run: npm run test:integration
+        env:
+          FFMPEG_PATH: /usr/bin/ffmpeg
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-backend-report
+          path: reports/

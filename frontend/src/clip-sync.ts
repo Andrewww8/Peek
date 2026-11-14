@@ -15,10 +15,12 @@ function record(value: unknown): value is Record<string, unknown> {
 
 class CloudResponseError extends Error {
   readonly status: number;
+  readonly from: 'api' | 'upload';
 
-  constructor(status: number) {
-    super(`The clip service returned HTTP ${status}.`);
+  constructor(status: number, from: 'api' | 'upload' = 'api') {
+    super(from === 'api' ? `The clip service returned HTTP ${status}.` : `Blob upload returned HTTP ${status}.`);
     this.status = status;
+    this.from = from;
   }
 }
 
@@ -33,6 +35,15 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
 }) {
   const origin = apiOrigin(baseUrl);
   let refreshedToken: string | null = null;
+  let firstFailure: CloudResponseError | undefined;
+
+  function defer(error: unknown) {
+    // Keep working when a single item is rejected. Pause on connection
+    // failures and API-wide auth, rate-limit, or unavailability responses.
+    if (!(error instanceof CloudResponseError) ||
+        error.from === 'api' && [401, 403, 429, 503].includes(error.status)) throw error;
+    firstFailure ??= error;
+  }
 
   async function apiCall(method: 'POST' | 'PATCH', path: string, body: unknown, timeout: number) {
     const url = new URL(path, origin);
@@ -105,7 +116,7 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
         }
         if (signal.aborted) return;
         const status = await upload(destination.href, path, headers, AbortSignal.any([signal, AbortSignal.timeout(120_000)]));
-        if (status < 200 || status >= 300) throw new Error(`Blob upload returned HTTP ${status}.`);
+        if (status < 200 || status >= 300) throw new CloudResponseError(status, 'upload');
         if (signal.aborted) return;
         const result = await apiCall('POST', `/v1/recordings/${grant.uploadId}/clips`, {
           sessionId: session.id, shotType: session.shotType,
@@ -125,11 +136,12 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
           }
         }
       } catch (error) {
-        if (error instanceof CloudResponseError && [400, 413, 415, 422].includes(error.status)) {
+        if (signal.aborted) return;
+        if (error instanceof CloudResponseError && error.from === 'api' && [400, 413, 415, 422].includes(error.status)) {
           finish(batch, 'pending', 'unavailable');
           continue;
         }
-        throw error;
+        defer(error);
       }
     }
   }
@@ -141,8 +153,13 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
         { outcome: shot.outcome }, 12_000);
       finish([shot], 'dirty', 'saved');
     } catch (error) {
-      if (!(error instanceof CloudResponseError) || error.status !== 404) throw error;
-      finish([shot], 'dirty', 'unavailable');
+      if (signal.aborted) return;
+      if (error instanceof CloudResponseError && error.status === 404) {
+        finish([shot], 'dirty', 'unavailable');
+      } else {
+        defer(error);
+      }
     }
   }
+  if (firstFailure) throw firstFailure;
 }

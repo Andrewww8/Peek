@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Perspective",
+    "slug": "perspective",
+    "ios": {
+      "bundleIdentifier": "com.perspective.coach",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Perspective records your practice clips.",
+        "NSMicrophoneUsageDescription": "Perspective records audio with your practice clips.",
+        "NSLocalNetworkUsageDescription": "Perspective downloads 3D coaching demos from your laptop on the same Wi-Fi.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "plugins": [
+      ["expo-camera", { "recordAudioAndroid": false }],
+      "expo-sqlite"
+    ]
+  }
+}

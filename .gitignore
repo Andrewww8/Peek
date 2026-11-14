@@ -38,7 +38,7 @@ bower_components
 build/Release
 
 # Dependency directories
-node_modules/
+node_modules
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -152,6 +152,15 @@ vite.config.ts.timestamp-*
 .expo/
 /frontend/ios/
 /frontend/android/
+/mobile/ios/
+/mobile/android/
+
+# Backend test data and generated media
+/reports/
+/sim/.sandbox*/
+/server/media/*
+!/server/media/.gitkeep
+*.part
 
 # Local practice footage, databases, and 3D working assets
 *.mov
@@ -162,3 +171,4 @@ vite.config.ts.timestamp-*
 *.db-*
 *.blend
 *.blend1
+*.npz

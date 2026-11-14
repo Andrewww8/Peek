@@ -127,6 +127,49 @@ test('keeps offline work through restart and never queues guest recordings or an
   assert.equal(store.hasCloudWork(anotherUser), false);
 });
 
+test('a failed cut stays queued while a later recording and a synced shot edit finish', async (t) => {
+  const { store } = environment(t).open();
+  const first = newSession();
+  const next = { ...newSession(), createdAt: 2 };
+  const edited = { ...newSession(), createdAt: 3 };
+  for (const session of [first, next, edited]) {
+    store.saveSession(session, user);
+    store.addShot(session.id, 5_000, 'made', user);
+  }
+  const originalShot = store.cloudShots(user, 'pending', edited.id)[0]!;
+  store.finishCloudShot(user, originalShot, 'pending', 'saved');
+  store.updateShot(edited.id, 1, 'missed', user);
+
+  let failFirstCut = true;
+  const patches: string[] = [];
+  const fetchApi: typeof fetch = async (input, options) => {
+    const path = new URL(String(input)).pathname;
+    const body = JSON.parse(String(options?.body));
+    if (path === '/v1/recordings') return getGrant();
+    if (path === `/v1/recordings/${uploadId}/clips`) {
+      if (body.sessionId === first.id && failFirstCut) return new Response(null, { status: 500 });
+      return Response.json({ clips: [{ shotNumber: 1, startMs: 2000, endMs: 6000, sizeBytes: 50 }] });
+    }
+    assert.equal(path, `/v1/sessions/${edited.id}/shots/1`);
+    patches.push(body.outcome);
+    return new Response(null, { status: 204 });
+  };
+  const sync = () => syncCloudClips({
+    baseUrl, store, account: { id: user, accessToken: async () => 'valid' },
+    upload: async () => 200, hasRecording: () => true, signal: new AbortController().signal, fetchApi,
+  });
+
+  await assert.rejects(sync(), /HTTP 500/);
+  assert.deepEqual(store.pendingCloudSessions(user).map(({ id }) => id), [first.id]);
+  assert.deepEqual(patches, ['missed']);
+  assert.deepEqual(store.cloudShots(user, 'dirty'), []);
+
+  failFirstCut = false;
+  await sync();
+  assert.equal(store.hasCloudWork(user), false);
+  assert.deepEqual(patches, ['missed']);
+});
+
 test('aborted or insecure uploads leave the queue untouched and deleting a local video retains tagged stats', async (t) => {
   const { store } = environment(t).open();
   const session = newSession();

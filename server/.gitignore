@@ -1,0 +1,4 @@
+# Local stand-ins for Blob/Postgres (npm run server)
+.local/
+.vercel
+.env*
