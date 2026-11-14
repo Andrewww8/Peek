@@ -1,7 +1,7 @@
 import Slider from '@react-native-community/slider';
 import { useEvent } from 'expo';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -145,12 +145,20 @@ function ClipPlayer({ uri, durationMs, onTag, onRetry }: {
   const { status } = useEvent(player, 'statusChange', { status: player.status });
   const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
   const time = useEvent(player, 'timeUpdate');
+  const dragging = useRef(false);
   const [scrub, setScrub] = useState<number>();
   const [seekTarget, setSeekTarget] = useState<number>();
   const [slow, setSlow] = useState(false);
   const duration = player.duration || durationMs / 1000;
   const elapsed = Math.min(duration, scrub ?? seekTarget ?? time?.currentTime ?? player.currentTime);
   const ready = status === 'readyToPlay';
+
+  function seek(seconds: number) {
+    player.pause();
+    player.currentTime = seconds;
+    setSeekTarget(seconds);
+    setScrub(undefined);
+  }
 
   if (status === 'error') {
     return <Panel><Notice>The saved video could not be played.</Notice><Button label="Retry playback" kind="secondary" onPress={onRetry} /></Panel>;
@@ -164,20 +172,28 @@ function ClipPlayer({ uri, durationMs, onTag, onRetry }: {
       </View>
       <Slider
         accessibilityLabel="Video playhead"
+        accessibilityValue={{ text: `${clipTime(elapsed * 1000, true)} of ${clipTime(durationMs, true)}` }}
         disabled={!ready}
         minimumValue={0}
         maximumValue={duration}
         value={elapsed}
+        tapToSeek
         minimumTrackTintColor={colors.accent}
         maximumTrackTintColor={colors.border}
         thumbTintColor={colors.accent}
         style={styles.scrubber}
-        onSlidingStart={() => { player.pause(); setScrub(elapsed); }}
-        onValueChange={setScrub}
+        onSlidingStart={(seconds) => {
+          dragging.current = true;
+          player.pause();
+          setScrub(seconds);
+        }}
+        onValueChange={(seconds) => {
+          if (dragging.current) setScrub(seconds);
+          else seek(seconds);
+        }}
         onSlidingComplete={(seconds) => {
-          player.currentTime = seconds;
-          setSeekTarget(seconds);
-          setScrub(undefined);
+          dragging.current = false;
+          seek(seconds);
         }}
       />
       <View style={ui.row}><Text style={ui.time}>{clipTime(elapsed * 1000, true)}</Text><Text style={ui.time}>{clipTime(durationMs, true)}</Text></View>
