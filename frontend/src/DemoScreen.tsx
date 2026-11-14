@@ -12,13 +12,14 @@ const apiUrl = process.env.EXPO_PUBLIC_API_URL;
 
 type DownloadState = 'idle' | 'checking' | 'downloading' | 'opening';
 
-export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: () => void }) {
+export function DemoScreen({ store, backLabel, onBack }: { store: PracticeStore; backLabel: string; onBack: () => void }) {
   const [saved, setSaved] = useState<SavedDemo | null>(() => cachedDemo(store, demoFiles));
   const [available, setAvailable] = useState<CatalogDemo>();
   const [state, setState] = useState<DownloadState>('idle');
   const [progress, setProgress] = useState(0);
   const [notice, setNotice] = useState<string>();
   const [info, setInfo] = useState<string>();
+  const [previewFailed, setPreviewFailed] = useState(false);
   const active = useRef<AbortController | null>(null);
   const opening = useRef(false);
 
@@ -28,7 +29,7 @@ export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: ()
     operation?.abort();
   }, []);
 
-  async function checkCatalogOrDownload() {
+  async function checkCatalogOrDownload(replace = false) {
     if (active.current || opening.current) return;
 
     const operation = new AbortController();
@@ -46,15 +47,18 @@ export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: ()
       if (operation.signal.aborted) throw new Error('The demo request timed out. Try again.');
       const offers = saved ? catalog.filter(({ id }) => id === saved.id) : catalog;
       const latest = offers[0];
-      if (!latest && !saved) throw new Error('The server has no downloadable 3D example for this drill.');
-      if (saved && (!latest || latest.version <= saved.version)) {
+      if (!latest && (!saved || replace)) throw new Error('The server has no downloadable 3D example for this drill.');
+      if (saved && !replace && (!latest || latest.version <= saved.version)) {
         setAvailable(undefined);
         setInfo('Your saved demo is ready to open.');
         return;
       }
       if (!latest) return;
+      if (saved && replace && latest.version < saved.version) {
+        throw new Error('The server does not have this version. The downloaded model is still on this iPhone.');
+      }
 
-      if (saved && available?.version !== latest.version) {
+      if (saved && !replace && available?.version !== latest.version) {
         setAvailable(latest);
         return;
       }
@@ -67,6 +71,7 @@ export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: ()
       if (active.current === operation) {
         setSaved(downloaded);
         setAvailable(undefined);
+        setPreviewFailed(false);
       }
     } catch (error) {
       if (active.current === operation) {
@@ -93,30 +98,25 @@ export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: ()
     opening.current = true;
     setState('opening');
     setNotice(undefined);
+    setPreviewFailed(false);
     try {
       await openModel(usable.localPath);
     } catch {
       setNotice('Quick Look could not open this model. You can try again or redownload it.');
+      setPreviewFailed(true);
     } finally {
       opening.current = false;
       setState('idle');
     }
   }
 
-  function redownload() {
-    setSaved(null);
-    setAvailable(undefined);
-    setNotice(undefined);
-    setInfo(undefined);
-  }
-
   return (
     <>
-      <ScreenHeader title="3D demo" onBack={onBack} backDisabled={state === 'opening'} />
+      <ScreenHeader backLabel={backLabel} detail={saved ? 'OFFLINE READY' : undefined} onBack={onBack} backDisabled={state === 'opening'} />
       <Page>
-        <View style={ui.group}>
-          <Text style={ui.heading} accessibilityRole="header">{DRILL_NAME}</Text>
-          <Text style={ui.body}>Download the example once to open it from this iPhone.</Text>
+        <View>
+          <Text style={ui.heading} accessibilityRole="header">3D example</Text>
+          <Text style={ui.body}>{DRILL_NAME}</Text>
         </View>
         <Placeholder>
           {state === 'downloading' ? (
@@ -135,26 +135,33 @@ export function DemoScreen({ store, onBack }: { store: PracticeStore; onBack: ()
           ) : state === 'checking' || state === 'opening' ? (
             <Loading text={state === 'checking' ? 'Checking for the model…' : 'Opening Quick Look…'} />
           ) : (
-            <Text style={ui.text}>{saved ? 'Available offline' : 'Model download required'}</Text>
+            <View style={styles.mediaContent}>
+              <Text style={[ui.mono, styles.mediaLabel]}>ANIMATED MODEL</Text>
+              <Text style={ui.mono}>{saved ? 'Downloaded to this iPhone' : 'Model download required'}</Text>
+            </View>
           )}
         </Placeholder>
-        {saved ? <Panel><Text style={ui.label}>DEMO CUE</Text><Text style={ui.text}>{saved.cue}</Text></Panel> : null}
+        {saved ? <Panel emphasis><Text style={ui.label}>COACHING CUE</Text><Text style={ui.text}>{saved.cue}</Text></Panel> : null}
         {notice ? <Notice>{notice}</Notice> : null}
         {info ? <Text style={ui.body}>{info}</Text> : null}
-        {saved ? <Button label="Open 3D model" onPress={openSaved} disabled={state !== 'idle'} /> : null}
+        {saved ? <Button label="Open in Quick Look" arrow onPress={openSaved} disabled={state !== 'idle'} /> : null}
         <Button
           label={available ? 'Download update' : saved ? 'Check for update' : notice ? 'Retry download' : 'Download 3D model'}
           kind={saved ? 'secondary' : 'primary'}
-          onPress={checkCatalogOrDownload}
+          onPress={() => checkCatalogOrDownload()}
           disabled={state !== 'idle'}
         />
-        {notice && saved && state === 'idle' ? <Button label="Redownload model" kind="secondary" onPress={redownload} /> : null}
+        {previewFailed && saved && state === 'idle' ? (
+          <Button label="Redownload model" kind="secondary" onPress={() => checkCatalogOrDownload(true)} />
+        ) : null}
       </Page>
     </>
   );
 }
 
 const styles = StyleSheet.create({
+  mediaContent: { width: '100%', minHeight: 236, justifyContent: 'center', alignItems: 'center', paddingTop: 24 },
+  mediaLabel: { position: 'absolute', top: 0, left: 0, backgroundColor: colors.surface, paddingVertical: 6, paddingHorizontal: 8, borderRadius: 4 },
   progressOuter: { width: '100%', gap: 12 },
   track: { height: 6, backgroundColor: colors.border, borderRadius: 3, overflow: 'hidden' },
   fill: { height: '100%', backgroundColor: colors.accent },

@@ -3,7 +3,7 @@ import { randomUUID } from 'expo-crypto';
 import { isDevice } from 'expo-device';
 import { Paths } from 'expo-file-system';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Linking, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { PracticeStore } from './database';
 import { inspectRecording, recordingFiles } from './device-storage';
@@ -11,7 +11,7 @@ import { clipTime, DRILL_NAME, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES } from './
 import type { Session } from './practice';
 import { RECORDING_FREE_BYTES, saveRecording } from './recordings';
 import type { RecordingDraft } from './recordings';
-import { Button, colors, Loading, message, Notice, Page, Placeholder, ScreenHeader, ui } from './ui';
+import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, ui } from './ui';
 
 type Phase = 'idle' | 'recording' | 'stopping' | 'saving' | 'saveFailed';
 type PendingClip = { uri: string; id: string; createdAt: number; draft?: RecordingDraft };
@@ -129,11 +129,11 @@ export function RecordScreen({ store, onBack, onSaved }: {
 
   return (
     <>
-      <ScreenHeader title="Record" onBack={goBack} backDisabled={busy} />
+      <ScreenHeader backLabel="Practice" detail="720P" onBack={goBack} backDisabled={busy} />
       <Page>
-        <View style={ui.group}>
-          <Text style={ui.heading} accessibilityRole="header">{DRILL_NAME}</Text>
-          <Text style={ui.body}>Set your phone on your shooting side. Keep your full body and the ball in frame through release.</Text>
+        <View>
+          <Text style={ui.heading} accessibilityRole="header">Record practice</Text>
+          <Text style={ui.body}>{DRILL_NAME}</Text>
         </View>
         {canShowCamera ? (
           <View style={styles.preview}>
@@ -155,9 +155,10 @@ export function RecordScreen({ store, onBack, onSaved }: {
               onRecordingProgress={({ duration }) => setElapsed(duration)}
             />
             <View pointerEvents="none" style={styles.overlay}>
-              {phase === 'recording' || phase === 'stopping' ? (
+              <View style={styles.previewTop}>
+                <Text style={styles.cameraTag}>SHOOTING SIDE</Text>
                 <Text style={styles.timer}>{clipTime(elapsed * 1000)} / 0:30</Text>
-              ) : null}
+              </View>
             </View>
           </View>
         ) : (
@@ -168,6 +169,10 @@ export function RecordScreen({ store, onBack, onSaved }: {
             {isDevice && permission?.granted && cameraError ? <Text style={ui.text}>The camera could not start.</Text> : null}
           </Placeholder>
         )}
+        <Panel>
+          <Text style={ui.title}>Keep the phone still</Text>
+          <Text style={ui.body}>Set up on your shooting side. Keep your full body and the ball in frame through release.</Text>
+        </Panel>
         {notice ? <Notice>{notice}</Notice> : null}
         {phase === 'idle' && isDevice && permission && !permission.granted ? (
           <Button label={permission.canAskAgain ? 'Allow camera access' : 'Open Settings'} onPress={allowCamera} disabled={askingPermission} />
@@ -180,20 +185,49 @@ export function RecordScreen({ store, onBack, onSaved }: {
           }} />
         ) : null}
         {phase === 'idle' && canShowCamera ? (
-          <Button label={ready ? 'Start recording' : 'Starting camera…'} onPress={start} disabled={!ready} />
+          <Shutter label={ready ? 'Start recording' : 'Starting camera…'} onPress={start} disabled={!ready} />
         ) : null}
-        {phase === 'recording' ? <Button label="Stop and save" onPress={stop} disabled={elapsed === 0} /> : null}
+        {phase === 'recording' ? <Shutter label="Stop and save" onPress={stop} recording disabled={elapsed === 0} /> : null}
         {phase === 'stopping' ? <Loading text="Finishing recording…" /> : null}
         {phase === 'saving' ? <Loading text="Saving to this iPhone…" /> : null}
         {phase === 'saveFailed' ? <Button label="Retry save" onPress={savePending} /> : null}
-        {phase === 'idle' ? <Text style={ui.body}>720p · Up to 30 seconds · No audio</Text> : null}
+        {phase === 'idle' ? <Text style={styles.footnote}>30-second limit · Saves to this iPhone · Silent video</Text> : null}
       </Page>
     </>
   );
 }
 
+function Shutter({ label, onPress, disabled, recording = false }: {
+  label: string;
+  onPress: () => void;
+  disabled: boolean;
+  recording?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [styles.shutterButton, (disabled || pressed) && styles.disabled]}
+    >
+      <View style={styles.shutterRing}><View style={[styles.shutterFill, recording && styles.stopFill]} /></View>
+      <Text style={ui.title}>{label}</Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
-  preview: { aspectRatio: 4 / 3, borderRadius: 18, overflow: 'hidden', backgroundColor: colors.surface },
-  overlay: { ...StyleSheet.absoluteFill, alignItems: 'flex-start', padding: 12 },
-  timer: { color: colors.text, backgroundColor: '#821717', paddingVertical: 6, paddingHorizontal: 9, borderRadius: 6, fontVariant: ['tabular-nums'], fontWeight: '700' },
+  preview: { aspectRatio: 1.08, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.media },
+  overlay: { ...StyleSheet.absoluteFill, padding: 12 },
+  previewTop: { ...ui.row, alignItems: 'flex-start' },
+  cameraTag: { ...ui.mono, color: colors.text, backgroundColor: colors.surface, paddingVertical: 5, paddingHorizontal: 8, borderRadius: 5 },
+  timer: { ...ui.time, color: colors.text, backgroundColor: colors.media, paddingVertical: 5, paddingHorizontal: 8, borderRadius: 5 },
+  shutterButton: { alignItems: 'center', gap: 8, minHeight: 44, paddingVertical: 7 },
+  shutterRing: { width: 64, height: 64, borderRadius: 32, borderColor: colors.text, borderWidth: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
+  shutterFill: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#BA4435' },
+  stopFill: { width: 27, height: 27, borderRadius: 5 },
+  disabled: { opacity: 0.55 },
+  footnote: { ...ui.body, fontSize: 13, textAlign: 'center' },
 });

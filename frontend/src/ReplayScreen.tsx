@@ -10,16 +10,17 @@ import { localVideoUri, recordingFiles } from './device-storage';
 import { clipTime, DRILL_NAME, PRACTICE_TIP, sessionDate, shotStats } from './practice';
 import type { Session, Shot, ShotOutcome } from './practice';
 import { removeRecording } from './recordings';
-import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, ui } from './ui';
+import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, StatsGrid, Strip, ui } from './ui';
 
 type ShotEdit = { releaseMs: number; existing?: Shot };
 const outcomes: { value: ShotOutcome; label: string }[] = [
   { value: 'made', label: 'Made' }, { value: 'missed', label: 'Missed' }, { value: 'unmarked', label: 'Unmarked' },
 ];
 
-export function ReplayScreen({ initialSession, store, onBack, onViewDemo }: {
+export function ReplayScreen({ initialSession, store, backLabel, onBack, onViewDemo }: {
   initialSession: Session;
   store: PracticeStore;
+  backLabel: string;
   onBack: () => void;
   onViewDemo: () => void;
 }) {
@@ -68,27 +69,27 @@ export function ReplayScreen({ initialSession, store, onBack, onViewDemo }: {
 
   return (
     <>
-      <ScreenHeader title={video ? 'Replay' : 'Session stats'} onBack={onBack} />
+      <ScreenHeader backLabel={backLabel} detail="ON THIS IPHONE" onBack={onBack} />
       <Page>
-        <View style={ui.group}>
-          <Text style={ui.heading} accessibilityRole="header">{DRILL_NAME}</Text>
+        <View>
+          <Text style={ui.heading} accessibilityRole="header">{video ? 'Replay' : 'Session stats'}</Text>
+          <Text style={ui.body}>{DRILL_NAME}</Text>
           <Text style={ui.body}>{sessionDate(session.createdAt)}</Text>
         </View>
         {video ? (
-          <ReplayPlayer uri={video} durationMs={session.durationMs} onTag={(releaseMs) => editShot({ releaseMs })} />
+          <View style={ui.group}>
+            <Strip label="PRACTICE CLIP" detail={clipTime(session.durationMs)} />
+            <ReplayPlayer uri={video} durationMs={session.durationMs} onTag={(releaseMs) => editShot({ releaseMs })} />
+          </View>
         ) : <Placeholder><Text style={ui.text}>Video unavailable</Text></Placeholder>}
-        <Panel>
+        <Panel emphasis>
           <Text style={ui.label}>PRACTICE TIP</Text>
           <Text style={ui.text}>{PRACTICE_TIP}</Text>
-          <Button label="View 3D demo" kind="secondary" onPress={onViewDemo} />
         </Panel>
+        <Button label="View 3D example" kind="secondary" arrow onPress={onViewDemo} />
         <Panel>
           <Text style={ui.title} accessibilityRole="header">Shot stats</Text>
-          <View style={styles.stats}>
-            <Stat label="Made / attempts" value={`${stats.makes} / ${stats.attempts}`} />
-            <Stat label="Shot %" value={stats.percentage === null ? '—' : `${stats.percentage}%`} />
-            <Stat label="Unmarked" value={String(stats.unmarked)} />
-          </View>
+          <StatsGrid stats={stats} />
           {stats.attempts === 0 ? <Text style={ui.body}>No made or missed attempts tagged yet.</Text> : null}
           {shots.map((shot) => (
             <Pressable
@@ -124,10 +125,6 @@ export function ReplayScreen({ initialSession, store, onBack, onViewDemo }: {
       </Modal>
     </>
   );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return <View style={styles.stat}><Text style={styles.statNumber}>{value}</Text><Text style={ui.body}>{label}</Text></View>;
 }
 
 function ReplayPlayer({ uri, durationMs, onTag }: { uri: string; durationMs: number; onTag: (ms: number) => void }) {
@@ -211,13 +208,10 @@ function ClipPlayer({ uri, durationMs, onTag, onRetry }: {
 }
 
 const styles = StyleSheet.create({
-  player: { aspectRatio: 16 / 10, backgroundColor: '#050506', borderRadius: 16, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  player: { aspectRatio: 16 / 10, backgroundColor: colors.media, borderRadius: 12, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   scrubber: { height: 44, marginHorizontal: -4 },
   controls: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-  stats: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  stat: { flex: 1, minWidth: 76, gap: 2 },
-  statNumber: { color: colors.text, fontSize: 23, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  shotRow: { ...ui.row, minHeight: 54, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, paddingTop: 10 },
+  shotRow: { ...ui.row, minHeight: 54, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10 },
   dimmed: { opacity: 0.55 },
   modal: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#0009' },
   sheet: { padding: 20, paddingBottom: 24, gap: 10, backgroundColor: colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20 },
