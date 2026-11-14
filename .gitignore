@@ -147,3 +147,13 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Perspective
+reports/
+sim/.sandbox*/
+server/media/*
+!server/media/.gitkeep
+*.part
+.expo/
+ios/
+android/

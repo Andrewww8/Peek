@@ -1,0 +1,15 @@
+[
+  {
+    "id": "three-point-follow-through",
+    "version": 1,
+    "shotType": "three_point",
+    "cue": "Hold your finish until the ball reaches the rim.",
+    "assets": [
+      {
+        "format": "usdz",
+        "sizeBytes": 761,
+        "url": "/media/three-point-follow-through-v1.usdz"
+      }
+    ]
+  }
+]
