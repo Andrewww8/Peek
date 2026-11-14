@@ -105,8 +105,8 @@ export function createVercelBlobStore(opts: VercelBlobOptions = {}): BlobStore {
       return Readable.fromWeb(r.stream as import('node:stream/web').ReadableStream<Uint8Array>);
     },
 
-    async put(pathname, body, contentType) {
-      await sdk.put(pathname, body, { ...auth, access, contentType, allowOverwrite: true, addRandomSuffix: false });
+    async put(pathname, body, contentType, opts) {
+      await sdk.put(pathname, body, { ...auth, access, contentType, allowOverwrite: true, addRandomSuffix: false, ...(opts?.ttlDays ? { ttlDays: opts.ttlDays } : {}) });
     },
 
     async delete(pathname) {

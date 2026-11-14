@@ -84,6 +84,7 @@ export function createLocalBlobStore(root: string, signingKey: Buffer = randomBy
       return s?.isFile() ? createReadStream(file) : null;
     },
 
+    // The local store has no TTL sweeper; ttlDays is accepted and ignored.
     async put(pathname, body) {
       const file = fileOf(pathname);
       await mkdir(dirname(file), { recursive: true });

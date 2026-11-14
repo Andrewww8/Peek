@@ -16,7 +16,11 @@ export type BackendErrorCode =
   /** An authenticated API call answered with a body that does not match the contract. */
   | 'invalid_response'
   /** An unexpected local failure during clip sync; the work stays queued. */
-  | 'sync_failed';
+  | 'sync_failed'
+  /** 429 from the coach: the player's daily message cap is used up. */
+  | 'coach_daily_limit'
+  /** The caller aborted (AbortSignal). */
+  | 'cancelled';
 
 export class BackendError extends Error {
   constructor(

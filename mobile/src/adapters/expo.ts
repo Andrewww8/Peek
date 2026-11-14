@@ -7,12 +7,13 @@
 import 'react-native-url-polyfill/auto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, type Session, type SupabaseClient } from '@supabase/supabase-js';
+import { fetch as expoFetch } from 'expo/fetch';
 import * as Crypto from 'expo-crypto';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SQLite from 'expo-sqlite';
 import { AppState } from 'react-native';
 import { createPerspectiveBackend, type PerspectiveBackend } from '../core';
-import type { AuthPort, FileStore, Platform, SqlDatabase, SqlValue } from '../core/ports';
+import type { AuthPort, FileStore, Platform, SqlDatabase, SqlValue, StreamFetch } from '../core/ports';
 
 /**
  * Every SQL call goes through one JS FIFO. expo-sqlite 16 runs its async
@@ -183,11 +184,55 @@ const files: FileStore = {
   },
 };
 
+/**
+ * Streaming fetch on expo/fetch (SDK 54). Unlike React Native's global fetch
+ * (XHR-based, resolves only after the whole body), it resolves at the response
+ * headers, and on iOS its URLSession delegate forwards each received data
+ * chunk to the body's ReadableStream. Aborting the signal cancels the native
+ * request, which errors the stream.
+ */
+const stream: StreamFetch = async (url, init) => {
+  const res = await expoFetch(url, {
+    method: init?.method,
+    headers: init?.headers,
+    body: init?.body,
+    signal: init?.signal,
+  });
+  const headers: Record<string, string> = {};
+  res.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+  async function* chunks(): AsyncGenerator<string> {
+    const body = res.body;
+    if (!body) return;
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let finished = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          finished = true;
+          break;
+        }
+        const text = decoder.decode(value, { stream: true });
+        if (text) yield text;
+      }
+      const tail = decoder.decode();
+      if (tail) yield tail;
+    } finally {
+      if (!finished) await reader.cancel().catch(() => undefined);
+    }
+  }
+  return { status: res.status, headers, chunks: chunks() };
+};
+
 export async function createExpoPlatform(): Promise<Platform> {
   return {
     db: await openSql('perspective.db'),
     files,
     fetch: (url, init) => fetch(url, init),
+    stream,
     auth,
     newId: () => Crypto.randomUUID(),
     now: () => Date.now(),

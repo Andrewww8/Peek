@@ -14,7 +14,7 @@ import { join } from 'node:path';
 const ROOT = join(import.meta.dirname, '..');
 const REPORTS = join(ROOT, 'reports');
 const PORT = Number(process.env.SMOKE_PORT ?? 3911);
-const MIN_ITERATIONS = 100;
+const MIN_ITERATIONS = 130; // 60 scenarios: every 2-value branch runs at least once
 /** A hung child (e.g. a wedged sim) fails its step instead of hanging the master forever. */
 const STEP_TIMEOUT_MS = Number(process.env.MASTER_STEP_TIMEOUT_MS ?? 10 * 60_000);
 /** The master's own report path; never inherited from the shell. */
@@ -240,6 +240,19 @@ const ACCEPTANCE: [string, string[]][] = [
   ['Video removed before sync, or release past the end, makes the shot unavailable', ['clip_sync_video_removed', 'clip_sync_release_beyond_end']],
   ['A kill anywhere in a sync costs at most one repeated upload; no clip lost or duplicated', ['clip_sync_kill_sweep']],
   ['A sync never blocks recording, tagging, or replay', ['clip_sync_responsive']],
+  ['CV analysis keeps only extracted data (<64 KB/shot); mp4 + npz deleted; GET /v1/clips shows url null + metrics', ['cv_analysis_lifecycle']],
+  ['Only the CV token may call the analysis route; malformed npz → failed with media cleaned; unanalyzed past TTL → expired', ['cv_analysis_lifecycle']],
+  ['A crash before or after the analysis update recovers exactly on retry, with no orphans', ['cv_analysis_faults']],
+  ['Coach answers from session tools; streamed tokens equal the final text; history persists; reset clears it', ['coach_chat']],
+  ['Coach tools only ever read the caller\'s data', ['coach_isolation']],
+  ['Coach unavailable when signed out, not synced, offline, over the daily cap, or not configured; local stats still work', ['coach_availability']],
+  ['A stalled coach stream times out, cancel cancels, keep-alive pings carry slow tools', ['coach_stream_faults']],
+  ['Recording and tagging stay responsive while the coach streams', ['coach_responsive']],
+  ['Shots compare only with pro templates of their own shot type; the matching pro ranks first; phase deltas and spread deviations are correct', ['pro_comparison']],
+  ['Template reliability flags reach the coach (Kennard midrange low confidence; Doncic and SGA threes uncertain distance)', ['pro_comparison']],
+  ['The coach cites only numbers its tools returned', ['pro_comparison', 'pro_comparison_unavailable']],
+  ['Left-handed players are mirrored against right-handed pros and unmirrored against Kennard', ['pro_comparison_left_handed']],
+  ['Without templates or analyzed shots, pro tools report unavailable and the coach still answers from stats', ['pro_comparison_unavailable']],
 ];
 
 const acceptance = ACCEPTANCE.map(([item, scenarios]) => {

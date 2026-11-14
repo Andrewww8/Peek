@@ -31,9 +31,10 @@ export interface ClipShot {
 export interface CreatedClip {
   ok: true;
   shotNumber: number;
-  startMs: number;
-  endMs: number;
-  sizeBytes: number;
+  /** Null when the API no longer has the media (already analyzed and deleted). */
+  startMs: number | null;
+  endMs: number | null;
+  sizeBytes: number | null;
 }
 /** The API answered for this shot but cut no clip (e.g. release_beyond_duration). */
 export interface FailedClip {
@@ -43,6 +44,13 @@ export interface FailedClip {
   message: string;
 }
 export type ClipResult = CreatedClip | FailedClip;
+
+export interface CoachMessage {
+  id: string | null;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAt: string | null;
+}
 
 export interface DemoEntry {
   id: string;
@@ -137,7 +145,7 @@ export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike
    * within timeoutMs → timeout, no connection → unreachable.
    */
   async function authed(
-    method: 'POST' | 'PATCH' | 'DELETE',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     token: string,
     body: unknown,
@@ -166,7 +174,7 @@ export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike
       if (res.status === 401) throw new BackendError('unauthorized', `API refused the access token for ${method} ${path}`);
       if (res.status === 404) throw new BackendError('not_found', `${method} ${path}: not found`);
       if (!res.ok) throw new BackendError('http_error', `HTTP ${res.status} from ${method} ${path}`, res.status);
-      if (method !== 'POST') return null;
+      if (method !== 'POST' && method !== 'GET') return null;
       try {
         return await res.json();
       } catch {
@@ -204,24 +212,26 @@ export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike
     async createClips(
       token: string,
       uploadId: string,
-      req: { sessionId: string; shotType: string; shots: ClipShot[] },
+      /** shootingHand: the player's declared hand; omitted = keep the API's stored value. */
+      req: { sessionId: string; shotType: string; shots: ClipShot[]; shootingHand?: 'R' | 'L' },
     ): Promise<ClipResult[]> {
       const path = `/v1/recordings/${encodeURIComponent(uploadId)}/clips`;
       const b: any = await authed('POST', path, token, req, NETWORK.clipCutTimeoutMs);
       if (!Array.isArray(b?.clips)) throw invalid(`POST ${path}`);
-      const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
       return b.clips
         .filter((c: any) => Number.isInteger(c?.shotNumber))
         .map((c: any): ClipResult => {
-          // A clip only counts as cut with no error and the full clip fields;
-          // an error entry, or anything unrecognised, is a failure for that shot.
-          if (c.error === undefined && num(c.startMs) && num(c.endMs) && num(c.sizeBytes)) {
-            return { ok: true, shotNumber: c.shotNumber, startMs: c.startMs, endMs: c.endMs, sizeBytes: c.sizeBytes };
+          // An entry without an error counts as cut, even if its media fields are
+          // null: an analyzed shot's media is deleted on purpose (a retried POST
+          // can see that), and the phone never reads clip media or URLs.
+          if (c.error === undefined || c.error === null) {
+            return { ok: true, shotNumber: c.shotNumber, startMs: num(c.startMs), endMs: num(c.endMs), sizeBytes: num(c.sizeBytes) };
           }
           return {
             ok: false,
             shotNumber: c.shotNumber,
-            error: typeof c.error === 'string' && c.error ? c.error : 'malformed_clip',
+            error: typeof c.error === 'string' && c.error ? c.error : 'unknown_error',
             message: typeof c.message === 'string' ? c.message : '',
           };
         });
@@ -235,6 +245,27 @@ export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike
     /** DELETE /v1/sessions/:sessionId/shots/:shotNumber. Idempotent. */
     async deleteShotClip(token: string, sessionId: string, shotNumber: number): Promise<void> {
       await authed('DELETE', shotPath(sessionId, shotNumber), token, undefined, NETWORK.apiTimeoutMs);
+    },
+
+    /** GET /v1/sessions/:sessionId/coach/messages: user and assistant text only. */
+    async coachHistory(token: string, sessionId: string): Promise<CoachMessage[]> {
+      const path = `/v1/sessions/${encodeURIComponent(sessionId)}/coach/messages`;
+      const b: any = await authed('GET', path, token, undefined, NETWORK.apiTimeoutMs);
+      const list = Array.isArray(b) ? b : b?.messages;
+      if (!Array.isArray(list)) throw invalid(`GET ${path}`);
+      return list
+        .filter((m: any) => (m?.role === 'user' || m?.role === 'assistant') && typeof (m.text ?? m.content) === 'string')
+        .map((m: any) => ({
+          id: typeof m.id === 'string' ? m.id : null,
+          role: m.role,
+          text: m.text ?? m.content,
+          createdAt: typeof m.createdAt === 'string' ? m.createdAt : null,
+        }));
+    },
+
+    /** DELETE /v1/sessions/:sessionId/coach: start the conversation over. */
+    async coachReset(token: string, sessionId: string): Promise<void> {
+      await authed('DELETE', `/v1/sessions/${encodeURIComponent(sessionId)}/coach`, token, undefined, NETWORK.apiTimeoutMs);
     },
 
     /** DELETE /v1/sessions/:sessionId: every clip of the session. Idempotent. */

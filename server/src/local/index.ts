@@ -12,6 +12,9 @@ import { createFfmpegTrimmer } from '../ffmpeg.js';
 import { SUPABASE_AUDIENCE, createJwtVerifier } from '../jwt.js';
 import { createLocalBlobStore, type LocalBlobStore } from './blobStore.js';
 import { createLocalClipRepo } from './clipRepo.js';
+import { MemorySaver } from '@langchain/langgraph';
+import { COACH_DAILY_LIMIT, COACH_MODEL, COACH_RECURSION_LIMIT, type CoachDeps } from '../coach/deps.js';
+import { createLocalReferenceRepo, createLocalUsageRepo } from './coachRepos.js';
 
 export const LOCAL_ISSUER = 'perspective-local';
 
@@ -22,16 +25,53 @@ export interface LocalDepsOptions {
   trimmer?: Trimmer;
   /** Keep clip rows in memory only (default: persisted to <dir>/shot_clips.json). */
   inMemory?: boolean;
+  /** Bearer token for POST /v1/internal/analysis (default: LOCAL_CV_TOKEN). */
+  cvToken?: string;
+  /**
+   * The coach's model. Tests and the simulator pass a factory returning LangChain's fake
+   * tool-calling model (`fakeModel()` from @langchain/core/testing), so nothing calls the network.
+   * Omitted: the coach answers 503 not_configured.
+   */
+  coachModel?: CoachDeps['createModel'];
+  coachDailyLimit?: number;
+  coachRecursionLimit?: number;
+  coachKeepAliveMs?: number;
+  /** Fixed "today" for the daily cap (tests). */
+  today?: () => string;
 }
 
-export type LocalDeps = Deps & { blob: LocalBlobStore; clips: ReturnType<typeof createLocalClipRepo> };
+export const LOCAL_CV_TOKEN = 'perspective-local-cv-token';
+
+export type LocalDeps = Deps & {
+  blob: LocalBlobStore;
+  clips: ReturnType<typeof createLocalClipRepo>;
+  references: ReturnType<typeof createLocalReferenceRepo>;
+  usage: ReturnType<typeof createLocalUsageRepo>;
+};
 
 export function createLocalDeps(dir: string, opts: LocalDepsOptions): LocalDeps {
   mkdirSync(dir, { recursive: true });
   // Derived from the JWT secret so presigned URLs stay valid across a server restart.
   const blobKey = createHash('sha256').update(`local-blob:${opts.jwtSecret}`).digest();
   const blob = createLocalBlobStore(join(dir, 'blobs'), blobKey);
+  const references = createLocalReferenceRepo(opts.inMemory ? undefined : join(dir, 'reference.json'));
+  const usage = createLocalUsageRepo(opts.inMemory ? undefined : join(dir, 'coach_usage.json'));
+  const coach: CoachDeps | undefined = opts.coachModel && {
+    createModel: opts.coachModel,
+    modelName: COACH_MODEL,
+    checkpointer: new MemorySaver(),
+    usage,
+    references,
+    dailyLimit: opts.coachDailyLimit ?? COACH_DAILY_LIMIT,
+    recursionLimit: opts.coachRecursionLimit ?? COACH_RECURSION_LIMIT,
+    keepAliveMs: opts.coachKeepAliveMs,
+    today: opts.today,
+  };
   return {
+    references,
+    usage,
+    coach,
+    cvToken: opts.cvToken ?? LOCAL_CV_TOKEN,
     blob,
     clips: createLocalClipRepo(opts.inMemory ? undefined : join(dir, 'shot_clips.json')),
     auth: createJwtVerifier({ hsSecret: opts.jwtSecret, issuer: LOCAL_ISSUER }),

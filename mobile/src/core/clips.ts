@@ -2,6 +2,7 @@ import type { ApiClient } from './apiClient';
 import { NETWORK } from './config';
 import { BackendError, type BackendErrorCode } from './errors';
 import { extensionOf, toDocumentUri } from './paths';
+import { readShootingHand } from './player';
 import type { Platform } from './ports';
 import type { ClipState } from './shots';
 
@@ -18,6 +19,12 @@ export interface ClipSyncReport {
   pending: number;
   /** Pending shots set to local_only because nobody was signed in. */
   skippedSignedOut: number;
+  /**
+   * Sessions with synced shots whose API copy has not received the current
+   * shooting hand yet. Their next clips POST carries it; a session with no
+   * pending shots waits for that (see ClipSync).
+   */
+  handPending: number;
   /** Codes of the failures met; the affected work stays queued for the next run. */
   errors: BackendErrorCode[];
 }
@@ -83,6 +90,7 @@ export class ClipSync {
       unavailable: 0,
       pending: 0,
       skippedSignedOut: 0,
+      handPending: 0,
       errors: [],
     };
     try {
@@ -95,6 +103,16 @@ export class ClipSync {
         `SELECT COUNT(*) AS n FROM shots WHERE clip_state IN ('pending', 'cutting')`,
       );
       report.pending = Number(r?.n ?? 0);
+      const hand = await readShootingHand(this.p);
+      if (hand !== null) {
+        const h = await this.p.db.first<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM sessions
+            WHERE (shooting_hand_sent IS NULL OR shooting_hand_sent <> ?)
+              AND id IN (SELECT session_id FROM shots WHERE clip_state IN ('synced', 'outcome_dirty'))`,
+          [hand],
+        );
+        report.handPending = Number(h?.n ?? 0);
+      }
     } catch (err) {
       report.errors.push(codeOfSync(err));
     }
@@ -254,7 +272,16 @@ export class ClipSync {
     );
     if (shots.length === 0) return;
     const sent = shots.map((r) => ({ shotNumber: Number(r.shot_number), releaseMs: Number(r.release_ms), outcome: r.outcome }));
-    const clips = await this.api.createClips(token, upload.uploadId, { sessionId: s.id, shotType: s.shot_type, shots: sent });
+    // Read the hand just before the POST; record afterwards exactly what was sent,
+    // so a change made meanwhile still counts as not delivered.
+    const hand = await readShootingHand(this.p);
+    const clips = await this.api.createClips(token, upload.uploadId, {
+      sessionId: s.id,
+      shotType: s.shot_type,
+      shots: sent,
+      ...(hand ? { shootingHand: hand } : {}),
+    });
+    if (hand) await db.run('UPDATE sessions SET shooting_hand_sent = ? WHERE id = ?', [hand, s.id]);
     // Ok only when every entry for the shot is a cut clip; an error entry wins.
     const cut = new Set(clips.filter((c) => c.ok).map((c) => c.shotNumber));
     for (const c of clips) if (!c.ok) cut.delete(c.shotNumber);

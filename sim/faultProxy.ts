@@ -28,12 +28,20 @@ export type FaultMode =
   | { kind: 'absolute_http_catalog' }
   /** Holds every request whose "METHOD /path" matches, before forwarding it, until `until` settles. Others pass. */
   | { kind: 'stall_requests'; match: RegExp; until: Promise<unknown> }
+  /** For a matching "METHOD /path": send the headers and the first `afterBytes` of the body, then hold the rest until `until` settles. */
+  | { kind: 'stall_response'; match: RegExp; afterBytes: number; until: Promise<unknown> }
   | { kind: 'http500' }
   | { kind: 'garbage_catalog' };
 
 export interface FaultProxy {
   url: string;
   mode: FaultMode;
+  /**
+   * Re-chunk text/event-stream bodies into 1-7 byte writes with an event-loop
+   * turn between them (on by default), so SSE events reach the phone split at
+   * arbitrary points, as on a real mobile network.
+   */
+  splitSse: boolean;
   counters: {
     requests: number;
     mediaRequests: number;
@@ -52,10 +60,12 @@ export async function startFaultProxy(upstreamPort: number): Promise<FaultProxy>
   const proxy: FaultProxy = {
     url: '',
     mode: { kind: 'pass' },
+    splitSse: true,
     counters: { requests: 0, mediaRequests: 0, dropped: 0, uploads: 0, clipCuts: 0, cloudCalls: 0 },
     close: async () => undefined,
   };
 
+  let seed = 12345;
   const server: Server = createServer((req, res) => {
     proxy.counters.requests++;
     const isMedia = req.url?.startsWith('/media/') ?? false;
@@ -141,6 +151,70 @@ export async function startFaultProxy(upstreamPort: number): Promise<FaultProxy>
                 if (!res.destroyed) res.end();
               };
               pump();
+            });
+            return;
+          }
+
+          const isSse = String(upRes.headers['content-type'] ?? '').startsWith('text/event-stream');
+          if (mode.kind === 'stall_response' && mode.match.test(`${req.method} ${url}`)) {
+            res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+            res.flushHeaders();
+            let sent = 0;
+            let released = false;
+            let ended = false;
+            const held: Buffer[] = [];
+            const write = (c: Buffer) => !res.destroyed && c.length > 0 && res.write(c);
+            upRes.on('data', (chunk: Buffer) => {
+              if (released) return void write(chunk);
+              const head = chunk.subarray(0, Math.max(0, mode.afterBytes - sent));
+              write(head);
+              sent += head.length;
+              if (head.length < chunk.length) held.push(chunk.subarray(head.length));
+            });
+            upRes.on('end', () => {
+              ended = true;
+              if (released && !res.destroyed) res.end();
+            });
+            void Promise.resolve(mode.until)
+              .catch(() => undefined)
+              .then(() => {
+                released = true;
+                for (const c of held.splice(0)) write(c);
+                if (ended && !res.destroyed) res.end();
+              });
+            return;
+          }
+          if (isSse && proxy.splitSse) {
+            res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+            res.flushHeaders();
+            const queue: Buffer[] = [];
+            let ended = false;
+            let pumping = false;
+            const pump = () => {
+              if (res.destroyed) return;
+              const c = queue[0];
+              if (!c) {
+                pumping = false;
+                if (ended) res.end();
+                return;
+              }
+              seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+              const n = 1 + (seed % 7);
+              res.write(c.subarray(0, n));
+              if (n >= c.length) queue.shift();
+              else queue[0] = c.subarray(n);
+              setImmediate(pump);
+            };
+            upRes.on('data', (chunk: Buffer) => {
+              queue.push(chunk);
+              if (!pumping) {
+                pumping = true;
+                setImmediate(pump);
+              }
+            });
+            upRes.on('end', () => {
+              ended = true;
+              if (!pumping && !res.destroyed) res.end();
             });
             return;
           }

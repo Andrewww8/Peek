@@ -4,7 +4,7 @@
  * every query here filters on user_id itself.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { ClipRepo, ClipRow, Outcome } from '../deps.js';
+import type { AnalysisStatus, ClipRepo, ClipRow, Outcome } from '../deps.js';
 
 const TABLE = 'shot_clips';
 
@@ -15,12 +15,14 @@ interface DbRow {
   shot_type: string;
   release_ms: number;
   outcome: Outcome;
-  clip_pathname: string;
+  clip_pathname: string | null;
   start_ms: number;
   end_ms: number;
   size_bytes: number;
-  analysis_status: string;
+  analysis_status: AnalysisStatus;
   analysis: unknown;
+  media_deleted_at: string | null;
+  shooting_hand: 'right' | 'left' | null;
   created_at: string;
   updated_at: string;
 }
@@ -38,6 +40,8 @@ const fromDb = (r: DbRow): ClipRow => ({
   sizeBytes: Number(r.size_bytes),
   analysisStatus: r.analysis_status,
   analysis: r.analysis,
+  mediaDeletedAt: r.media_deleted_at ?? null,
+  shootingHand: r.shooting_hand ?? null,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 });
@@ -73,6 +77,9 @@ export function createSupabaseClipRepo(db: SupabaseClient): ClipRepo {
             // A fresh cut invalidates any earlier analysis of this shot.
             analysis_status: 'pending',
             analysis: null,
+            media_deleted_at: null,
+            // Only sent when declared, so an upsert never clears a hand set earlier.
+            ...(c.shootingHand ? { shooting_hand: c.shootingHand } : {}),
           },
           { onConflict: 'user_id,session_id,shot_number' },
         ),
@@ -98,6 +105,42 @@ export function createSupabaseClipRepo(db: SupabaseClient): ClipRepo {
 
     async deleteSession(userId, sessionId) {
       check(await db.from(TABLE).delete().eq('user_id', userId).eq('session_id', sessionId));
+    },
+
+    async get(userId, sessionId, shotNumber) {
+      const rows = check(await db.from(TABLE).select('*').eq('user_id', userId).eq('session_id', sessionId).eq('shot_number', shotNumber).limit(1));
+      const r = ((rows ?? []) as DbRow[])[0];
+      return r ? fromDb(r) : null;
+    },
+
+    async setAnalysis(userId, sessionId, shotNumber, status, analysis) {
+      // One UPDATE writes both columns, so a reader never sees 'complete' without the analysis.
+      const rows = check(
+        await db
+          .from(TABLE)
+          .update({ analysis_status: status, analysis })
+          .eq('user_id', userId)
+          .eq('session_id', sessionId)
+          .eq('shot_number', shotNumber)
+          .select('shot_number'),
+      );
+      return (rows ?? []).length > 0;
+    },
+
+    async setShootingHand(userId, sessionId, hand) {
+      check(await db.from(TABLE).update({ shooting_hand: hand }).eq('user_id', userId).eq('session_id', sessionId));
+    },
+
+    async markMediaDeleted(userId, sessionId, shotNumber) {
+      check(
+        await db
+          .from(TABLE)
+          .update({ clip_pathname: null, media_deleted_at: new Date().toISOString() })
+          .eq('user_id', userId)
+          .eq('session_id', sessionId)
+          .eq('shot_number', shotNumber)
+          .is('media_deleted_at', null),
+      );
     },
 
     async list(userId, sessionId) {

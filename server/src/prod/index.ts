@@ -4,6 +4,8 @@ import { createFfmpegTrimmer, ffmpegPath } from '../ffmpeg.js';
 import { createSupabaseVerifier } from '../jwt.js';
 import { createSupabaseClient, createSupabaseClipRepo } from './supabaseRepo.js';
 import { createVercelBlobStore } from './vercelBlob.js';
+import { createProductionCoach, createSupabaseReferenceRepo, missingCoachEnv } from './coach.js';
+import type { ReferenceRepo } from '../coach/deps.js';
 
 /** Names of the variables production needs that are missing from `env`. */
 export function missingProductionEnv(env: NodeJS.ProcessEnv): string[] {
@@ -15,13 +17,19 @@ export function missingProductionEnv(env: NodeJS.ProcessEnv): string[] {
   return missing;
 }
 
-export function createProductionDeps(env: NodeJS.ProcessEnv): Deps {
+export function createProductionDeps(env: NodeJS.ProcessEnv): Deps & { references: ReferenceRepo } {
   const missing = missingProductionEnv(env);
   if (missing.length) throw new Error(`missing environment variables: ${missing.join(', ')}`);
+  const db = createSupabaseClient(env.SUPABASE_URL!, env.SUPABASE_SERVICE_ROLE_KEY!);
+  const references = createSupabaseReferenceRepo(db);
   return {
     blob: createVercelBlobStore({ token: env.BLOB_READ_WRITE_TOKEN || undefined }),
-    clips: createSupabaseClipRepo(createSupabaseClient(env.SUPABASE_URL!, env.SUPABASE_SERVICE_ROLE_KEY!)),
+    clips: createSupabaseClipRepo(db),
     auth: createSupabaseVerifier(env.SUPABASE_URL!, env.SUPABASE_JWT_SECRET),
     trimmer: createFfmpegTrimmer(ffmpegPath(env)),
+    references,
+    // Optional: without them only the CV ingest route / the coach answer 503 not_configured; /health stays ok.
+    cvToken: env.CV_SERVICE_TOKEN || undefined,
+    coach: missingCoachEnv(env).length ? undefined : createProductionCoach(env, db, references),
   };
 }

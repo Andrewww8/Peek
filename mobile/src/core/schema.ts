@@ -85,6 +85,16 @@ const MIGRATIONS: string[] = [
     INSERT OR IGNORE INTO clip_deletes (session_id, shot_number) VALUES (OLD.id, 0);
   END;
   `,
+  // v4: player settings, and per session the shooting hand the API last
+  // received in a clips POST (NULL: never sent). A session needs the hand
+  // again when it has synced shots and this differs from the setting.
+  `
+  CREATE TABLE settings (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT
+  );
+  ALTER TABLE sessions ADD COLUMN shooting_hand_sent TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

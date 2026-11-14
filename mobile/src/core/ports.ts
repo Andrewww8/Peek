@@ -92,6 +92,21 @@ export interface FetchInit {
 }
 export type FetchLike = (url: string, init?: FetchInit) => Promise<FetchResponseLike>;
 
+/**
+ * A streamed HTTP response. Resolves once the status and headers are in; the
+ * body then arrives through `chunks` as UTF-8 text, in order, split anywhere
+ * (even inside a multi-byte character's text or an SSE event, so consumers
+ * reassemble). Iterating ends when the body ends, and throws when the
+ * connection fails or `init.signal` aborts. Leaving the loop early cancels the body.
+ */
+export interface StreamResponse {
+  status: number;
+  /** Lower-cased header names. */
+  headers: Record<string, string>;
+  chunks: AsyncIterable<string>;
+}
+export type StreamFetch = (url: string, init?: FetchInit) => Promise<StreamResponse>;
+
 export interface AuthPort {
   /**
    * The signed-in player's access token, or null when signed out. A stale
@@ -105,6 +120,8 @@ export interface Platform {
   db: SqlDatabase;
   files: FileStore;
   fetch: FetchLike;
+  /** Streaming fetch for Server-Sent Events (the AI coach). */
+  stream: StreamFetch;
   auth: AuthPort;
   newId(): string;
   now(): number;
