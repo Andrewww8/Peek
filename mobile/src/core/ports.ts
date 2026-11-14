@@ -66,6 +66,16 @@ export interface FileStore {
     destUri: string,
     opts: { timeoutMs: number; maxBytes?: number; onProgress?: (bytesWritten: number) => void },
   ): Promise<{ status: number }>;
+  /**
+   * Streams the file at fileUri as the raw request body (expo: uploadAsync
+   * with BINARY_CONTENT). Resolves with the HTTP status; rejects on network
+   * failure or after timeoutMs.
+   */
+  upload(
+    url: string,
+    fileUri: string,
+    opts: { method: 'PUT'; headers: Record<string, string>; timeoutMs: number },
+  ): Promise<{ status: number }>;
 }
 
 export interface FetchResponseLike {
@@ -73,12 +83,29 @@ export interface FetchResponseLike {
   status: number;
   json(): Promise<unknown>;
 }
-export type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<FetchResponseLike>;
+export interface FetchInit {
+  method?: string;
+  headers?: Record<string, string>;
+  /** JSON text. */
+  body?: string;
+  signal?: AbortSignal;
+}
+export type FetchLike = (url: string, init?: FetchInit) => Promise<FetchResponseLike>;
+
+export interface AuthPort {
+  /**
+   * The signed-in player's access token, or null when signed out. A stale
+   * token is fine: the API answers 401 and the work stays queued. Must not
+   * hang: an adapter that refreshes over the network bounds that wait.
+   */
+  getAccessToken(): Promise<string | null>;
+}
 
 export interface Platform {
   db: SqlDatabase;
   files: FileStore;
   fetch: FetchLike;
+  auth: AuthPort;
   newId(): string;
   now(): number;
 }

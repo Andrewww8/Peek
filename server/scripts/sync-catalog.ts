@@ -6,7 +6,7 @@
  */
 import { readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { mediaFileName, validateCatalog } from '../src/catalog';
+import { mediaFileName, validateCatalog } from '../src/catalog.js';
 
 export interface SyncResult {
   /** One line per asset whose sizeBytes was updated. */

@@ -4,8 +4,8 @@ import { chmod, mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { buildApp, closeWithin } from './app';
-import { placeholderUsdz } from '../scripts/make-placeholder-usdz';
+import { buildApp, closeWithin } from './app.js';
+import { placeholderUsdz } from '../scripts/make-placeholder-usdz.js';
 
 const FILE = 'three-point-follow-through-v1.usdz';
 const SECRET_OUTSIDE = 'SECRET-OUTSIDE-MEDIA';

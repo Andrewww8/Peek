@@ -4,9 +4,9 @@ import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32 } from 'node:zlib';
-import { buildUsdz, placeholderUsdz } from './make-placeholder-usdz';
-import { syncCatalog } from './sync-catalog';
-import { CatalogError } from '../src/catalog';
+import { buildUsdz, placeholderUsdz } from './make-placeholder-usdz.js';
+import { syncCatalog } from './sync-catalog.js';
+import { CatalogError } from '../src/catalog.js';
 
 interface ZipEntry {
   name: string;

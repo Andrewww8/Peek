@@ -9,13 +9,21 @@ export type BackendErrorCode =
   | 'invalid_catalog'
   | 'size_mismatch'
   | 'download_failed'
-  /** The build has no laptop URL (EXPO_PUBLIC_API_URL); only the 3D demo download is affected. */
-  | 'not_configured';
+  /** The build has no API URL (EXPO_PUBLIC_API_URL): demo downloads and clip sync are off. */
+  | 'not_configured'
+  /** The API refused the access token (401): signed out, expired or invalid. */
+  | 'unauthorized'
+  /** An authenticated API call answered with a body that does not match the contract. */
+  | 'invalid_response'
+  /** An unexpected local failure during clip sync; the work stays queued. */
+  | 'sync_failed';
 
 export class BackendError extends Error {
   constructor(
     readonly code: BackendErrorCode,
     message: string,
+    /** HTTP status, for http_error. */
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'BackendError';

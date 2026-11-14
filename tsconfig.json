@@ -12,5 +12,5 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["server/src", "server/scripts", "mobile/src/core", "sim", "scripts"]
+  "include": ["server/src", "server/scripts", "server/api", "mobile/src/core", "sim", "scripts"]
 }

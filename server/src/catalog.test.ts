@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CatalogError, checkCatalogAssets, createCatalogReader, mediaFileName, validateCatalog } from './catalog';
+import { CatalogError, checkCatalogAssets, createCatalogReader, mediaFileName, validateCatalog } from './catalog.js';
 
 const entry = (over: Record<string, unknown> = {}) => ({
   id: 'three-point-follow-through',

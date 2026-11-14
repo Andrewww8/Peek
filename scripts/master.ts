@@ -156,7 +156,7 @@ await step(`Smoke-test the real server process on :${PORT}`, async () => {
     const demos = (await (await fetch(`${base}/v1/demos?shotType=three_point`)).json()) as any[];
     if (!Array.isArray(demos) || demos.length !== 1) throw new Error(`unexpected catalog ${JSON.stringify(demos)}`);
     const asset = demos[0].assets[0];
-    const res = await fetch(base + asset.url);
+    const res = await fetch(/^https:\/\//.test(asset.url) ? asset.url : base + asset.url);
     const body = Buffer.from(await res.arrayBuffer());
     if (res.status !== 200 || body.length !== asset.sizeBytes) {
       throw new Error(`media ${res.status}, ${body.length} bytes vs catalog ${asset.sizeBytes}`);
@@ -232,6 +232,14 @@ const ACCEPTANCE: [string, string[]][] = [
   ['Overlapping opens of different versions: each gets an existing model, one kept, no downgrade', ['overlapping_versions']],
   ['A double-tapped Save stores one session; the other gets recording_missing', ['double_save_recording']],
   ['A stalled catalog body times out and later opens still work', ['stalled_catalog_body']],
+  ['Signed-in tagging syncs one clip per shot (3 s before to 1 s after release, frame-accurate); the full recording leaves Blob', ['clip_sync_windows', 'clip_sync_concurrent']],
+  ['Signed out: nothing is uploaded or queued, even after a later sign-in', ['clip_sync_signed_out']],
+  ['Offline, expired token, or server error leaves shots pending; the next sync succeeds', ['clip_sync_retry']],
+  ['Outcome edit → PATCH; deleting a shot or session → remote DELETE', ['clip_sync_edits']],
+  ['A player only ever sees or changes their own clips', ['clip_sync_isolation']],
+  ['Video removed before sync, or release past the end, makes the shot unavailable', ['clip_sync_video_removed', 'clip_sync_release_beyond_end']],
+  ['A kill anywhere in a sync costs at most one repeated upload; no clip lost or duplicated', ['clip_sync_kill_sweep']],
+  ['A sync never blocks recording, tagging, or replay', ['clip_sync_responsive']],
 ];
 
 const acceptance = ACCEPTANCE.map(([item, scenarios]) => {

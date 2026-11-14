@@ -8,6 +8,42 @@ export interface DemoAsset {
   sizeBytes: number;
   url: string;
 }
+export interface RecordingUploadRequest {
+  sessionId: string;
+  ext: string;
+  contentType: string;
+  sizeBytes: number;
+  /** Null when unknown (a clip recovered after a kill mid-save). */
+  durationMs: number | null;
+}
+export interface RecordingUpload {
+  uploadId: string;
+  uploadUrl: string;
+  method: 'PUT';
+  headers: Record<string, string>;
+  expiresAt: string;
+}
+export interface ClipShot {
+  shotNumber: number;
+  releaseMs: number;
+  outcome: string;
+}
+export interface CreatedClip {
+  ok: true;
+  shotNumber: number;
+  startMs: number;
+  endMs: number;
+  sizeBytes: number;
+}
+/** The API answered for this shot but cut no clip (e.g. release_beyond_duration). */
+export interface FailedClip {
+  ok: false;
+  shotNumber: number;
+  error: string;
+  message: string;
+}
+export type ClipResult = CreatedClip | FailedClip;
+
 export interface DemoEntry {
   id: string;
   version: number;
@@ -60,13 +96,13 @@ function parseEntry(e: any): DemoEntry | null {
 const notConfigured = () =>
   new BackendError(
     'not_configured',
-    'This build has no laptop URL. Set EXPO_PUBLIC_API_URL (for example http://192.168.1.20:3001) and rebuild. Recording, replay and stats work without it.',
+    'This build has no API URL. Set EXPO_PUBLIC_API_URL (the HTTPS URL of the Vercel deployment) and rebuild. Recording, replay and stats work without it.',
   );
 
 /**
- * baseUrl null (or blank) means the build was made without a laptop URL:
+ * baseUrl null (or blank) means the build was made without an API URL:
  * every network call fails at once with not_configured, so the 3D viewer can
- * say so instead of looking like "laptop off". Nothing else uses the network.
+ * say so instead of looking like "API down", and clip sync skips its work.
  */
 export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike; timeoutMs?: number }) {
   const base = opts.baseUrl?.trim().replace(/\/+$/, '') || null;
@@ -76,13 +112,13 @@ export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike
     if (!base) throw notConfigured();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const timeout = () => new BackendError('timeout', `Laptop did not answer within ${timeoutMs} ms`);
+    const timeout = () => new BackendError('timeout', `API did not answer within ${timeoutMs} ms`);
     try {
       let res;
       try {
         res = await opts.fetch(base + path, { signal: ctrl.signal });
       } catch {
-        throw ctrl.signal.aborted ? timeout() : new BackendError('unreachable', `Cannot reach laptop at ${base}`);
+        throw ctrl.signal.aborted ? timeout() : new BackendError('unreachable', `Cannot reach the API at ${base}`);
       }
       if (!res.ok) throw new BackendError('http_error', `HTTP ${res.status} from ${path}`);
       try {
@@ -95,8 +131,117 @@ export function createApiClient(opts: { baseUrl: string | null; fetch: FetchLike
     }
   }
 
+  /**
+   * Authenticated JSON call. The bearer token goes with each request. 401 →
+   * unauthorized, 404 → not_found, other non-2xx → http_error, no answer
+   * within timeoutMs → timeout, no connection → unreachable.
+   */
+  async function authed(
+    method: 'POST' | 'PATCH' | 'DELETE',
+    path: string,
+    token: string,
+    body: unknown,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    if (!base) throw notConfigured();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const timeout = () => new BackendError('timeout', `API did not answer ${method} ${path} within ${timeoutMs} ms`);
+    try {
+      let res;
+      try {
+        res = await opts.fetch(base + path, {
+          method,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: ctrl.signal,
+        });
+      } catch {
+        throw ctrl.signal.aborted ? timeout() : new BackendError('unreachable', `Cannot reach the API at ${base}`);
+      }
+      if (res.status === 401) throw new BackendError('unauthorized', `API refused the access token for ${method} ${path}`);
+      if (res.status === 404) throw new BackendError('not_found', `${method} ${path}: not found`);
+      if (!res.ok) throw new BackendError('http_error', `HTTP ${res.status} from ${method} ${path}`, res.status);
+      if (method !== 'POST') return null;
+      try {
+        return await res.json();
+      } catch {
+        throw ctrl.signal.aborted ? timeout() : new BackendError('invalid_response', `Malformed JSON from ${method} ${path}`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const invalid = (what: string) => new BackendError('invalid_response', `Unexpected ${what} response`);
+  const shotPath = (sessionId: string, shotNumber: number) =>
+    `/v1/sessions/${encodeURIComponent(sessionId)}/shots/${encodeURIComponent(String(shotNumber))}`;
+
   return {
     baseUrl: base,
+
+    /** POST /v1/recordings: a short-lived URL to PUT one session's recording to. */
+    async createRecordingUpload(token: string, req: RecordingUploadRequest): Promise<RecordingUpload> {
+      const b: any = await authed('POST', '/v1/recordings', token, req, NETWORK.apiTimeoutMs);
+      const headers = b?.headers ?? {};
+      const ok =
+        typeof b?.uploadId === 'string' &&
+        b.uploadId.length > 0 &&
+        typeof b.uploadUrl === 'string' &&
+        /^https?:\/\//i.test(b.uploadUrl) &&
+        b.method === 'PUT' &&
+        typeof headers === 'object' &&
+        Object.values(headers).every((v) => typeof v === 'string');
+      if (!ok) throw invalid('POST /v1/recordings');
+      return { uploadId: b.uploadId, uploadUrl: b.uploadUrl, method: 'PUT', headers, expiresAt: String(b.expiresAt ?? '') };
+    },
+
+    /** POST /v1/recordings/:uploadId/clips: cut one clip per shot. Idempotent per shot. */
+    async createClips(
+      token: string,
+      uploadId: string,
+      req: { sessionId: string; shotType: string; shots: ClipShot[] },
+    ): Promise<ClipResult[]> {
+      const path = `/v1/recordings/${encodeURIComponent(uploadId)}/clips`;
+      const b: any = await authed('POST', path, token, req, NETWORK.clipCutTimeoutMs);
+      if (!Array.isArray(b?.clips)) throw invalid(`POST ${path}`);
+      const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+      return b.clips
+        .filter((c: any) => Number.isInteger(c?.shotNumber))
+        .map((c: any): ClipResult => {
+          // A clip only counts as cut with no error and the full clip fields;
+          // an error entry, or anything unrecognised, is a failure for that shot.
+          if (c.error === undefined && num(c.startMs) && num(c.endMs) && num(c.sizeBytes)) {
+            return { ok: true, shotNumber: c.shotNumber, startMs: c.startMs, endMs: c.endMs, sizeBytes: c.sizeBytes };
+          }
+          return {
+            ok: false,
+            shotNumber: c.shotNumber,
+            error: typeof c.error === 'string' && c.error ? c.error : 'malformed_clip',
+            message: typeof c.message === 'string' ? c.message : '',
+          };
+        });
+    },
+
+    /** PATCH /v1/sessions/:sessionId/shots/:shotNumber. */
+    async patchShotOutcome(token: string, sessionId: string, shotNumber: number, outcome: string): Promise<void> {
+      await authed('PATCH', shotPath(sessionId, shotNumber), token, { outcome }, NETWORK.apiTimeoutMs);
+    },
+
+    /** DELETE /v1/sessions/:sessionId/shots/:shotNumber. Idempotent. */
+    async deleteShotClip(token: string, sessionId: string, shotNumber: number): Promise<void> {
+      await authed('DELETE', shotPath(sessionId, shotNumber), token, undefined, NETWORK.apiTimeoutMs);
+    },
+
+    /** DELETE /v1/sessions/:sessionId: every clip of the session. Idempotent. */
+    async deleteSessionClips(token: string, sessionId: string): Promise<void> {
+      await authed('DELETE', `/v1/sessions/${encodeURIComponent(sessionId)}`, token, undefined, NETWORK.apiTimeoutMs);
+    },
+
     resolveAssetUrl: (url: string) => {
       if (!base) throw notConfigured();
       return resolveAssetUrl(base, url);

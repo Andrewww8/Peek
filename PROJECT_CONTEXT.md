@@ -9,7 +9,8 @@ Perspective is an iPhone sports coaching app starting with basketball. A player 
 1. **Record.** Capture a real clip on the iPhone and save it on the device. Start with a stationary, shooting-side camera angle that keeps the player and ball in frame through release.
 2. **Replay and coaching.** Replay the saved clip with a scrubber and slow motion. Show a prepared coaching cue for the demo player. Label it as a practice tip when shown alongside a fresh recording. A cue tied to a specific frame belongs to the prepared example it was written for.
 3. **Saved clips and stats.** Reopen practice sessions after an app restart. Show the clip and its shot statistics from local storage.
-4. **3D example.** Download a prebuilt animated athlete model from the laptop and open it on the iPhone. After a successful download, reopen it offline with its coaching cue.
+4. **3D example.** Download a prebuilt animated athlete model from the cloud API and open it on the iPhone. After a successful download, reopen it offline with its coaching cue.
+5. **Shot clips in the cloud.** For a signed-in player, keep a copy of every tagged shot in the cloud: the window from 3 seconds before the release to 1 second after it. These clips feed later review and computer-vision work.
 
 ## Demo decisions and asset status
 
@@ -25,9 +26,12 @@ Perspective is an iPhone sports coaching app starting with basketball. A player 
 | --- | --- | --- |
 | iPhone UI | Expo, React Native, TypeScript | Record, Replay and Coaching, and Saved Clips screens. |
 | iPhone media | `expo-camera`, `expo-file-system`, `expo-video` | Capture, durable file storage, local replay, and model downloads. Open the animated USDZ with iOS Quick Look. |
-| iPhone database | `expo-sqlite` | Sessions, shot outcomes, and downloaded model metadata. The phone is the source of truth for practice history. |
-| Laptop API | Node.js, Fastify, TypeScript, `@fastify/static` | Read a small JSON catalog and serve versioned, prebuilt model exports over the local network. |
-| 3D assets | Blender source files and exported models on the laptop | Create or source a rigged avatar and animate the catch, release, and follow-through. Export one animated shot first. Keep source assets in their working folder and serve only the mobile exports from a dedicated directory. |
+| iPhone database | `expo-sqlite` | Sessions, shot outcomes, downloaded model metadata, and the shot-clip upload queue. The phone is the source of truth for practice history; the cloud keeps a copy of each tagged shot's clip. |
+| iPhone auth | `@supabase/supabase-js` | Player sign-in. Signed-in players upload shot clips; signed out, the app is fully local. |
+| Cloud API | Vercel Functions (Node.js, Fluid compute), Fastify, TypeScript | Serve the demo catalog, issue upload URLs, cut shot clips with ffmpeg, and store clip metadata. Future computer-vision (CV) work runs here too. |
+| Cloud storage | Vercel Blob (models: public store; recordings and clips: private store), Supabase Postgres | Model exports, shot clips, and clip metadata for review and future CV. |
+| Cloud auth | Supabase Auth | The API verifies Supabase access tokens (JWT via the project's JWKS). |
+| 3D assets | Blender source files, with exports uploaded to Vercel Blob | Create or source a rigged avatar and animate the catch, release, and follow-through. Export one animated shot first. Keep Blender sources out of Blob and Git; upload only the mobile exports. |
 
 ## Local data on the iPhone
 
@@ -42,28 +46,31 @@ Videos and model files live under separate directories in persistent app storage
 - Give each session a stable ID. Use `(session_id, shot_number)` to identify an individual shot, and `(demo_id, version, format)` to identify a downloaded model.
 - For manual tagging, record a timestamp and let the player mark a shot as `made`, `missed`, or `unmarked`. Compute the percentage as makes divided by makes plus misses. Show unmarked shots separately and use an empty state when there are zero tagged attempts. Editing a tag recalculates the totals.
 - Start with 720p and a 30-second cap. At a target video bitrate of 4 Mbps, a 30-second clip uses about 15 MB before audio and container overhead. Check available space before recording or downloading. Let the player remove a video to reclaim space while retaining the session's shot stats.
-- Allow a null `video_path` for sessions whose videos were removed. Show their stats with an unavailable replay state. Keep capture, replay, and stats entirely on the phone for the demo.
+- Allow a null `video_path` for sessions whose videos were removed. Show their stats with an unavailable replay state. Capture, replay, and stats never wait on the network; shot-clip uploads run in the background and retry.
 
-## Laptop API and 3D download
+## Cloud API (Vercel) and 3D download
 
-- `GET /health` checks that the phone can reach the laptop.
-- `GET /v1/demos?shotType=three_point` returns the matching demo entries from `demos.json`.
-- `GET /media/<versioned-filename>` serves the exported asset from the laptop. The phone's download code also accepts absolute HTTPS URLs, so the catalog can point to cloud storage later.
+The API runs on Vercel at the HTTPS URL set in `EXPO_PUBLIC_API_URL`. The laptop and the shared-Wi-Fi setup are no longer needed. For local development, the same Fastify app still runs with `npm run server`, using local stand-ins for Blob, Postgres, and Supabase Auth.
 
-The endpoint returns an array of matching entries. For the demo, use one entry like the example below. Populate `sizeBytes` from the actual export (`npm run sync-catalog -w server`). Resolve relative asset URLs against the API base URL. A relative asset URL must be `/media/<versioned-filename>`, a single file directly in the media directory. Any other asset URL must be absolute HTTPS. The server rejects a catalog that breaks either rule.
+### Public endpoints
+
+- `GET /health` checks that the phone can reach the API.
+- `GET /v1/demos?shotType=three_point` returns the matching demo entries from the catalog.
+
+The catalog shape is unchanged. In production, each asset `url` is an absolute HTTPS Vercel Blob URL from the public model store. Locally, it may still be `/media/<versioned-filename>`. Any other asset URL is rejected. `sizeBytes` must equal the uploaded export; `npm run sync-catalog -w server` sets it. Model filenames are versioned and never overwritten; to publish a new model, upload a new version and bump the catalog.
 
 ```json
 [
   {
     "id": "three-point-follow-through",
-    "version": 1,
+    "version": 2,
     "shotType": "three_point",
     "cue": "Hold your finish until the ball reaches the rim.",
     "assets": [
       {
         "format": "usdz",
         "sizeBytes": 8500000,
-        "url": "/media/three-point-follow-through-v1.usdz"
+        "url": "https://<store>.public.blob.vercel-storage.com/models/three-point-follow-through-v2.usdz"
       }
     ]
   }
@@ -72,14 +79,36 @@ The endpoint returns an array of matching entries. For the demo, use one entry l
 
 When the player taps **View 3D Demo**, look up the matching demo on the phone first so it can open offline. If the asset is missing or a newer version is selected, show download progress, write to a temporary file, verify the expected byte size, then move it into persistent storage and save the metadata. Keep the last working version available if a replacement download fails. Test the actual model animation in Quick Look on the demo iPhone.
 
-Run Fastify on the laptop, for example on port `3001`. Put the phone and laptop on the same Wi-Fi. Set the laptop URL in `EXPO_PUBLIC_API_URL` for the demo build and configure iOS Local Network permission and any local HTTP allowance for that build. Use an installed preview build for rehearsal so the app can relaunch independently of Metro.
+### Authenticated endpoints (shot clips)
+
+Every request sends `Authorization: Bearer <Supabase access token>`. The API verifies the token against the Supabase project's JWKS; the token's `sub` is the user id. A missing or invalid token gets `401 {"error":"unauthorized"}`. A player only ever sees or changes their own data.
+
+| Endpoint | Body | Result |
+| --- | --- | --- |
+| `POST /v1/recordings` | `{ sessionId, ext, contentType, sizeBytes, durationMs }` | `{ uploadId, uploadUrl, method: "PUT", headers, expiresAt }`. A short-lived presigned URL for one private Blob path, `recordings/<userId>/<sessionId>/<uploadId>.<ext>`. The phone PUTs the file to it directly, because function bodies are capped at 4.5 MB. Size cap 60 MB; duration cap 30 s. |
+| `POST /v1/recordings/:uploadId/clips` | `{ sessionId, shotType, shots: [{ shotNumber, releaseMs, outcome }] }` | Cuts one clip per shot, from `max(0, releaseMs − 3000)` to `min(duration, releaseMs + 1000)` (H.264/AAC MP4, frame-accurate). Stores each at `clips/<userId>/<sessionId>/<shotNumber>.mp4`, upserts its metadata, then deletes the full recording. Returns `{ clips: [{ shotNumber, startMs, endMs, sizeBytes }] }`. Idempotent per `(user, session, shotNumber)`. |
+| `PATCH /v1/sessions/:sessionId/shots/:shotNumber` | `{ outcome }` | Updates the clip's outcome. No re-cut is needed. |
+| `DELETE /v1/sessions/:sessionId/shots/:shotNumber` | — | Deletes that clip and its row. Idempotent. |
+| `DELETE /v1/sessions/:sessionId` | — | Deletes every clip and row for the session. Idempotent. |
+| `GET /v1/clips?sessionId=` | — | The player's clips with short-lived signed GET URLs, for review and CV tools. |
+
+Clip metadata lives in the Supabase Postgres table `shot_clips`: `user_id`, `session_id`, `shot_number`, `shot_type`, `release_ms`, `outcome`, `clip_pathname`, `start_ms`, `end_ms`, `size_bytes`, `analysis_status` (`pending` until CV runs), `analysis` (jsonb), `created_at` and `updated_at`. The primary key is `(user_id, session_id, shot_number)`. Row-level security limits each player to their own rows.
+
+### Phone upload queue
+
+- Uploads happen only while a player is signed in. Signed out, nothing leaves the phone and nothing is queued for later.
+- Every new shot starts as `pending`. A background sync, run after tagging, at launch, and when the app returns to the foreground, uploads the session's recording once. It then asks the API to cut clips for all of that session's pending shots and marks them `synced`.
+- After a shot is synced, an outcome change marks it for a PATCH. Deleting a shot or a session queues a remote DELETE.
+- If the session's video was removed before its clips synced, its pending shots become `unavailable`, because there is nothing left to cut. Stats are unaffected.
+- A network failure, an expired token, or a server error leaves the shot pending for the next sync. A sync never blocks recording, tagging, or replay, and never shows the player an error dialog.
 
 ## Build order and acceptance
 
 1. Save one real recording and verify local playback after relaunch.
 2. Tag a small set of shots and verify that edits update the stored session totals.
-3. Create the first animated catch-and-shoot model. Verify the export in Quick Look on the demo iPhone, then serve it from the laptop and verify the in-app download and playback.
+3. Create the first animated catch-and-shoot model. Verify the export in Quick Look on the demo iPhone, then upload it to Vercel Blob, publish it in the catalog, and verify the in-app download and playback.
 4. Turn Wi-Fi off, quit and relaunch the app, and verify that a new recording saves, an existing recording and its stats reopen, and the downloaded 3D model plays.
+5. Sign in, record, and tag three shots. When back online, verify that three 4-second clips appear in `GET /v1/clips` with the right outcomes, and that the full recording is gone from Blob.
 
 If the API is unreachable and there is no saved model yet, show a retry state in the demo viewer. Keep recording, playback, and local stats accessible throughout.
 
@@ -87,9 +116,9 @@ Mobile and API integration can start with a small placeholder model while the sh
 
 ## How the demo can grow
 
-- Deploy the same Fastify API over HTTPS. Move model exports to S3 and serve them through CloudFront using the same catalog fields and versioned URLs. Consider Postgres when the team needs a catalog editing workflow.
-- Add automated form analysis and shot tagging after the manual demo. Use annotated footage for each drill to check that the app finds the right moments and that the visible movement supports the coaching cue.
-- Keep phone storage as the default. Cross-device history would be a separate opt-in feature. Public distribution of recognizable NBA models depends on clearing the relevant likeness and source-footage rights.
+- The API and model exports now run on Vercel (Functions and Blob). Consider moving the catalog into Postgres when the team needs a catalog editing workflow.
+- Computer-vision work (automated form analysis and shot tagging) runs on Vercel against the stored shot clips. `shot_clips.analysis_status` and `analysis` are reserved for it. Use Vercel Queues or Workflow for the analysis jobs. Use annotated footage for each drill to check that the app finds the right moments and that the visible movement supports the coaching cue.
+- The phone remains the source of truth for practice history; the cloud keeps shot clips for signed-in players. Full cross-device history would be a separate feature. Public distribution of recognizable NBA models depends on clearing the relevant likeness and source-footage rights.
 
 ## Potential skill and sport extensions
 
@@ -122,6 +151,6 @@ When a second sport is implemented, add a sport and drill ID to the session and 
 ## Agent handoff
 
 - Treat this file as the scope and architecture brief. Inspect the repo to see what has actually been implemented before scaffolding or changing existing files.
-- Keep capture, tagging, and replay usable when the laptop is unavailable. The server serves the 3D catalog and model files for the first demo.
+- Keep capture, tagging, and replay usable when the cloud API is unreachable or the player is signed out. The API serves the 3D catalog and model files, and stores shot clips for signed-in players.
 - Keep raw practice footage, database exports, and large model source files out of Git. Check in code, catalog structure, and intentionally selected demo assets suitable for the repository.
 - Update this file when the team changes the demo drill, stats workflow, asset format, or API contract.

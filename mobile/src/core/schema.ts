@@ -47,6 +47,44 @@ const MIGRATIONS: string[] = [
      WHERE id = NEW.session_id AND last_shot_number < NEW.shot_number;
   END;
   `,
+  // v3: shot clips upload to the cloud API (see ClipSync). clip_state:
+  //   local_only     never uploads: tagged while signed out, or tagged before
+  //                  this version (backfill), or pending at a signed-out sync
+  //   pending        waiting for its session's recording to upload
+  //   cutting        a POST …/clips that includes it was sent; the server may
+  //                  hold its clip. Retried like pending (the POST is idempotent)
+  //   synced         the server holds its clip with this outcome
+  //   outcome_dirty  synced, but the outcome changed since: needs a PATCH
+  //   unavailable    nothing to cut (video removed first), or the server lost it
+  // Triggers queue the remote DELETEs in the same statement as the local
+  // delete, only when the server may hold something (cutting/synced/dirty):
+  // one row per shot, or shot_number 0 for a whole session. A cascade from a
+  // session delete is covered by the session row, so the shot trigger skips it.
+  `
+  ALTER TABLE shots ADD COLUMN clip_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (clip_state IN ('local_only', 'pending', 'cutting', 'synced', 'outcome_dirty', 'unavailable'));
+  UPDATE shots SET clip_state = 'local_only';
+  CREATE INDEX shots_clip_state ON shots (clip_state, session_id);
+
+  CREATE TABLE clip_deletes (
+    session_id  TEXT NOT NULL,
+    shot_number INTEGER NOT NULL,
+    PRIMARY KEY (session_id, shot_number)
+  );
+
+  CREATE TRIGGER shots_queue_clip_delete AFTER DELETE ON shots
+  WHEN OLD.clip_state IN ('cutting', 'synced', 'outcome_dirty')
+   AND EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id)
+  BEGIN
+    INSERT OR IGNORE INTO clip_deletes (session_id, shot_number) VALUES (OLD.session_id, OLD.shot_number);
+  END;
+
+  CREATE TRIGGER sessions_queue_clip_delete BEFORE DELETE ON sessions
+  WHEN EXISTS (SELECT 1 FROM shots WHERE session_id = OLD.id AND clip_state IN ('cutting', 'synced', 'outcome_dirty'))
+  BEGIN
+    INSERT OR IGNORE INTO clip_deletes (session_id, shot_number) VALUES (OLD.id, 0);
+  END;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

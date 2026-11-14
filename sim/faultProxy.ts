@@ -26,13 +26,25 @@ export type FaultMode =
   | { kind: 'oversize_media'; extraBytes: number; chunked?: boolean }
   /** Rewrites relative asset URLs in /v1/demos to absolute http URLs on the proxy's own origin. */
   | { kind: 'absolute_http_catalog' }
+  /** Holds every request whose "METHOD /path" matches, before forwarding it, until `until` settles. Others pass. */
+  | { kind: 'stall_requests'; match: RegExp; until: Promise<unknown> }
   | { kind: 'http500' }
   | { kind: 'garbage_catalog' };
 
 export interface FaultProxy {
   url: string;
   mode: FaultMode;
-  counters: { requests: number; mediaRequests: number; dropped: number };
+  counters: {
+    requests: number;
+    mediaRequests: number;
+    dropped: number;
+    /** Recording PUTs to the presigned blob URL. */
+    uploads: number;
+    /** POST /v1/recordings/:id/clips. */
+    clipCuts: number;
+    /** Any request to the authenticated clip API or the blob URLs. */
+    cloudCalls: number;
+  };
   close(): Promise<void>;
 }
 
@@ -40,7 +52,7 @@ export async function startFaultProxy(upstreamPort: number): Promise<FaultProxy>
   const proxy: FaultProxy = {
     url: '',
     mode: { kind: 'pass' },
-    counters: { requests: 0, mediaRequests: 0, dropped: 0 },
+    counters: { requests: 0, mediaRequests: 0, dropped: 0, uploads: 0, clipCuts: 0, cloudCalls: 0 },
     close: async () => undefined,
   };
 
@@ -49,6 +61,10 @@ export async function startFaultProxy(upstreamPort: number): Promise<FaultProxy>
     const isMedia = req.url?.startsWith('/media/') ?? false;
     const isCatalog = req.url?.startsWith('/v1/demos') ?? false;
     if (isMedia) proxy.counters.mediaRequests++;
+    const url = req.url ?? '';
+    if (/^\/(v1\/(recordings|sessions|clips)|local-blob)/.test(url)) proxy.counters.cloudCalls++;
+    if (req.method === 'PUT' && url.startsWith('/local-blob')) proxy.counters.uploads++;
+    if (req.method === 'POST' && /^\/v1\/recordings\/[^/]+\/clips/.test(url)) proxy.counters.clipCuts++;
     const mode = proxy.mode;
 
     if (mode.kind === 'down') {
@@ -184,7 +200,11 @@ export async function startFaultProxy(upstreamPort: number): Promise<FaultProxy>
     };
 
     if (mode.kind === 'delay') setTimeout(forward, mode.ms);
-    else forward();
+    else if (mode.kind === 'stall_requests' && mode.match.test(`${req.method} ${url}`)) {
+      void Promise.resolve(mode.until)
+        .catch(() => undefined)
+        .then(() => !req.socket.destroyed && forward());
+    } else forward();
   });
   server.keepAliveTimeout = 1;
 

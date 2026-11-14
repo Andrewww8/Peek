@@ -1,12 +1,17 @@
+import { NETWORK } from './config';
 import { BackendError } from './errors';
-import type { Platform } from './ports';
+import type { AuthPort, Platform } from './ports';
 import { computeStats, OUTCOMES, type Outcome, type ShotStats } from './stats';
+
+/** Upload state of a shot's cloud clip; see migration v3 in schema.ts. */
+export type ClipState = 'local_only' | 'pending' | 'cutting' | 'synced' | 'outcome_dirty' | 'unavailable';
 
 export interface Shot {
   sessionId: string;
   shotNumber: number;
   releaseMs: number;
   outcome: Outcome;
+  clipState: ClipState;
 }
 
 interface ShotRow {
@@ -14,6 +19,7 @@ interface ShotRow {
   shot_number: number;
   release_ms: number;
   outcome: Outcome;
+  clip_state: ClipState;
 }
 
 const fromRow = (r: ShotRow): Shot => ({
@@ -21,10 +27,41 @@ const fromRow = (r: ShotRow): Shot => ({
   shotNumber: Number(r.shot_number),
   releaseMs: Number(r.release_ms),
   outcome: r.outcome,
+  clipState: r.clip_state,
 });
 
+/**
+ * Only shots tagged while signed in ever upload. A null token is a definite
+ * "signed out" → local_only, kept on the phone for good, even after a later
+ * sign-in. A probe that errors or outlasts authProbeMs means a stored session
+ * exists (refreshing), so the shot is pending.
+ */
+async function clipStateForNewShot(auth: AuthPort): Promise<ClipState> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const token = await Promise.race([
+      auth.getAccessToken(),
+      new Promise<'slow'>((resolve) => (timer = setTimeout(() => resolve('slow'), NETWORK.authProbeMs))),
+    ]);
+    return token === null ? 'local_only' : 'pending';
+  } catch {
+    return 'pending';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class ShotStore {
+  /** addShot and deleteShot run one at a time; see addShot. */
+  private writes: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly p: Platform) {}
+
+  private serial<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.writes.then(op);
+    this.writes = run.catch(() => undefined);
+    return run;
+  }
 
   /**
    * Marks a release timestamp in replay; starts unmarked until the player tags it.
@@ -40,16 +77,24 @@ export class ShotStore {
    * The insert goes through run() without RETURNING, so it commits within one
    * bridge call. first() with RETURNING would leave the write statement active
    * until a later finalize call, holding the connection's transaction open.
-   * The new row is then read back by rowid.
+   * The new row is then read back by rowid. The insert and the read-back run
+   * under this store's write lock together with deleteShot, so no other shot
+   * insert or delete lands between them: the rowid cannot be freed and handed
+   * to another shot before it is read.
    */
   async addShot(sessionId: string, releaseMs: number, outcome: Outcome = 'unmarked'): Promise<Shot> {
     if (!Number.isFinite(releaseMs) || releaseMs < 0) throw new BackendError('invalid_input', 'releaseMs must be >= 0');
     if (!OUTCOMES.includes(outcome)) throw new BackendError('invalid_input', `Unknown outcome ${outcome}`);
+    const clipState = await clipStateForNewShot(this.p.auth);
+    return this.serial(() => this.insertShot(sessionId, Math.round(releaseMs), outcome, clipState));
+  }
+
+  private async insertShot(sessionId: string, releaseMs: number, outcome: Outcome, clipState: ClipState): Promise<Shot> {
     const { changes, lastInsertRowId } = await this.p.db.run(
-      `INSERT INTO shots (session_id, shot_number, release_ms, outcome)
-       SELECT id, last_shot_number + 1, ?, ?
+      `INSERT INTO shots (session_id, shot_number, release_ms, outcome, clip_state)
+       SELECT id, last_shot_number + 1, ?, ?, ?
        FROM sessions WHERE id = ?`,
-      [Math.round(releaseMs), outcome, sessionId],
+      [releaseMs, outcome, clipState, sessionId],
     );
     if (changes === 0) throw new BackendError('not_found', `No session ${sessionId}`);
     const row = await this.p.db.first<ShotRow>('SELECT * FROM shots WHERE rowid = ? AND session_id = ?', [
@@ -61,19 +106,29 @@ export class ShotStore {
     return fromRow(row);
   }
 
-  /** Tag or re-tag a shot. Totals are derived on read, so they always reflect the latest edit. */
+  /**
+   * Tag or re-tag a shot. Totals are derived on read, so they always reflect
+   * the latest edit. A synced clip whose outcome really changes is marked for
+   * a PATCH in the same statement. A pending or cutting shot needs nothing:
+   * the sync compares the outcome it sent when it marks the shot.
+   */
   async setOutcome(sessionId: string, shotNumber: number, outcome: Outcome): Promise<void> {
     if (!OUTCOMES.includes(outcome)) throw new BackendError('invalid_input', `Unknown outcome ${outcome}`);
-    const { changes } = await this.p.db.run('UPDATE shots SET outcome = ? WHERE session_id = ? AND shot_number = ?', [
-      outcome,
-      sessionId,
-      shotNumber,
-    ]);
+    const { changes } = await this.p.db.run(
+      `UPDATE shots
+          SET outcome = ?,
+              clip_state = CASE WHEN clip_state = 'synced' AND outcome <> ? THEN 'outcome_dirty' ELSE clip_state END
+        WHERE session_id = ? AND shot_number = ?`,
+      [outcome, outcome, sessionId, shotNumber],
+    );
     if (changes === 0) throw new BackendError('not_found', `No shot ${sessionId}#${shotNumber}`);
   }
 
+  /** A trigger queues the remote DELETE in the same statement when the server may hold the clip. */
   async deleteShot(sessionId: string, shotNumber: number): Promise<void> {
-    await this.p.db.run('DELETE FROM shots WHERE session_id = ? AND shot_number = ?', [sessionId, shotNumber]);
+    await this.serial(() =>
+      this.p.db.run('DELETE FROM shots WHERE session_id = ? AND shot_number = ?', [sessionId, shotNumber]),
+    );
   }
 
   async list(sessionId: string): Promise<Shot[]> {

@@ -1,7 +1,9 @@
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
-import { CatalogError, checkCatalogAssets, createCatalogReader, mediaFileName, type DemoEntry } from './catalog';
+import { CatalogError, checkCatalogAssets, createCatalogReader, mediaFileName, type DemoEntry } from './catalog.js';
+import { clipRoutes } from './clips.js';
+import type { Deps } from './deps.js';
 
 export interface AppOptions {
   /** Path to demos.json. */
@@ -10,6 +12,13 @@ export interface AppOptions {
   mediaDir: string;
   /** `true` for the default logger; tests pass an options object with their own stream. */
   logger?: FastifyServerOptions['logger'];
+  /** Blob store, clip repo, auth and trimmer for the authenticated clip API. */
+  deps?: Deps;
+  /**
+   * Set when production deps could not be built (missing env vars). /health then
+   * answers 503 with this message, and the clip API answers 503 not_configured.
+   */
+  depsError?: string;
 }
 
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
@@ -54,11 +63,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     return reply.code(status).send({ statusCode: status, error: 'Internal Server Error', message: 'internal error' });
   });
 
-  app.get('/health', async () => ({
-    status: 'ok',
-    service: 'perspective-api',
-    time: new Date().toISOString(),
-  }));
+  app.get('/health', async (_req, reply) => {
+    const time = new Date().toISOString();
+    if (opts.depsError) return reply.code(503).send({ status: 'error', service: 'perspective-api', time, message: opts.depsError });
+    return { status: 'ok', service: 'perspective-api', time };
+  });
+
+  await app.register(clipRoutes, { deps: opts.deps, depsError: opts.depsError });
+  if (opts.deps?.routes) await opts.deps.routes(app);
 
   app.get<{ Querystring: { shotType?: string } }>(
     '/v1/demos',

@@ -41,11 +41,11 @@
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, stat, statfs } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, stat, statfs } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { FetchLike, FileStore, Platform, SqlDatabase, SqlValue } from '../mobile/src/core/ports';
+import type { AuthPort, FetchLike, FileStore, Platform, SqlDatabase, SqlValue } from '../mobile/src/core/ports';
 
 /** Wraps every bridge call. The simulated process uses it to freeze a killed app. */
 export type Gate = <T>(label: string, op: () => Promise<T>) => Promise<T>;
@@ -183,6 +183,8 @@ export interface NodeFileStoreOptions {
   stagingDir?: string;
   /** Aborts in-flight downloads (the app process was killed). */
   signal?: AbortSignal;
+  /** The signed-in player (default: always signed out). */
+  auth?: AuthPort;
 }
 
 /** Download options, including ones the port may not declare yet (forwarded as-is). */
@@ -273,6 +275,22 @@ export function createNodeFileStore(docDir: string, cacheDir: string, opts: Node
       if (forced !== undefined) return forced;
       const s = await statfs(roots[0]!);
       return s.bavail * s.bsize;
+    },
+
+    /**
+     * expo uploadAsync with BINARY_CONTENT (an NSURLSession upload task from a
+     * file): the file is read when the call starts and sent with its
+     * Content-Length; a missing file or a dropped connection rejects; any HTTP
+     * status resolves once the response body is in.
+     */
+    async upload(url, fileUri, { method, headers, timeoutMs }) {
+      const path = pathOf(fileUri, 'uploadAsync');
+      const body = await readFile(path);
+      const signals = [AbortSignal.timeout(timeoutMs)];
+      if (opts.signal) signals.push(opts.signal);
+      const res = await fetch(url, { method, headers, body, signal: AbortSignal.any(signals) });
+      await res.arrayBuffer();
+      return { status: res.status };
     },
 
     async download(url: string, destUri: string, { timeoutMs, onProgress, maxBytes }: DownloadOpts) {
@@ -398,6 +416,7 @@ export function createNodePlatform(root: string, opts: NodeFileStoreOptions = {}
     remove: (u) => gate('files.remove', () => raw.remove(u)),
     list: (u) => gate('files.list', () => raw.list(u)),
     freeBytes: () => gate('files.freeBytes', () => raw.freeBytes()),
+    upload: (url, file, o) => gate('files.upload', () => raw.upload(url, file, o)),
     download: (url, dest, o) =>
       gate('files.download', () =>
         raw.download(url, dest, {
@@ -415,7 +434,7 @@ export function createNodePlatform(root: string, opts: NodeFileStoreOptions = {}
     gate('fetch', async () => {
       const signal = init?.signal ? AbortSignal.any([init.signal, ctrl.signal]) : ctrl.signal;
       // React Native's fetch (whatwg-fetch over XHR) resolves after the whole body, under the same signal.
-      const res = await fetch(url, { signal });
+      const res = await fetch(url, { method: init?.method, headers: init?.headers, body: init?.body, signal });
       const text = await res.text();
       return { ok: res.ok, status: res.status, json: () => gate('fetch.json', async () => JSON.parse(text) as unknown) };
     });
@@ -440,5 +459,9 @@ export function createNodePlatform(root: string, opts: NodeFileStoreOptions = {}
     },
   };
 
-  return { db, files, fetch: fetchLike, newId: () => randomUUID(), now: () => Date.now(), process };
+  const auth: AuthPort = {
+    getAccessToken: () => gate('auth.getAccessToken', () => opts.auth?.getAccessToken() ?? Promise.resolve(null)),
+  };
+
+  return { db, files, fetch: fetchLike, auth, newId: () => randomUUID(), now: () => Date.now(), process };
 }

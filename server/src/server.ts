@@ -1,18 +1,16 @@
 import { networkInterfaces } from 'node:os';
-import { join } from 'node:path';
-import { buildApp, closeWithin } from './app';
+import { closeWithin } from './app.js';
+import { DEFAULT_LOCAL_JWT_SECRET, buildAppFromEnv, isProduction } from './env.js';
+import { signLocalToken } from './local/index.js';
 
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? '0.0.0.0';
-const root = join(import.meta.dirname, '..');
 // How long a shutdown waits for downloads in flight before cutting them off.
 const SHUTDOWN_GRACE_MS = 5_000;
+/** The user that the printed local dev token signs in as. */
+const LOCAL_DEV_USER = '00000000-0000-4000-8000-000000000001';
 
-const app = await buildApp({
-  catalogPath: process.env.CATALOG_PATH ?? join(root, 'catalog', 'demos.json'),
-  mediaDir: process.env.MEDIA_DIR ?? join(root, 'media'),
-  logger: true,
-});
+const app = await buildAppFromEnv(process.env, true);
 
 await app.listen({ port, host });
 
@@ -21,6 +19,10 @@ const lan = Object.values(networkInterfaces())
   .filter((i) => i && i.family === 'IPv4' && !i.internal)
   .map((i) => `http://${i!.address}:${port}`);
 console.log(`\nPerspective API ready. Set EXPO_PUBLIC_API_URL to one of:\n  ${lan.join('\n  ') || '(no LAN address found)'}\n`);
+if (!isProduction(process.env)) {
+  const token = await signLocalToken(process.env.LOCAL_JWT_SECRET || DEFAULT_LOCAL_JWT_SECRET, LOCAL_DEV_USER, 30 * 24 * 3600);
+  console.log(`Local clip storage (no Vercel/Supabase). Dev access token for user ${LOCAL_DEV_USER}, valid 30 days:\n  ${token}\n`);
+}
 
 let stopping = false;
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {

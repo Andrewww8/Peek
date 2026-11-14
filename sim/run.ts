@@ -16,6 +16,8 @@ import type { AddressInfo } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildApp } from '../server/src/app';
+import { createLocalDeps, signLocalToken, type LocalDeps } from '../server/src/local';
+import { makeVideo, videoInfo } from '../server/src/test-video';
 import { placeholderUsdz } from '../server/scripts/make-placeholder-usdz';
 import { createPerspectiveBackend, type OpenDemoResult, type Outcome, type PerspectiveBackend } from '../mobile/src/core';
 import { RECORDING } from '../mobile/src/core/config';
@@ -165,6 +167,53 @@ class Laptop {
   }
 }
 
+// ---------- cloud fixture ----------
+/** A real playable recording (ffmpeg lavfi), generated once per run and copied into each phone's camera cache. */
+interface PoolVideo {
+  file: string;
+  /** Container duration, as the server's probe reads it. */
+  durationMs: number;
+  frames: number;
+  fps: number;
+  audio: boolean;
+}
+let VIDEOS: PoolVideo[] = [];
+const VIDEO_FPS = 30;
+
+/** Six videos: 3 s and 30 s (the edges), four random lengths between; alternately with and without audio. */
+async function makeVideoPool(dir: string): Promise<PoolVideo[]> {
+  await mkdir(dir, { recursive: true });
+  const frames = [3 * VIDEO_FPS, 30 * VIDEO_FPS, ...Array.from({ length: 4 }, () => randInt(3 * VIDEO_FPS + 1, 30 * VIDEO_FPS - 1))];
+  return Promise.all(
+    frames.map(async (n, i) => {
+      const file = join(dir, `rec-${i}.mp4`);
+      const audio = i % 2 === 0;
+      await makeVideo(file, { seconds: n / VIDEO_FPS, fps: VIDEO_FPS, audio });
+      const info = await videoInfo(file);
+      assert(info.videoCodec && (info.audioCodec !== null) === audio, `video pool: ${file} came out wrong: ${json(info)}`);
+      return { file, durationMs: info.durationMs, frames: info.frames, fps: VIDEO_FPS, audio };
+    }),
+  );
+}
+
+type AuthState =
+  | { kind: 'signed_out' }
+  | { kind: 'user'; user: string }
+  | { kind: 'expired'; user: string }
+  /** The adapter's session lookup hangs; it gives up after its bound and returns the last session seen. */
+  | { kind: 'slow'; user: string };
+/** Kept below expo.ts's TOKEN_LOOKUP_MS (3 s) for runtime, but well above the core's authProbeMs (500 ms). */
+const SLOW_AUTH_MS = 1_200;
+
+interface Cloud {
+  deps: LocalDeps;
+  users: { A: string; B: string };
+  token(user: string, ttlSec?: number): Promise<string>;
+  /** Every session a signed-in phone handed to syncNow, with the phone and the user it synced as. */
+  sessions: Map<string, { phone: Phone; user: string }>;
+}
+let CLOUD!: Cloud;
+
 // ---------- simulated phones ----------
 class Phone {
   backend!: PerspectiveBackend;
@@ -173,6 +222,17 @@ class Phone {
   freeBytesOverride: number | undefined;
   /** Set to null (or '') to launch a build that has no laptop URL; undefined uses the proxy. */
   apiBase: string | null | undefined;
+  /** Who is signed in (Supabase session), read by the auth port on every call. */
+  auth: AuthState = { kind: 'signed_out' };
+  get user(): string | null {
+    return this.auth.kind === 'signed_out' ? null : this.auth.user;
+  }
+  private async accessToken(): Promise<string | null> {
+    const a = this.auth;
+    if (a.kind === 'signed_out') return null;
+    if (a.kind === 'slow') await new Promise((r) => setTimeout(r, SLOW_AUTH_MS));
+    return CLOUD.token(a.user, a.kind === 'expired' ? -60 : 3_600);
+  }
   constructor(
     readonly name: string,
     readonly root: string,
@@ -185,7 +245,10 @@ class Phone {
    */
   async launch(killAt?: { call: number; land: boolean }) {
     await mkdir(this.root, { recursive: true });
-    this.platform = createNodePlatform(this.root, { freeBytes: () => this.freeBytesOverride });
+    this.platform = createNodePlatform(this.root, {
+      freeBytes: () => this.freeBytesOverride,
+      auth: { getAccessToken: () => this.accessToken() },
+    });
     const proc = this.platform.process;
     if (killAt) proc.killAtCall(killAt.call, killAt.land);
     this.launches++;
@@ -220,17 +283,28 @@ class Phone {
   async fileSha(uri: string) {
     return sha(await readFile(new URL(uri)));
   }
-  /** Simulates expo-camera finishing a recording into its temp cache (an encoded file:// URI). */
-  async fakeRecording(ext: string) {
+  /**
+   * Simulates expo-camera finishing a recording into its temp cache (an
+   * encoded file:// URI): a real playable video from the pool.
+   */
+  async fakeRecording(ext: string, want: (v: PoolVideo) => boolean = () => true) {
+    const video = pick(VIDEOS.filter(want));
     const dir = this.path('Caches', 'Camera');
     await mkdir(dir, { recursive: true });
     const file = join(dir, `${randomBytes(6).toString('hex')}.${ext}`);
-    await writeFile(file, randomBytes(randInt(5_000, 60_000)));
-    return { uri: pathToFileURL(file).href, file };
+    // A trailing top-level 'free' box (ignored by every MP4 parser) makes each copy's bytes unique.
+    const free = Buffer.alloc(24);
+    free.writeUInt32BE(24, 0);
+    free.write('free', 4, 'ascii');
+    randomBytes(16).copy(free, 8);
+    await writeFile(file, Buffer.concat([await readFile(video.file), free]));
+    return { uri: pathToFileURL(file).href, file, video };
   }
-  async recordSession(durationMs = randInt(5_000, 30_000)) {
-    const clip = await this.fakeRecording(pick(['mov', 'mp4']));
-    return this.backend.sessions.saveRecording({ tempUri: clip.uri, durationMs });
+  /** Saves a recording with its real duration (or the given one). */
+  async recordSession(durationMs?: number, want?: (v: PoolVideo) => boolean) {
+    const clip = await this.fakeRecording(pick(['mov', 'mp4']), want);
+    const s = await this.backend.sessions.saveRecording({ tempUri: clip.uri, durationMs: durationMs ?? clip.video.durationMs });
+    return Object.assign(s, { video: clip.video });
   }
 }
 
@@ -276,6 +350,12 @@ const BRANCHES: Record<string, Record<string, readonly string[]>> = {
   kill_after_resolved_delete: { op: ['removeVideo', 'deleteSession'] },
   not_configured: { config: ['null', 'blank'] },
   row_change_fails: { op: ['removeVideo', 'deleteSession', 'saveRecording'] },
+  clip_sync_windows: { audio: ['with', 'without'] },
+  clip_sync_signed_out: { when: ['signed_out_throughout', 'signed_out_before_sync'] },
+  clip_sync_retry: { fault: ['offline', 'http500', 'expired_token'] },
+  clip_sync_edits: { edit: ['outcome', 'delete_shot', 'delete_session'] },
+  clip_sync_kill_sweep: { await_points: ['odd', 'even'] },
+  clip_sync_responsive: { stall: ['upload_put', 'api_delay', 'slow_auth'] },
 };
 const laptopMode = (v: string): FaultMode => (v === 'on' ? { kind: 'pass' } : { kind: 'down' });
 
@@ -464,6 +544,135 @@ async function checkUpgraded(ph: Phone, laptop: Laptop, sessions: V1Session[]) {
     });
     assert(next.shotNumber === want, `session ${s.id} with shots ${s.shots.map((x) => x.n)}: next shot got #${next.shotNumber}, expected #${want}`);
     s.shots.push({ n: next.shotNumber, outcome: 'made' });
+  }
+}
+
+// ---------- cloud helpers ----------
+const clipStates = async (ph: Phone, sessionId: string) =>
+  new Map(
+    (await ph.platform.db.all<{ shot_number: number; clip_state: string; outcome: string; release_ms: number }>(
+      'SELECT shot_number, clip_state, outcome, release_ms FROM shots WHERE session_id = ? ORDER BY shot_number',
+      [sessionId],
+    )).map((r) => [Number(r.shot_number), r] as const),
+  );
+const serverRows = (sessionId: string) => CLOUD.deps.clips.rows().filter((r) => r.sessionId === sessionId);
+const queuedDeletes = async (ph: Phone) => Number((await ph.platform.db.first<{ n: number }>('SELECT COUNT(*) AS n FROM clip_deletes'))?.n);
+
+/** Records which user owns each of the phone's sessions, for the cloud invariants. Call before a sync. */
+async function register(ph: Phone) {
+  const user = ph.user;
+  if (!user) return;
+  for (const r of await ph.platform.db.all<{ id: string }>('SELECT id FROM sessions')) {
+    if (!CLOUD.sessions.has(r.id)) CLOUD.sessions.set(r.id, { phone: ph, user });
+  }
+}
+
+async function sync(ph: Phone) {
+  await register(ph);
+  return ph.backend.clips.syncNow();
+}
+
+/** A signed-in phone with a recorded session and tagged shots (outcomes kept for later checks). */
+async function taggedSession(ph: Phone, releases: number[], want?: (v: PoolVideo) => boolean) {
+  const s = await ph.recordSession(undefined, want);
+  const shots = new Map<number, { releaseMs: number; outcome: Outcome }>();
+  for (const r of releases) {
+    const outcome = pick(OUTCOMES);
+    const shot = await ph.backend.shots.addShot(s.id, r, outcome);
+    shots.set(shot.shotNumber, { releaseMs: r, outcome });
+  }
+  return { s, shots };
+}
+const someReleases = (durationMs: number, n: number) => Array.from({ length: n }, () => randInt(0, durationMs));
+
+/** The server holds exactly these shots of the session, under this user, with these outcomes. */
+function expectServer(sessionId: string, user: string, want: Map<number, Outcome>, what: string) {
+  const rows = serverRows(sessionId).sort((a, b) => a.shotNumber - b.shotNumber);
+  const wantNums = [...want.keys()].sort((a, b) => a - b);
+  assert(json(rows.map((r) => r.shotNumber)) === json(wantNums), `${what}: server clips ${json(rows.map((r) => r.shotNumber))}, expected ${json(wantNums)}`);
+  for (const r of rows) {
+    assert(r.userId === user, `${what}: clip #${r.shotNumber} stored under ${r.userId}`);
+    assert(r.outcome === want.get(r.shotNumber), `${what}: clip #${r.shotNumber} outcome ${r.outcome}, expected ${want.get(r.shotNumber)}`);
+  }
+}
+
+async function expectStates(ph: Phone, sessionId: string, want: string | ((n: number) => string), what: string) {
+  for (const [n, r] of await clipStates(ph, sessionId)) {
+    const w = typeof want === 'string' ? want : want(n);
+    assert(r.clip_state === w, `${what}: shot #${n} is ${r.clip_state}, expected ${w}`);
+  }
+}
+
+async function noRecordingLeft(sessionId: string, what: string) {
+  const left = (await blobFiles('recordings')).filter((p) => p.includes(`/${sessionId}/`));
+  assert(left.length === 0, `${what}: the full recording is still in blob storage: ${left}`);
+}
+
+const outcomesOf = (shots: Map<number, { outcome: Outcome }>) => new Map([...shots].map(([n, x]) => [n, x.outcome]));
+
+/** A sync that must fully succeed: no errors, nothing left waiting, no queued deletes. */
+async function syncOk(ph: Phone, what: string) {
+  const report = await sync(ph);
+  assert(report.errors.length === 0 && report.pending === 0, `${what}: sync did not finish cleanly: ${json(report)}`);
+  assert((await queuedDeletes(ph)) === 0, `${what}: clip_deletes not empty after a successful sync`);
+  return report;
+}
+
+async function blobFiles(prefix: 'clips' | 'recordings'): Promise<string[]> {
+  const root = CLOUD.deps.blob.fileOf(`${prefix}/`);
+  const names = await readdir(root, { recursive: true }).catch(() => [] as string[]);
+  const out: string[] = [];
+  for (const n of names) if ((await fileSize(join(root, n))) !== null && !n.endsWith('.part')) out.push(`${prefix}/${n}`);
+  return out;
+}
+
+/**
+ * The server's clip set matches the phones: every row belongs to a session a
+ * phone synced as that row's user, and for each session of a touched phone,
+ * the server holds exactly its synced and outcome_dirty shots (a shot mid-cut
+ * may go either way; a shot or session whose remote delete is still queued
+ * may linger), with the phone's outcome for synced shots. Every clip blob has
+ * a row and every row its blob.
+ */
+async function checkCloudInvariants(phones: Iterable<Phone>) {
+  const rows = CLOUD.deps.clips.rows();
+  const blobs = new Set(await blobFiles('clips'));
+  for (const r of rows) {
+    const reg = CLOUD.sessions.get(r.sessionId);
+    assert(reg, `server holds clip ${r.sessionId}#${r.shotNumber} for a session no signed-in phone synced`);
+    assert(r.userId === reg.user, `clip ${r.sessionId}#${r.shotNumber} is stored under user ${r.userId}, but ${reg.user} synced it`);
+    assert(blobs.has(r.clipPathname), `clip row ${r.clipPathname} has no blob`);
+    blobs.delete(r.clipPathname);
+  }
+  assert(blobs.size === 0, `clip blobs without a row: ${[...blobs].slice(0, 5)}`);
+
+  for (const ph of phones) {
+    const mine = [...CLOUD.sessions].filter(([, v]) => v.phone === ph).map(([id]) => id);
+    if (!mine.length) continue;
+    const db = new DatabaseSync(ph.path('perspective.db'));
+    try {
+      for (const sid of mine) {
+        const local = new Map(
+          (db.prepare('SELECT shot_number, clip_state, outcome FROM shots WHERE session_id = ?').all(sid) as { shot_number: number; clip_state: string; outcome: string }[]).map((r) => [Number(r.shot_number), r]),
+        );
+        const queued = new Set((db.prepare('SELECT shot_number FROM clip_deletes WHERE session_id = ?').all(sid) as { shot_number: number }[]).map((r) => Number(r.shot_number)));
+        const remote = new Map(rows.filter((r) => r.sessionId === sid).map((r) => [r.shotNumber, r]));
+        for (const [n, l] of local) {
+          const r = remote.get(n);
+          if (l.clip_state === 'synced' || l.clip_state === 'outcome_dirty') {
+            assert(r, `${ph.name}: shot ${sid}#${n} is ${l.clip_state} but the server has no clip`);
+            if (l.clip_state === 'synced') assert(r.outcome === l.outcome, `${ph.name}: shot ${sid}#${n} is synced as ${l.outcome}, server says ${r.outcome}`);
+          } else if (l.clip_state !== 'cutting') {
+            assert(!r, `${ph.name}: shot ${sid}#${n} is ${l.clip_state} but the server holds a clip for it`);
+          }
+        }
+        for (const n of remote.keys()) {
+          assert(local.has(n) || queued.has(n) || queued.has(0), `${ph.name}: server keeps clip ${sid}#${n} after the phone deleted it, and no remote delete is queued`);
+        }
+      }
+    } finally {
+      db.close();
+    }
   }
 }
 
@@ -1577,6 +1786,325 @@ const SCENARIOS: Record<string, Scenario> = {
     const saved = await ph.backend.sessions.saveRecording({ tempUri: clip.uri, durationMs: 7_000 });
     assert((await ph.backend.sessions.replaySource(saved.id)).state === 'available', 'retry save does not play');
   },
+
+  /**
+   * Signed in: tag shots (near the start, mid, near the end), sync. Exactly
+   * one clip per shot with the right outcome; each clip's real length, read
+   * from the file, is min(dur, r+1000) - max(0, r-3000) within one frame, and
+   * the full recording is gone from blob storage. A second sync does nothing.
+   */
+  async clip_sync_windows(w) {
+    const withAudio = w.branch('audio') === 'with';
+    const ph = await w.fresh();
+    const A = CLOUD.users.A;
+    ph.auth = { kind: 'user', user: A };
+    const pool = VIDEOS.filter((v) => v.audio === withAudio);
+    const video = pick(pool);
+    const dur = video.durationMs;
+    const releases = [randInt(0, Math.min(2_999, dur)), randInt(Math.max(0, dur - 999), dur)];
+    if (dur > 4_001) releases.push(randInt(3_000, dur - 1_001));
+    const { s, shots } = await taggedSession(ph, releases, (v) => v === video);
+    await expectStates(ph, s.id, 'pending', 'before sync');
+    const c0 = { ...w.proxy.counters };
+    const report = await syncOk(ph, 'first sync');
+    assert(report.uploaded === shots.size, `uploaded ${report.uploaded} of ${shots.size}`);
+    assert(w.proxy.counters.uploads - c0.uploads === 1 && w.proxy.counters.clipCuts - c0.clipCuts === 1, `expected one recording upload and one cut request, saw ${w.proxy.counters.uploads - c0.uploads} and ${w.proxy.counters.clipCuts - c0.clipCuts}`);
+    await expectStates(ph, s.id, 'synced', 'after sync');
+    expectServer(s.id, A, outcomesOf(shots), 'after sync');
+    await noRecordingLeft(s.id, 'after sync');
+
+    const frameMs = 1000 / video.fps;
+    for (const r of serverRows(s.id)) {
+      const rel = shots.get(r.shotNumber)!.releaseMs;
+      const startMs = Math.max(0, rel - 3_000);
+      const endMs = Math.min(dur, rel + 1_000);
+      assert(r.startMs === startMs && r.endMs === endMs, `clip #${r.shotNumber} (release ${rel} ms of ${dur}): window ${r.startMs}-${r.endMs}, expected ${startMs}-${endMs}`);
+      const info = await videoInfo(CLOUD.deps.blob.fileOf(r.clipPathname));
+      const realMs = (info.frames * 1000) / video.fps;
+      assert(Math.abs(realMs - (endMs - startMs)) <= frameMs + 1, `clip #${r.shotNumber} (release ${rel} ms of ${dur}): ${info.frames} frames = ${realMs.toFixed(1)} ms, expected ${endMs - startMs} ms within one frame`);
+      assert(info.videoCodec === 'h264', `clip #${r.shotNumber}: video codec ${info.videoCodec}`);
+      assert((info.audioCodec === 'aac') === withAudio, `clip #${r.shotNumber}: audio ${info.audioCodec}, source ${withAudio ? 'has' : 'has no'} audio`);
+    }
+
+    const c1 = { ...w.proxy.counters };
+    await syncOk(ph, 'second sync');
+    assert(w.proxy.counters.cloudCalls === c1.cloudCalls, `a sync with nothing to do made ${w.proxy.counters.cloudCalls - c1.cloudCalls} cloud calls`);
+  },
+
+  /** Shots tagged while signed out (or pending when the player signs out) never leave the phone, even after a later sign-in. */
+  async clip_sync_signed_out(w) {
+    const when = w.branch('when');
+    const ph = await w.fresh();
+    const A = CLOUD.users.A;
+    if (when === 'signed_out_before_sync') ph.auth = { kind: 'user', user: A };
+    const s0 = await ph.recordSession();
+    const { s, shots } = { s: s0, shots: new Map<number, Outcome>() };
+    for (const r of someReleases(s.video.durationMs, randInt(2, 4))) shots.set((await ph.backend.shots.addShot(s.id, r, pick(OUTCOMES))).shotNumber, 'made');
+    await expectStates(ph, s.id, when === 'signed_out_throughout' ? 'local_only' : 'pending', 'after tagging');
+    ph.auth = { kind: 'signed_out' };
+    const c0 = w.proxy.counters.cloudCalls;
+    const report = await sync(ph);
+    assert(report.skippedSignedOut === (when === 'signed_out_throughout' ? 0 : shots.size), `signed-out sync: ${json(report)}`);
+    await expectStates(ph, s.id, 'local_only', 'after a signed-out sync');
+    assert(w.proxy.counters.cloudCalls === c0, `signed out, the phone made ${w.proxy.counters.cloudCalls - c0} cloud calls`);
+
+    ph.auth = { kind: 'user', user: A };
+    await syncOk(ph, 'after signing in');
+    await expectStates(ph, s.id, 'local_only', 'after signing in');
+    assert(w.proxy.counters.cloudCalls === c0, `shots tagged while signed out were uploaded after a later sign-in (${w.proxy.counters.cloudCalls - c0} cloud calls)`);
+    assert(serverRows(s.id).length === 0, 'server holds clips of shots tagged while signed out');
+
+    const late = await ph.backend.shots.addShot(s.id, randInt(0, s.video.durationMs), 'made');
+    await syncOk(ph, 'a shot tagged after sign-in');
+    expectServer(s.id, A, new Map([[late.shotNumber, 'made' as Outcome]]), 'a shot tagged after sign-in');
+    await expectStates(ph, s.id, (n) => (n === late.shotNumber ? 'synced' : 'local_only'), 'a shot tagged after sign-in');
+  },
+
+  /** Offline, a server error or an expired token: shots stay pending, nothing is stored, the next sync succeeds. */
+  async clip_sync_retry(w) {
+    const A = CLOUD.users.A;
+    for (const fault of ['offline', 'http500', 'expired_token'] as const) {
+      w.cover('fault', fault);
+      const ph = await w.fresh();
+      ph.auth = { kind: 'user', user: A };
+      const { s, shots } = await taggedSession(ph, someReleases(VIDEOS[0]!.durationMs, randInt(1, 3)), (v) => v === VIDEOS[0]);
+      if (fault === 'offline') w.proxy.mode = { kind: 'down' };
+      if (fault === 'http500') w.proxy.mode = { kind: 'http500' };
+      if (fault === 'expired_token') ph.auth = { kind: 'expired', user: A };
+      const report = await sync(ph);
+      assert(report.errors.length > 0 && report.uploaded === 0 && report.pending === shots.size, `${fault}: ${json(report)}`);
+      await expectStates(ph, s.id, 'pending', fault);
+      assert(serverRows(s.id).length === 0, `${fault}: server stored clips`);
+      w.proxy.mode = { kind: 'pass' };
+      ph.auth = { kind: 'user', user: A };
+      await syncOk(ph, `${fault}, next sync`);
+      await expectStates(ph, s.id, 'synced', `${fault}, next sync`);
+      expectServer(s.id, A, outcomesOf(shots), `${fault}, next sync`);
+      await noRecordingLeft(s.id, `${fault}, next sync`);
+    }
+  },
+
+  /** After a sync: an outcome edit is PATCHed; a deleted shot or session is deleted remotely. */
+  async clip_sync_edits(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    for (const edit of ['outcome', 'delete_shot', 'delete_session'] as const) {
+      w.cover('edit', edit);
+      const { s, shots } = await taggedSession(ph, someReleases(VIDEOS[0]!.durationMs, 3), (v) => v === VIDEOS[0]);
+      await syncOk(ph, `${edit}: first sync`);
+      const want = outcomesOf(shots);
+      const n = pick([...shots.keys()]);
+      if (edit === 'outcome') {
+        const next = pick(OUTCOMES.filter((o) => o !== want.get(n)));
+        await ph.backend.shots.setOutcome(s.id, n, next);
+        want.set(n, next);
+        await expectStates(ph, s.id, (x) => (x === n ? 'outcome_dirty' : 'synced'), 'after the edit');
+        const r = await syncOk(ph, 'outcome edit sync');
+        assert(r.patched === 1, `expected one PATCH, report ${json(r)}`);
+        await expectStates(ph, s.id, 'synced', 'after the PATCH');
+        expectServer(s.id, A, want, 'after the PATCH');
+      } else if (edit === 'delete_shot') {
+        await ph.backend.shots.deleteShot(s.id, n);
+        want.delete(n);
+        assert((await queuedDeletes(ph)) === 1, 'deleting a synced shot did not queue a remote delete');
+        const r = await syncOk(ph, 'shot delete sync');
+        assert(r.deleted === 1, `expected one remote delete, report ${json(r)}`);
+        expectServer(s.id, A, want, 'after the remote shot delete');
+      } else {
+        await ph.backend.sessions.deleteSession(s.id);
+        const r = await syncOk(ph, 'session delete sync');
+        assert(r.deleted >= 1, `expected a remote session delete, report ${json(r)}`);
+        expectServer(s.id, A, new Map(), 'after the remote session delete');
+        const left = (await blobFiles('clips')).filter((p) => p.includes(`/${s.id}/`));
+        assert(left.length === 0, `clip blobs left after the session delete: ${left}`);
+      }
+    }
+  },
+
+  /** User B never sees, changes or deletes user A's clips. */
+  async clip_sync_isolation(w) {
+    const { A, B } = CLOUD.users;
+    const pa = await w.fresh();
+    pa.auth = { kind: 'user', user: A };
+    const pb = await w.fresh();
+    pb.auth = { kind: 'user', user: B };
+    const a = await taggedSession(pa, someReleases(VIDEOS[0]!.durationMs, 2), (v) => v === VIDEOS[0]);
+    const b = await taggedSession(pb, someReleases(VIDEOS[0]!.durationMs, 1), (v) => v === VIDEOS[0]);
+    await syncOk(pa, 'A sync');
+    await syncOk(pb, 'B sync');
+    const tokenB = await CLOUD.token(B);
+    const list = (await (await fetch(`${w.proxy.url}/v1/clips`, { headers: { authorization: `Bearer ${tokenB}` } })).json()) as { clips: { sessionId: string }[] };
+    assert(list.clips.length > 0 && list.clips.every((c) => c.sessionId !== a.s.id), `B's clip list shows A's session: ${json(list.clips.map((c) => c.sessionId))}`);
+    const onlyA = (await (await fetch(`${w.proxy.url}/v1/clips?sessionId=${a.s.id}`, { headers: { authorization: `Bearer ${tokenB}` } })).json()) as { clips: unknown[] };
+    assert(onlyA.clips.length === 0, `B can list A's session by id: ${json(onlyA)}`);
+    const n = [...a.shots.keys()][0]!;
+    const patched = await pb.backend.api.patchShotOutcome(tokenB, a.s.id, n, 'made').then(() => 'resolved', (err) => (err as BackendError).code);
+    assert(patched === 'not_found', `B's PATCH of A's shot: ${patched}`);
+    await pb.backend.api.deleteShotClip(tokenB, a.s.id, n);
+    await pb.backend.api.deleteSessionClips(tokenB, a.s.id);
+    expectServer(a.s.id, A, outcomesOf(a.shots), "A's clips after B's PATCH and DELETEs");
+    expectServer(b.s.id, B, outcomesOf(b.shots), "B's own clips");
+  },
+
+  /** The video was removed before its clips synced: the shots become unavailable and nothing is uploaded. */
+  async clip_sync_video_removed(w) {
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: CLOUD.users.A };
+    const { s, shots } = await taggedSession(ph, someReleases(VIDEOS[0]!.durationMs, randInt(1, 3)), (v) => v === VIDEOS[0]);
+    const before = await ph.backend.shots.stats(s.id);
+    await ph.backend.sessions.removeVideo(s.id);
+    const c0 = w.proxy.counters.cloudCalls;
+    const r = await syncOk(ph, 'sync after removing the video');
+    assert(r.unavailable === shots.size, `expected ${shots.size} unavailable, report ${json(r)}`);
+    await expectStates(ph, s.id, 'unavailable', 'after the sync');
+    assert(w.proxy.counters.cloudCalls === c0, `uploaded ${w.proxy.counters.cloudCalls - c0} cloud calls for a removed video`);
+    assert(serverRows(s.id).length === 0, 'server stored clips of a removed video');
+    assert(json(await ph.backend.shots.stats(s.id)) === json(before), 'stats changed');
+  },
+
+  /** A release after the end of the recording: that shot gets a per-shot error and ends unavailable; the others sync. */
+  async clip_sync_release_beyond_end(w) {
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: CLOUD.users.A };
+    const s = await ph.recordSession();
+    const dur = s.video.durationMs;
+    const good = await ph.backend.shots.addShot(s.id, randInt(0, dur), 'made');
+    const beyond = await ph.backend.shots.addShot(s.id, dur + randInt(200, 3_000), 'missed');
+    const report = await sync(ph);
+    assert(report.pending === 0, `the beyond-the-end shot keeps waiting: ${json(report)}`);
+    await expectStates(ph, s.id, (n) => (n === good.shotNumber ? 'synced' : 'unavailable'), `release ${beyond.releaseMs} ms of a ${dur} ms recording`);
+    expectServer(s.id, CLOUD.users.A, new Map([[good.shotNumber, 'made' as Outcome]]), 'after the sync');
+    const c1 = w.proxy.counters.uploads;
+    await sync(ph);
+    assert(w.proxy.counters.uploads === c1, 'the unavailable shot is uploaded again on the next sync');
+  },
+
+  /** Concurrent syncNow calls join one run: one recording upload, one cut request. */
+  async clip_sync_concurrent(w) {
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: CLOUD.users.A };
+    const { s, shots } = await taggedSession(ph, someReleases(VIDEOS[0]!.durationMs, 2), (v) => v === VIDEOS[0]);
+    await register(ph);
+    const c0 = { ...w.proxy.counters };
+    const calls = Array.from({ length: randInt(2, 4) }, () => ph.backend.clips.syncNow());
+    assert(calls.every((c) => c === calls[0]), 'concurrent syncNow calls started separate runs');
+    const reports = await Promise.all(calls);
+    assert(reports[0]!.uploaded === shots.size && reports[0]!.errors.length === 0, `report ${json(reports[0])}`);
+    assert(w.proxy.counters.uploads - c0.uploads === 1 && w.proxy.counters.clipCuts - c0.clipCuts === 1, `uploads ${w.proxy.counters.uploads - c0.uploads}, cut requests ${w.proxy.counters.clipCuts - c0.clipCuts}`);
+    expectServer(s.id, CLOUD.users.A, outcomesOf(shots), 'after the joined run');
+  },
+
+  /**
+   * Kills the app at every other await point of syncNow (odd or even ones
+   * per run, each before and after the call lands) while it uploads a new
+   * shot, PATCHes an edited outcome and deletes a shot remotely. After the
+   * relaunch and another sync the end state is exact: every shot has exactly
+   * one clip with its outcome, the deleted one has none, queues are empty,
+   * and at most one extra recording upload happened.
+   */
+  async clip_sync_kill_sweep(w) {
+    const start = w.branch('await_points') === 'odd' ? 1 : 2;
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const video = VIDEOS.reduce((a, b) => (a.durationMs <= b.durationMs ? a : b));
+    const { s, shots } = await taggedSession(ph, someReleases(video.durationMs, 2), (v) => v === video);
+    await syncOk(ph, 'setup');
+    const want = outcomesOf(shots);
+    for (let k = start; k < 400; k += 2) {
+      for (const land of [false, true]) {
+        // Work for this sync: one outcome edit (PATCH), one deleted shot (DELETE), one new shot (upload + cut).
+        const [edited, deleted] = [...want.keys()];
+        const next = pick(OUTCOMES.filter((o) => o !== want.get(edited!)));
+        await ph.backend.shots.setOutcome(s.id, edited!, next);
+        want.set(edited!, next);
+        await ph.backend.shots.deleteShot(s.id, deleted!);
+        want.delete(deleted!);
+        const outcome = pick(OUTCOMES);
+        want.set((await ph.backend.shots.addShot(s.id, randInt(0, video.durationMs), outcome)).shotNumber, outcome);
+
+        const u0 = w.proxy.counters.uploads;
+        const proc = ph.platform.process;
+        proc.killAtCall(k, land);
+        const run = ph.backend.clips.syncNow();
+        const done = await Promise.race([run, proc.died.then(() => null)]);
+        const where = done ? 'uninterrupted sync' : `syncNow killed at await point ${k}, ${proc.diedAt}`;
+        try {
+          if (done) {
+            proc.disarm();
+            assert(done.errors.length === 0 && done.pending === 0, `report ${json(done)}`);
+          } else {
+            await ph.relaunch();
+            await syncOk(ph, 'sync after the relaunch');
+          }
+          await checkInvariants(ph, w.laptop);
+          await expectStates(ph, s.id, 'synced', 'end state');
+          expectServer(s.id, A, want, 'end state');
+          assert((await queuedDeletes(ph)) === 0, 'end state: clip_deletes not empty');
+          await noRecordingLeft(s.id, 'end state');
+          const uploads = w.proxy.counters.uploads - u0;
+          assert(uploads >= 1 && uploads <= 2, `end state: ${uploads} recording uploads for one new shot (at most one extra allowed)`);
+          await checkCloudInvariants([ph]);
+        } catch (err) {
+          throw new AssertionFailed(`${where}: ${(err as Error).message}`);
+        }
+        if (done) {
+          assert(k > 10, `syncNow made only ${k - 1} port calls; the sweep is not reaching it`);
+          return;
+        }
+      }
+    }
+    throw new AssertionFailed('sync kill sweep never reached the end of syncNow');
+  },
+
+  /** While a sync is stalled (held upload, slow API, hanging auth lookup), recording, tagging and replay stay responsive. */
+  async clip_sync_responsive(w) {
+    const A = CLOUD.users.A;
+    for (const stall of ['upload_put', 'api_delay', 'slow_auth'] as const) {
+      w.cover('stall', stall);
+      const ph = await w.fresh();
+      ph.auth = { kind: 'user', user: A };
+      const first = await taggedSession(ph, someReleases(VIDEOS[0]!.durationMs, 2), (v) => v === VIDEOS[0]);
+      const hold = deferred();
+      const c0 = { ...w.proxy.counters };
+      if (stall === 'upload_put') w.proxy.mode = { kind: 'stall_requests', match: /^PUT \/local-blob/, until: hold.promise };
+      if (stall === 'api_delay') w.proxy.mode = { kind: 'delay', ms: 900 };
+      if (stall === 'slow_auth') ph.auth = { kind: 'slow', user: A };
+      let settled = false;
+      const run = sync(ph).finally(() => (settled = true));
+      try {
+        // Wait until the sync is really held at its stall point.
+        const deadline = Date.now() + 3_000;
+        if (stall === 'upload_put') while (w.proxy.counters.uploads === c0.uploads && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+        if (stall === 'api_delay') while (w.proxy.counters.cloudCalls === c0.cloudCalls && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+        // A tag waits at most the core's auth probe (500 ms) when the token lookup is slow; otherwise it is immediate.
+        const perTag = stall === 'slow_auth' ? 650 : 150;
+        const t0 = Date.now();
+        const s2 = await ph.recordSession(undefined, (v) => v === VIDEOS[0]);
+        const tagged: number[] = [];
+        for (const r of someReleases(VIDEOS[0]!.durationMs, 2)) {
+          const t = Date.now();
+          tagged.push((await ph.backend.shots.addShot(s2.id, r, 'made')).shotNumber);
+          assert(Date.now() - t <= perTag, `${stall}: tagging a shot took ${Date.now() - t} ms during a stalled sync`);
+        }
+        await ph.backend.shots.setOutcome(s2.id, tagged[0]!, 'missed');
+        assert((await ph.backend.sessions.replaySource(s2.id)).state === 'available', `${stall}: replay unavailable`);
+        assert((await ph.backend.sessions.listWithStats()).length === 2, `${stall}: Saved Clips list wrong`);
+        const total = Date.now() - t0;
+        assert(total <= 2 * perTag + 400, `${stall}: recording and tagging took ${total} ms during a stalled sync`);
+        if (stall !== 'slow_auth') assert(!settled, `${stall}: the sync was not actually stalled`);
+      } finally {
+        hold.resolve();
+        w.proxy.mode = { kind: 'pass' };
+      }
+      await run;
+      ph.auth = { kind: 'user', user: A };
+      await syncOk(ph, `${stall}: sync after the stall`);
+      expectServer(first.s.id, A, outcomesOf(first.shots), `${stall}: first session`);
+      await expectStates(ph, first.s.id, 'synced', `${stall}: first session`);
+    }
+  },
 };
 
 // ---------- invariants ----------
@@ -1682,7 +2210,22 @@ async function main() {
   await mkdir(laptop.mediaDir, { recursive: true });
   await laptop.publish();
 
-  const app = await buildApp({ catalogPath: laptop.catalogPath, mediaDir: laptop.mediaDir });
+  const t0Pool = Date.now();
+  VIDEOS = await makeVideoPool(join(ROOT, 'videos'));
+  console.log(`  video pool: ${VIDEOS.map((v) => `${v.durationMs} ms${v.audio ? '+audio' : ''}`).join(', ')} (${Date.now() - t0Pool} ms)`);
+  const secret = randomBytes(32).toString('hex');
+  const tokens = new Map<string, Promise<string>>();
+  CLOUD = {
+    deps: createLocalDeps(join(ROOT, 'cloud'), { jwtSecret: secret, inMemory: true }),
+    users: { A: randomUUID(), B: randomUUID() },
+    token: (user, ttl = 3_600) => {
+      const key = `${user}/${ttl}`;
+      if (!tokens.has(key)) tokens.set(key, signLocalToken(secret, user, ttl));
+      return tokens.get(key)!;
+    },
+    sessions: new Map(),
+  };
+  const app = await buildApp({ catalogPath: laptop.catalogPath, mediaDir: laptop.mediaDir, deps: CLOUD.deps });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const proxy = await startFaultProxy((app.server.address() as AddressInfo).port);
 
@@ -1780,6 +2323,7 @@ async function main() {
         ph.freeBytesOverride = undefined;
         await checkInvariants(ph, laptop);
       }
+      await checkCloudInvariants(world.touched);
       s.pass++;
     } catch (err) {
       failed = true;
@@ -1791,6 +2335,7 @@ async function main() {
       await laptop.reset();
       for (const ph of pool) {
         ph.freeBytesOverride = undefined;
+        ph.auth = { kind: 'signed_out' };
         if (failed || ph.dead) await ph.relaunch().catch(() => undefined);
       }
     }
