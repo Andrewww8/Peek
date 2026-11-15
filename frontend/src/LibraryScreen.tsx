@@ -11,8 +11,8 @@ import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { PracticeStore } from './database';
 import { inspectRecording, localVideoUri, recordingFiles, removeIfPresent } from './device-storage';
-import { clipTime, DRILL_NAME, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES, sessionTime, STORAGE_RESERVE_BYTES, type Session } from './practice';
-import { saveRecording } from './recordings';
+import { clipTime, DRILL_NAME, RECORD_MAX_BYTES, sessionTime, STORAGE_RESERVE_BYTES, type Session } from './practice';
+import { checkImportDuration, saveRecording } from './recordings';
 import {
   Button, colors, fonts, gradients, Icon, Loading, message, Notice, Page, Panel, StatsGrid, Strip,
   TextButton, Title, TopBar, ui,
@@ -129,7 +129,7 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
       if (!['.mov', '.mp4', '.m4v'].includes(extension)) throw new Error('Choose a MOV, MP4, or M4V video.');
       if (recordingFiles.size(source) > RECORD_MAX_BYTES) throw new Error('Choose a video smaller than 20 MB.');
       const draft = await inspectRecording(source, randomUUID(), Date.now());
-      if (draft.durationMs > RECORD_LIMIT_SECONDS * 1000) throw new Error('Choose a video up to 30 seconds long.');
+      checkImportDuration(draft.durationMs);
       saving = true;
       const saved = saveRecording(draft, recordingFiles, store, userId);
       onImported(saved);

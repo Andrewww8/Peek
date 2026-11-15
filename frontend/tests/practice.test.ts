@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { clipTime, shotStats } from '../src/practice.ts';
-import { recoverRecordings, removeRecording, saveRecording } from '../src/recordings.ts';
+import { checkImportDuration, recoverRecordings, removeRecording, saveRecording } from '../src/recordings.ts';
 import type { RecordingDraft } from '../src/recordings.ts';
 import { environment } from './fixture.ts';
 
@@ -146,4 +146,12 @@ test('attaching a guest clip queues its existing shots for only the active accou
   ]);
   assert.throws(() => store.prepareAnalysis(clip.id, otherAccount), /different account/);
   assert.equal(store.hasCloudWork(otherAccount), false);
+});
+
+test('accepts an imported clip that the container rounds just past 30 seconds', () => {
+  // Photos trims and Peek's own 30-second recordings often end a frame past 30 s.
+  assert.doesNotThrow(() => checkImportDuration(30_000));
+  assert.doesNotThrow(() => checkImportDuration(30_034));
+  assert.throws(() => checkImportDuration(30_600), /up to 30 seconds/);
+  assert.throws(() => checkImportDuration(45_000), /up to 30 seconds/);
 });
