@@ -239,9 +239,18 @@ export class PracticeStore {
   }
 
   listSessionSummaries() {
+    // One query for every shot instead of one per session: this runs on each Saved clips render.
+    const outcomes = new Map<string, Pick<Shot, 'outcome'>[]>();
+    for (const shot of this.db.getAllSync<{ sessionId: string; outcome: ShotOutcome }>(
+      'SELECT session_id AS sessionId, outcome FROM shots',
+    )) {
+      const list = outcomes.get(shot.sessionId);
+      if (list) list.push(shot);
+      else outcomes.set(shot.sessionId, [shot]);
+    }
     return this.listSessions().map((session) => ({
       ...session,
-      stats: shotStats(this.listShots(session.id)),
+      stats: shotStats(outcomes.get(session.id) ?? []),
     }));
   }
 
