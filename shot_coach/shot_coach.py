@@ -1138,6 +1138,36 @@ def canon_rot(p):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
+def refine_arm_depth(p):
+    """Re-solve how far each arm bone points towards or away from the camera. A single camera measures a bone's sideways and vertical extent well but
+    its depth poorly: the lifter can flatten one arm into the picture and stretch the other. Each bone has one true length (the same left and right), so
+    the size of its depth is whatever is left once the in-picture length is taken out. Which way it points (towards or away) is the lifter's, except:
+      - an upper arm raised above the shoulder cannot point behind the chest, so it takes the direction that puts it in front of the body;
+      - until just after the release both hands are on or near the ball, so the two forearms take the directions that bring the wrists closest together
+        (the lifter's choice wins ties); later in the follow-through the hands separate and the lifter's directions are kept.
+    Input and output: (T,17,3) in the camera frame (x right, y down, z away)."""
+    p = p.copy(); ok = ~np.isnan(p).any((1, 2))
+    if ok.sum() < 8: return p
+    q = p[ok]; unit = lambda v: v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-9)
+    up = unit(q[:, 8] - q[:, 0]); fwd = unit(np.cross(up, unit((q[:, 14] - q[:, 11]) + (q[:, 1] - q[:, 4]))))      # the way the chest faces
+    smooth = lambda x: np.convolve(np.pad(x, 2, mode="edge"), np.ones(5) / 5, mode="valid")
+    depth = lambda a, b, L: np.sqrt(np.clip(L * L - ((q[:, b] - q[:, a])[:, :2] ** 2).sum(-1), 0, None))
+    length = lambda pair: float(np.median(np.concatenate([np.linalg.norm(q[:, b] - q[:, a], axis=-1) for a, b in pair])))
+    L = length(((14, 15), (11, 12)))
+    for sh, el, wr in ((14, 15, 16), (11, 12, 13)):                                         # upper arms; the wrist follows the moved elbow
+        v = q[:, el] - q[:, sh]; sign = np.where(-v[:, 1] > 0.2 * L, np.where(fwd[:, 2] >= 0, 1.0, -1.0), np.where(v[:, 2] >= 0, 1.0, -1.0))
+        shift = smooth(sign * depth(sh, el, L)) - v[:, 2]; q[:, el, 2] += shift; q[:, wr, 2] += shift
+    L = length(((15, 16), (12, 13))); mR, mL = depth(15, 16, L), depth(12, 13, L); zR, zL = (q[:, 16] - q[:, 15])[:, 2], (q[:, 13] - q[:, 12])[:, 2]
+    best, pick = np.full(len(q), np.inf), np.zeros((len(q), 2)); held = (np.where(ok)[0] <= 32).astype(float)        # the release is sample 30
+    for sR in (1.0, -1.0):
+        for sL in (1.0, -1.0):
+            gap = np.sqrt(((q[:, 16, :2] - q[:, 13, :2]) ** 2).sum(-1) + ((q[:, 15, 2] + sR * mR) - (q[:, 12, 2] + sL * mL)) ** 2)
+            cost = gap * held + 0.1 * L * ((np.sign(zR) != sR).astype(float) + (np.sign(zL) != sL))          # small preference for the lifter's own choice
+            upd = cost < best; best[upd] = cost[upd]; pick[upd] = (sR, sL)
+    q[:, 16, 2] = q[:, 15, 2] + smooth(pick[:, 0] * mR); q[:, 13, 2] = q[:, 12, 2] + smooth(pick[:, 1] * mL)
+    p[ok] = q; return p
+
+
 def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
     """Animated .glb: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
     avg = ref.get("averages", {}).get(player, {}).get(stype)
@@ -1152,7 +1182,7 @@ def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
                     a = int(np.floor(q)); b = min(a + 1, len(x) - 1); out[j] = x[a] * (1 - (q - a)) + x[b] * (q - a)
             return out
         p, ext, rise = shift(p), shift(ext), shift(rise)
-    rise = np.nan_to_num(rise)
+    rise = np.nan_to_num(rise); p = refine_arm_depth(p)
     Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
     h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
     nan = lambda x: np.array([[[np.nan] * 3] * len(x[0] if x[0] is not None else x[-1]) if f is None else f for f in x], float)
