@@ -4,16 +4,17 @@ import { File, Paths } from 'expo-file-system';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEvent } from 'expo';
-import { useVideoPlayer } from 'expo-video';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import type { VideoThumbnail } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { PracticeStore } from './database';
 import { inspectRecording, localVideoUri, recordingFiles, removeIfPresent } from './device-storage';
+import { recognizeRecordingShot } from './guest-pose';
 import { clipTime, DRILL_NAME, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES, sessionTime, STORAGE_RESERVE_BYTES, type Session } from './practice';
-import { confirmRecordingFootage } from './recording-review';
-import { saveConfirmedRecording } from './recordings';
+import { finishRecordingReview } from './recordings';
+import type { FootageDecision, RecordingDraft } from './recordings';
 import {
   Button, colors, fonts, gradients, Icon, Loading, message, Notice, Page, Panel, StatsGrid, Strip,
   TextButton, Title, TopBar, ui,
@@ -93,6 +94,13 @@ export function SavedClips({ store, onMenu, onRecord, onReplay }: {
   );
 }
 
+type ImportReview = { draft: RecordingDraft; recognized: boolean; owner: string | null };
+
+function removeImportCopy(source?: string) {
+  if (!source?.startsWith(Paths.cache.uri)) return;
+  try { removeIfPresent(source); } catch { /* The picker’s cache can be purged by the system. */ }
+}
+
 export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
   store: PracticeStore;
   userId: string | null;
@@ -100,22 +108,31 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
   onImported: (session: Session) => void;
   onCancel: () => void;
 }) {
-  const [phase, setPhase] = useState<'opening' | 'checking' | 'saving'>();
+  const [phase, setPhase] = useState<'opening' | 'checking' | 'reviewing'>();
   const busy = phase !== undefined;
   const [notice, setNotice] = useState<string>();
-  const importing = useRef(false);
+  const [review, setReview] = useState<ImportReview>();
+  const importing = useRef<symbol>(undefined);
+  const pending = useRef<ImportReview>(undefined);
   const sessions = store.listSessions().flatMap((session) => {
     const uri = localVideoUri(session.videoPath);
     return uri ? [{ session, uri }] : [];
   });
 
+  useEffect(() => () => {
+    importing.current = undefined;
+    removeImportCopy(pending.current?.draft.sourceUri);
+    pending.current = undefined;
+  }, []);
+
   async function importClip() {
     if (importing.current) return;
-    importing.current = true;
+    const request = Symbol();
+    importing.current = request;
     setNotice(undefined);
     setPhase('opening');
     let source: string | undefined;
-    let saving = false;
+    let reviewing = false;
     try {
       if (Paths.availableDiskSpace < STORAGE_RESERVE_BYTES + RECORD_MAX_BYTES) {
         throw new Error('Free at least 32 MB on this iPhone before importing a clip.');
@@ -126,38 +143,60 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
       });
       if (result.canceled) return;
       source = result.assets[0]?.uri;
+      if (importing.current !== request) return;
       if (!source) throw new Error('No video was selected.');
       const extension = new File(source).extension.toLowerCase();
       if (!['.mov', '.mp4', '.m4v'].includes(extension)) throw new Error('Choose a MOV, MP4, or M4V video.');
       if (recordingFiles.size(source) > RECORD_MAX_BYTES) throw new Error('Choose a video smaller than 20 MB.');
       const draft = await inspectRecording(source, randomUUID(), Date.now());
       if (draft.durationMs > RECORD_LIMIT_SECONDS * 1000) throw new Error('Choose a video up to 30 seconds long.');
+      if (importing.current !== request) return;
       setPhase('checking');
-      const saved = await saveConfirmedRecording(draft, recordingFiles, store, async () => {
-        const decision = await confirmRecordingFootage(draft.sourceUri);
-        if (decision === 'save') {
-          saving = true;
-          setPhase('saving');
+      const recognized = await recognizeRecordingShot(draft.sourceUri) === 'recognized';
+      if (importing.current !== request) return;
+      // The Photos picker only selects footage. A button in Peek makes the recording decision.
+      const selected = { draft, recognized, owner: userId };
+      pending.current = selected;
+      reviewing = true;
+      setReview(selected);
+      setPhase('reviewing');
+    } catch (error) {
+      if (importing.current === request) setNotice(message(error, 'The video could not be imported.'));
+    } finally {
+      if (!reviewing) {
+        removeImportCopy(source);
+        if (importing.current === request) {
+          importing.current = undefined;
+          setPhase(undefined);
         }
-        return decision;
-      }, userId);
+      }
+    }
+  }
+
+  function reviewImport(id: string, decision: FootageDecision) {
+    const selected = pending.current;
+    if (!selected || selected.draft.id !== id) return;
+    pending.current = undefined;
+    importing.current = undefined;
+    setReview(undefined);
+    setPhase(undefined);
+    try {
+      const saved = finishRecordingReview(selected.draft, recordingFiles, store, decision, selected.owner);
       if (saved) onImported(saved);
       else setNotice('Video discarded.');
     } catch (error) {
-      setNotice(message(error, 'The video could not be imported.'));
+      setNotice(message(error, decision === 'discard' ? 'The discard could not be completed.' : 'The video could not be imported.'));
     } finally {
-      if (source?.startsWith(Paths.cache.uri) && !saving) {
-        try { removeIfPresent(source); } catch { /* The picker’s cache can be purged by the system. */ }
-      }
-      setPhase(undefined);
-      importing.current = false;
+      if (decision === 'discard') removeImportCopy(selected.draft.sourceUri);
     }
   }
+
+  if (review) return <ImportedFootageReview review={review} onDecision={(decision) => reviewImport(review.draft.id, decision)} />;
 
   return (
     <View style={styles.flex}>
       <View style={styles.pickerBar}>
-        <TextButton label="Cancel" onPress={onCancel} disabled={busy} style={styles.cancel} />
+        <TextButton label="Cancel" onPress={() => { if (!importing.current) onCancel(); }} disabled={busy} style={styles.cancel} />
         <Text accessibilityRole="header" style={styles.pickerTitle}>Recents</Text>
         <TextButton label="Photos" onPress={importClip} disabled={busy} style={styles.photos} />
       </View>
@@ -165,7 +204,7 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
       {notice || busy ? (
         <View style={styles.importAction}>
           {notice ? <Notice>{notice}</Notice> : null}
-          {phase ? <Loading text={phase === 'checking' ? 'Checking for a shot…' : phase === 'saving' ? 'Saving to this iPhone…' : 'Opening video…'} /> : null}
+          {phase ? <Loading text={phase === 'checking' ? 'Checking for a shot…' : 'Opening video…'} /> : null}
         </View>
       ) : null}
       <FlatList
@@ -175,9 +214,24 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
         columnWrapperStyle={styles.gridRow}
         contentContainerStyle={styles.grid}
         ListEmptyComponent={<Text style={styles.pickerCopy}>No practice videos on this iPhone yet.</Text>}
-        renderItem={({ item }) => <ClipTile session={item.session} uri={item.uri} onSelect={onSelect} disabled={busy} />}
+        renderItem={({ item }) => <ClipTile session={item.session} uri={item.uri}
+          onSelect={(session) => { if (!importing.current) onSelect(session); }} disabled={busy} />}
       />
     </View>
+  );
+}
+
+function ImportedFootageReview({ review, onDecision }: { review: ImportReview; onDecision: (decision: FootageDecision) => void }) {
+  const player = useVideoPlayer(review.draft.sourceUri);
+  return (
+    <Page>
+      <Title title={review.recognized ? 'Save this clip?' : 'Are you sure this is the right footage?'}
+        subtitle={clipTime(review.draft.durationMs, true)} />
+      <VideoView player={player} style={styles.reviewVideo} contentFit="contain"
+        accessibilityLabel="Selected video preview" />
+      <Button label="No, discard" kind="secondary" onPress={() => onDecision('discard')} />
+      <Button label="Yes, save" onPress={() => onDecision('save')} />
+    </Page>
   );
 }
 
@@ -230,6 +284,7 @@ const styles = StyleSheet.create({
   photos: { minWidth: 78, alignItems: 'flex-end' },
   pickerCopy: { ...ui.body, textAlign: 'center', paddingVertical: 10 },
   importAction: { paddingHorizontal: 16, paddingBottom: 10, gap: 8 },
+  reviewVideo: { width: '100%', aspectRatio: 4 / 3, backgroundColor: colors.media, borderRadius: 14, overflow: 'hidden' },
   grid: { paddingHorizontal: 16, paddingBottom: 16, gap: 4 },
   gridRow: { gap: 4 },
   tile: { flexBasis: '32%', flexGrow: 0, aspectRatio: 1, backgroundColor: colors.media, overflow: 'hidden', borderRadius: 4 },

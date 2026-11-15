@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { clipTime, shotStats } from '../src/practice.ts';
-import { recoverRecordings, removeRecording, saveConfirmedRecording, saveRecording } from '../src/recordings.ts';
+import { finishRecordingReview, recoverRecordings, removeRecording, saveRecording } from '../src/recordings.ts';
 import type { FootageDecision, RecordingDraft } from '../src/recordings.ts';
 import { environment } from './fixture.ts';
 
@@ -92,7 +92,7 @@ test('keeps unconfirmed footage outside saved sessions and accepts an explicitly
 
   let answer!: (decision: FootageDecision) => void;
   const confirmation = new Promise<FootageDecision>((resolve) => { answer = resolve; });
-  const saving = saveConfirmedRecording(pending, files, connection.store, () => confirmation);
+  const saving = confirmation.then((decision) => finishRecordingReview(pending, files, connection.store, decision));
   assert.deepEqual(connection.store.listSessions(), []);
   assert.deepEqual(files.listVideos(), []);
   assert.equal(files.size(pending.sourceUri), pending.sizeBytes);
@@ -107,13 +107,13 @@ test('keeps unconfirmed footage outside saved sessions and accepts an explicitly
 
   assert.throws(() => saveRecording(pending, files, store), /discarded/);
   const accepted = { ...pending, id: randomUUID() };
-  const saved = await saveConfirmedRecording(accepted, files, store, async () => 'save');
+  const saved = finishRecordingReview(accepted, files, store, 'save');
   assert.ok(saved?.videoPath);
   assert.equal(files.size(saved.videoPath), pending.sizeBytes);
   assert.deepEqual(store.listSessions(), [saved]);
 });
 
-test('discards the exact saved row and prevents recovery when its video cannot be removed', async (t) => {
+test('discards the exact saved row and prevents recovery when its video cannot be removed', (t) => {
   const { open, files, path } = environment(t);
   const connection = open();
   const pending = draft();
@@ -124,7 +124,7 @@ test('discards the exact saved row and prevents recovery when its video cannot b
   assert.ok(persisted.videoPath);
 
   const unavailableFiles = { ...files, remove: () => { throw new Error('File is busy'); } };
-  assert.equal(await saveConfirmedRecording(pending, unavailableFiles, connection.store, async () => 'discard'), null);
+  assert.equal(finishRecordingReview(pending, unavailableFiles, connection.store, 'discard'), null);
   assert.equal(connection.store.getSession(pending.id), null);
   assert.ok(files.size(persisted.videoPath));
   connection.close();

@@ -12,7 +12,7 @@ import { RecordingDot } from './PeekMotion';
 import { clipTime, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES } from './practice';
 import type { Session } from './practice';
 import { confirmRecordingFootage } from './recording-review';
-import { RECORDING_FREE_BYTES, saveConfirmedRecording } from './recordings';
+import { finishRecordingReview, RECORDING_FREE_BYTES } from './recordings';
 import type { FootageDecision, RecordingDraft } from './recordings';
 import { RecordingSaveProgress } from './ShotAnalysisProgress';
 import { Button, colors, gradients, IconButton, Loading, message, Notice, ui } from './ui';
@@ -82,11 +82,9 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
     setNotice(undefined);
     try {
       clip.draft ??= await inspectRecording(clip.uri, clip.id, clip.createdAt);
-      const session = await saveConfirmedRecording(clip.draft, recordingFiles, store, async () => {
-        clip.decision ??= await confirmRecordingFootage(clip.uri);
-        if (clip.decision === 'save') transition('saving');
-        return clip.decision;
-      }, clip.cloudUserId);
+      clip.decision ??= await confirmRecordingFootage(clip.uri);
+      if (clip.decision === 'save') transition('saving');
+      const session = finishRecordingReview(clip.draft, recordingFiles, store, clip.decision, clip.cloudUserId);
       pending.current = null;
       if (!session) {
         if (clip.uri.startsWith(Paths.cache.uri)) {

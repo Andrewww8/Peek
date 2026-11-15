@@ -62,11 +62,11 @@ function removeDiscardedFile(path: string, files: RecordingFiles) {
   try { files.remove(path); } catch { /* Recovery retries cleanup for discarded recording IDs. */ }
 }
 
-export async function saveConfirmedRecording(
+export function finishRecordingReview(
   draft: RecordingDraft, files: RecordingFiles, sessions: Sessions & { discardSession(id: string): void },
-  confirm: () => Promise<FootageDecision>, cloudUserId: string | null = null,
+  decision: FootageDecision, cloudUserId: string | null = null,
 ) {
-  if (await confirm() === 'save') return saveRecording(draft, files, sessions, cloudUserId);
+  if (decision === 'save') return saveRecording(draft, files, sessions, cloudUserId);
   sessions.discardSession(draft.id);
   removeDiscardedFile(recordingPath(draft), files);
   return null;
