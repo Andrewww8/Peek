@@ -25,10 +25,13 @@ OUTPUTS (all in outputs/)
         units: body heights, pelvis-relative, x right, y down, z away from the camera
   <video>_similar_<type>.txt / .json        the printed report and the same result as data
   <video>_difference_<type>_<player>.txt / .json / .csv     report, data, and the full table of measures
+  ..._similar_<type>.html / ..._difference_<type>_<player>.html     3D viewer: your skeleton (grey) over the player's average shot (orange);
+                                            similar = the closest player, difference = the player you chose
   <video>.mp4                               only with --clip
 
 REQUIREMENTS (all next to this script)
-  nba_reference.json          the NBA players' measures, measure names, descriptions and cues
+  nba_reference.json          the NBA players' measures, measure names, descriptions, cues and average shots
+  assets/skeleton.glb         the skeleton model drawn by the 3D viewer (the viewer page loads three.js from a CDN, so it needs internet)
   third_party/PoseMamba/      the PoseMamba model code (Apache-2.0)
   sscan.c                     selective-scan kernel; compiled to libsscan.dylib on first run (needs the Xcode command line tools)
   weights/PoseMamba_L.bin     3D lifting model weights; downloaded on first run (114 MB, from Hugging Face)
@@ -42,6 +45,7 @@ PIPELINE (video input, about 5 s after the first run)
   fingertips/toes -> release point (fingertip peak) -> quality score -> 34 measures -> comparison
 """
 import argparse
+import base64
 import contextlib
 import csv
 import ctypes
@@ -954,6 +958,127 @@ def lift(video, out_dir, hand=None, clip=False):
                  f"camera {camera}{' (corrected)' if comp else ''}, {nsw} swapped frames fixed, shooter {hgt:.0f} px tall, {len(rels)} shot(s) found")
 
 
+# ===================================================================== 3D viewer (your skeleton over the player's average shot)
+VIEWER_HTML = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<style>
+html,body{height:100%;margin:0;background:#1a1a1a;overflow:hidden;font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff}
+#wrap{position:absolute;inset:0 0 56px 0;background:#000}
+canvas{width:100%;height:100%;display:block;touch-action:none}
+#legend{position:absolute;right:10px;bottom:10px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;pointer-events:none}
+#legend span{display:flex;align-items:center;gap:6px;color:rgba(255,255,255,.6)}
+#legend i{width:9px;height:9px;border-radius:50%;flex:none}
+#msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);pointer-events:none}
+#bar{position:absolute;left:0;right:0;bottom:0;height:56px;background:#1D1D1D;display:flex;align-items:center;gap:14px;padding:0 16px;box-sizing:border-box}
+#play{width:32px;height:32px;border-radius:50%;border:0;background:#fff;color:#1D1D1D;font-size:13px;cursor:pointer;flex:none}
+#track{position:relative;flex:1;height:32px;cursor:pointer;touch-action:none}
+#track .line{position:absolute;left:0;right:0;top:50%;height:8px;margin-top:-4px;border-radius:4px;background:#1f2937}
+#track .rel{position:absolute;top:0;bottom:0;border-left:1px dashed #f97066}
+#track .knob{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+#time{width:58px;text-align:right;font-variant-numeric:tabular-nums;color:rgba(255,255,255,.7);flex:none}
+#speed{background:#1D1D1D;color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:6px 8px;font:inherit;flex:none}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/"}}</script>
+</head><body>
+<div id="wrap"><canvas id="cv"></canvas><div id="msg">Loading…</div><div id="legend"></div></div>
+<div id="bar"><button id="play" aria-label="Play or pause">❚❚</button><div id="track"><div class="line"></div><div class="rel"></div><div class="knob"></div></div>
+ <span id="time"></span><select id="speed" aria-label="Speed"><option value="0.25">0.25x</option><option value="0.5" selected>0.5x</option><option value="1">1x</option></select></div>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+const D=__DATA__,NT=46,REL=30,H=1.8,$=id=>document.getElementById(id);
+const canvas=$('cv'),scene=new THREE.Scene();scene.background=new THREE.Color(0x1a1a1a);
+scene.add(new THREE.AmbientLight(0xffffff,0.6));const dl=new THREE.DirectionalLight(0xffffff,0.8);dl.position.set(5,10,5);scene.add(dl);
+const camera=new THREE.PerspectiveCamera(75,1,0.1,1000);camera.up.set(0,0,1);camera.position.set(1.5,2.1,1.5);camera.lookAt(0,0,1);
+const controls=new OrbitControls(camera,canvas);controls.enableDamping=true;controls.dampingFactor=0.4;controls.rotateSpeed=1;controls.zoomSpeed=1.5;controls.minDistance=1;controls.maxDistance=8;controls.enablePan=false;controls.target.set(0,0,1);
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});renderer.setPixelRatio(devicePixelRatio);
+function size(){const w=canvas.clientWidth,h=canvas.clientHeight;if(w&&h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix()}}size();addEventListener('resize',size);
+const grid=new THREE.GridHelper(20,40,0x424242,0x424242);grid.rotation.x=Math.PI/2;scene.add(grid);
+// ---- skeleton model: one bone mesh per body segment, origin at its upper joint, running down its own -z; x = right, y = forward
+const b64=atob(D.glb),buf=new Uint8Array(b64.length);for(let i=0;i<b64.length;i++)buf[i]=b64.charCodeAt(i);
+const draco=new DRACOLoader();draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');const loader=new GLTFLoader();loader.setDRACOLoader(draco);
+const SEG=['pelvis','torso','head','l_uarm','r_uarm','l_larm','r_larm','l_hand','r_hand','l_thigh','r_thigh','l_shank','r_shank','l_foot','r_foot'];
+function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.name)src[c.name]=c;S.mesh={};S.group=new THREE.Group();
+ for(const n of SEG){if(!src[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m)}scene.add(S.group);
+ S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);
+ let lo=9;for(let i=S.v0;i<=Math.min(S.v0+12,S.v1);i++)for(const j of[3,6])lo=Math.min(lo,S.rise[i]-S.pose[i][j][1]);S.floor=lo-0.075/H;
+ let leg=0,n=0;for(let i=S.v0;i<=S.v1;i++){const p=S.pose[i],d=(a,b)=>Math.hypot(p[a][0]-p[b][0],p[a][1]-p[b][1],p[a][2]-p[b][2]);leg+=d(1,2)+d(2,3)+d(4,5)+d(5,6);n+=2}
+ S.g=leg/n*H/0.927}                                        // overall bone size from the leg length
+const V=()=>new THREE.Vector3(),X=V(),Y=V(),Z=V(),T=V(),M=new THREE.Matrix4(),UP=new THREE.Vector3(0,0,1);
+function place(mesh,origin,z,hint,s,fwd){if(!mesh)return;Z.copy(z).normalize();Y.crossVectors(Z,hint);if(Y.lengthSq()<1e-6)Y.copy(fwd);Y.normalize();X.crossVectors(Y,Z);
+ M.makeBasis(T.copy(X).multiplyScalar(s),Y.clone().multiplyScalar(s),Z.clone().multiplyScalar(s));M.setPosition(origin);mesh.matrix.copy(M);mesh.matrixWorldNeedsUpdate=true}
+function pose(S,tt){const c=Math.max(S.v0,Math.min(S.v1,tt)),a=Math.floor(c),b=Math.min(a+1,S.v1),f=c-a,ry=S.rise[a]*(1-f)+S.rise[b]*f;
+ const w=(A,B)=>A.map((p,i)=>new THREE.Vector3(-(p[0]*(1-f)+B[i][0]*f)*H,-(p[2]*(1-f)+B[i][2]*f)*H,(ry-(p[1]*(1-f)+B[i][1]*f)-S.floor)*H));
+ const J=w(S.pose[a],S.pose[b]),E=S.ext[a]&&S.ext[b]?w(S.ext[a],S.ext[b]):null,g=S.g,m=S.mesh,sub=(p,q)=>V().subVectors(p,q),len=(p,q)=>p.distanceTo(q);
+ const hipR=sub(J[1],J[4]).normalize(),shR=sub(J[14],J[11]).normalize(),up=sub(J[8],J[0]).normalize(),fwd=V().crossVectors(up,hipR).normalize(),cl=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+ const pel=J[0].clone().addScaledVector(up,0.04*g);place(m.pelvis,pel,up,hipR,g,fwd);
+ place(m.torso,J[8],up,shR,cl((len(J[8],pel)-0.11*g)/0.361,0.75*g,1.35*g),fwd);
+ const hz=sub(J[10],J[8]).normalize();place(m.head,J[10].clone().addScaledVector(hz,-0.102*g),hz,shR,g,fwd);
+ for(const[s,sh,el,wr,tip]of[['r',14,15,16,1],['l',11,12,13,0]]){place(m[s+'_uarm'],J[sh],sub(J[sh],J[el]),shR,len(J[sh],J[el])/0.313,fwd);place(m[s+'_larm'],J[el],sub(J[el],J[wr]),shR,len(J[el],J[wr])/0.254,fwd);
+  if(E)place(m[s+'_hand'],J[wr],sub(J[wr],E[tip]),shR,cl(len(J[wr],E[tip])/0.158,0.7*g,1.3*g),fwd);else place(m[s+'_hand'],J[wr],sub(J[el],J[wr]),shR,g,fwd)}
+ for(const[s,hp,kn,an,toe,heel]of[['r',1,2,3,7,11],['l',4,5,6,6,10]]){place(m[s+'_thigh'],J[hp],sub(J[hp],J[kn]),hipR,len(J[hp],J[kn])/0.438,fwd);place(m[s+'_shank'],J[kn],sub(J[kn],J[an]),hipR,len(J[kn],J[an])/0.488,fwd);
+  const f=m[s+'_foot'];if(f){Y.copy(E?sub(E[toe],E[heel]):fwd).normalize();X.crossVectors(Y,UP);if(X.lengthSq()<1e-6)X.copy(hipR);X.normalize();Z.crossVectors(X,Y);
+   M.makeBasis(X.clone().multiplyScalar(g),Y.clone().multiplyScalar(g),Z.clone().multiplyScalar(g));M.setPosition(J[an]);f.matrix.copy(M);f.matrixWorldNeedsUpdate=true}}
+ S.group.visible=true}
+let t=0,playing=true,last=0,ready=false;
+loader.parse(buf.buffer,'',gltf=>{build(gltf,D.you,new THREE.MeshLambertMaterial({color:0xcccccc}));build(gltf,D.player,new THREE.MeshLambertMaterial({color:0xffaa00,transparent:true,opacity:0.8}));draco.dispose();ready=true;$('msg').remove()},
+ e=>{$('msg').textContent='Could not load the skeleton model.'});
+$('legend').innerHTML='<span><i style="background:#cccccc"></i><b></b></span><span><i style="background:#ffaa00"></i><b></b></span>';
+const lb=$('legend').querySelectorAll('b');lb[0].textContent=D.you.label;lb[1].textContent=D.player.label;lb.forEach(b=>b.style.fontWeight='400');
+const track=$('track'),knob=track.querySelector('.knob');track.querySelector('.rel').style.left=(REL/(NT-1)*100)+'%';
+function setPlay(p){playing=p;$('play').textContent=p?'❚❚':'▶'}
+$('play').onclick=()=>setPlay(!playing);
+let drag=false;const seek=e=>{const r=track.getBoundingClientRect();t=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*(NT-1)};
+track.addEventListener('pointerdown',e=>{drag=true;track.setPointerCapture(e.pointerId);setPlay(false);seek(e)});track.addEventListener('pointermove',e=>{if(drag&&(e.buttons&1))seek(e);else drag=false});for(const n of['pointerup','pointercancel','lostpointercapture'])track.addEventListener(n,()=>drag=false);
+addEventListener('keydown',e=>{if(e.target.tagName==='SELECT')return;if(e.code==='Space'){e.preventDefault();setPlay(!playing)}
+ if(e.code==='ArrowRight'){setPlay(false);t=Math.min(NT-1,Math.round(t)+1)}if(e.code==='ArrowLeft'){setPlay(false);t=Math.max(0,Math.round(t)-1)}});
+function tick(ts){const dt=Math.min((ts-last)/1000,0.1);last=ts;if(playing&&ready){t+=dt*30*parseFloat($('speed').value);if(t>NT-1)t=0}
+ if(ready){pose(D.you,t);pose(D.player,t)}knob.style.left=(t/(NT-1)*100)+'%';const s=(t-REL)/30;$('time').textContent=(s>=0?'+':'−')+Math.abs(s).toFixed(2)+' s';
+ controls.update();renderer.render(scene,camera);requestAnimationFrame(tick)}
+window.__viewer={get t(){return t},set t(v){t=v},setPlay,camera,controls};requestAnimationFrame(ts=>{last=ts;tick(ts)});
+</script></body></html>
+'''
+
+
+def canon_rot(p):
+    """Rotation about the vertical axis that puts the right->left body line along +x (so shots filmed from any side line up)."""
+    lat = np.nanmedian((p[:, 4] - p[:, 1]) + (p[:, 11] - p[:, 14]), axis=0)
+    th = np.arctan2(lat[2], lat[0]); c, s = np.cos(th), np.sin(th)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+
+def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
+    """3D viewer page: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
+    avg = ref.get("averages", {}).get(player, {}).get(stype)
+    if avg is None or not os.path.exists(os.path.join(ROOT, "assets", "skeleton.glb")): return False
+    p, ext, rise = p.astype(float).copy(), ext.astype(float).copy(), rise.astype(float).copy()
+    if abs(r - 30) > 1e-3:                                                 # older pose files: put the release at sample 30
+        def shift(x):
+            out = np.full(x.shape, np.nan)
+            for j in range(len(x)):
+                q = r + j - 30
+                if 0 <= q <= len(x) - 1:
+                    a = int(np.floor(q)); b = min(a + 1, len(x) - 1); out[j] = x[a] * (1 - (q - a)) + x[b] * (q - a)
+            return out
+        p, ext, rise = shift(p), shift(ext), shift(rise)
+    rise = np.nan_to_num(rise)
+    if hand == "L":                                                        # mirror a left-handed shooter so both shoot with the same hand
+        p[..., 0] *= -1; p = p[:, [0, 4, 5, 6, 1, 2, 3, 7, 8, 9, 10, 14, 15, 16, 11, 12, 13]]
+        ext[..., 0] *= -1; ext = ext[:, [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10]]
+    Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
+    lst = lambda x: [None if np.isnan(f).any() else np.round(f, 3).tolist() for f in x]
+    kind = "three" if stype == "three" else "mid-range"
+    with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
+        glb = base64.b64encode(fh.read()).decode()
+    data = dict(you=dict(label="You, " + shot["name"] + (" (mirrored)" if hand == "L" else ""), pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist()),
+                player=dict(label=f"{player}, average {kind} shot" + (" (mirrored)" if avg.get("hand") == "L" else ""), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"]), glb=glb)
+    with open(path, "w") as fh:
+        fh.write(VIEWER_HTML.replace("__TITLE__", f"You vs {player}").replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
+    return True
+
+
 # ===================================================================== comparison
 def find_player(q, names):
     q = ALIAS.get(q.lower().strip(), q).lower().strip()
@@ -1079,13 +1204,13 @@ def main():
     rf = os.path.join(ROOT, "nba_reference.json")
     if not os.path.exists(rf): sys.exit("nba_reference.json is missing next to this script")
     shot = dict(name=os.path.splitext(os.path.basename(npz))[0], m=m, acc=float(d["accuracy"]), rconf=float(d["release_conf"]))
-    stype = "mid" if a.shot_type.startswith("mid") else "three"; buf = io.StringIO()
+    stype = "mid" if a.shot_type.startswith("mid") else "three"; buf = io.StringIO(); ref = json.load(open(rf))
 
     class Tee:                                                             # the report goes to the screen and to a file
         def write(self, x): sys.__stdout__.write(x); buf.write(x)
         def flush(self): sys.__stdout__.flush()
     with contextlib.redirect_stdout(Tee()):
-        res = (similar if a.mode == "similar" else difference)(a, stype, json.load(open(rf)), shot)
+        res = (similar if a.mode == "similar" else difference)(a, stype, ref, shot)
     base = os.path.join(out_dir, f"{shot['name']}_{a.mode}_{stype}" + ("_" + re.sub(r"[^a-z0-9]+", "_", res["player"].lower()).strip("_") if a.mode == "difference" else ""))
     open(base + ".txt", "w").write(buf.getvalue().lstrip("\n")); json.dump(dict(res, pose_file=os.path.abspath(npz)), open(base + ".json", "w"), indent=1)
     saved = [base + ".txt", base + ".json"]
@@ -1093,7 +1218,10 @@ def main():
         with open(base + ".csv", "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(res["measures"][0])); w.writeheader(); w.writerows(res["measures"])
         saved.append(base + ".csv")
-    print("\nSaved in " + out_dir + ": " + ", ".join(os.path.basename(x) for x in saved))
+    who = res["player"] if a.mode == "difference" else res["closest"]
+    if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot):
+        saved.append(base + ".html"); print(f"\n3D viewer, you vs {who}:  {base}.html")
+    print("Saved in " + out_dir + ": " + ", ".join(os.path.basename(x) for x in saved))
 
 if __name__ == "__main__":
     main()

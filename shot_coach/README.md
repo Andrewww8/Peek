@@ -58,6 +58,10 @@ All in `outputs/`:
   - `similar` ranks the players and lists the three most alike and three most different measures.
 - `<video name>_difference_<type>_<player>.txt`, `.json` and `.csv`: the report, the same result as data, and the full table of measures.
   - `difference` lists the top 3 you already match, the bottom 3 furthest apart, and other differences, each with a short cue.
+- The same name with `.html`: the 3D viewer. Your skeleton (grey) is overlaid on the player's average shot (orange), both scaled to the same height, facing the same way and lined up at the release.
+  - `similar` shows you against the closest player; `difference` shows you against the player you chose.
+  - Drag to rotate, scroll to zoom, space to play or pause, arrow keys to step a frame. The dashed line on the bar is the release.
+  - A left-handed shooter is mirrored so both skeletons shoot with the same hand; the legend says so.
 - `<video name>.mp4`: only with `--clip`.
 
 The report is also printed.
@@ -66,7 +70,8 @@ The report is also printed.
 
 These sit next to the script:
 
-- `nba_reference.json` (271 KB): the NBA players' values for the 34 measures, plus names, descriptions and cues.
+- `nba_reference.json` (835 KB): the NBA players' values for the 34 measures, plus names, descriptions, cues and each player's average shot.
+- `assets/skeleton.glb`: the skeleton model the 3D viewer draws.
 - `third_party/PoseMamba/`: the PoseMamba model code (Apache-2.0).
 - `sscan.c`: the scan kernel; compiled to `libsscan.dylib` on first run (needs the Xcode command line tools).
 - `weights/PoseMamba_L.bin`: downloaded on first run from Hugging Face and checked against a fixed checksum.
@@ -75,7 +80,7 @@ The environment:
 
 - macOS on Apple silicon.
 - Python 3.11 with the packages in `requirements.txt` (numpy, scipy, opencv-python, torch, einops, timm, fvcore, onnxruntime, rtmlib).
-- An internet connection on the first run only.
+- An internet connection on the first run, and when opening a viewer page (it loads three.js from a CDN).
 
 ## How it works
 
