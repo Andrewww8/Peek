@@ -62,6 +62,9 @@ All in `outputs/`:
   - `similar` shows you against the closest player; `difference` shows you against the player you chose.
   - Drag to rotate, scroll to zoom, space to play or pause, arrow keys to step a frame. The dashed line on the bar is the release.
   - Each skeleton shoots with its real hand, so a left-hander against a right-hander will not line up arm for arm.
+- The same name with `.glb`: the same two skeletons as an animated 3D file (glTF binary, about 3 MB). It opens in any glTF viewer, Blender, three.js or model-viewer.
+  - One group per skeleton (`You` and the player's name), 15 bone meshes each, with a position and rotation key per frame: 46 keys at 30 fps, release at 1.0 s.
+  - Metres, y up, the shooter facing +z, floor at y = 0. Your skeleton is grey; the player's is orange and 80% opaque.
 - `<video name>.mp4`: only with `--clip`.
 
 The report is also printed.
@@ -72,6 +75,7 @@ These sit next to the script:
 
 - `nba_reference.json` (835 KB): the NBA players' values for the 34 measures, plus names, descriptions, cues and each player's average shot.
 - `assets/skeleton.glb`: the skeleton model the 3D viewer draws.
+- `assets/skeleton_plain.glb`: the same model uncompressed, used to write the `.glb` files.
 - `third_party/PoseMamba/`: the PoseMamba model code (Apache-2.0).
 - `sscan.c`: the scan kernel; compiled to `libsscan.dylib` on first run (needs the Xcode command line tools).
 - `weights/PoseMamba_L.bin`: downloaded on first run from Hugging Face and checked against a fixed checksum.

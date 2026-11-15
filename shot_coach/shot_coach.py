@@ -27,11 +27,13 @@ OUTPUTS (all in outputs/)
   <video>_difference_<type>_<player>.txt / .json / .csv     report, data, and the full table of measures
   ..._similar_<type>.html / ..._difference_<type>_<player>.html     3D viewer: your skeleton (grey) over the player's average shot (orange);
                                             similar = the closest player, difference = the player you chose
+  the same name with .glb                   the same two skeletons as an animated 3D file (glTF binary, 46 keys at 30 fps, release at 1.0 s)
   <video>.mp4                               only with --clip
 
 REQUIREMENTS (all next to this script)
   nba_reference.json          the NBA players' measures, measure names, descriptions, cues and average shots
   assets/skeleton.glb         the skeleton model drawn by the 3D viewer (the viewer page loads three.js from a CDN, so it needs internet)
+  assets/skeleton_plain.glb   the same model uncompressed, used to write the .glb files
   third_party/PoseMamba/      the PoseMamba model code (Apache-2.0)
   sscan.c                     selective-scan kernel; compiled to libsscan.dylib on first run (needs the Xcode command line tools)
   weights/PoseMamba_L.bin     3D lifting model weights; downloaded on first run (114 MB, from Hugging Face)
@@ -55,6 +57,7 @@ import json
 import os
 import queue
 import re
+import struct
 import subprocess
 import sys
 import threading
@@ -960,6 +963,176 @@ def lift(video, out_dir, hand=None, clip=False):
                  f"camera {camera}{' (corrected)' if comp else ''}, {nsw} swapped frames fixed, shooter {hgt:.0f} px tall, {len(rels)} shot(s) found")
 
 
+# ===================================================================== skeleton rig (shared by the 3D viewer page and the .glb file)
+RIG_SEGMENTS = ["pelvis", "torso", "head", "l_uarm", "r_uarm", "l_larm", "r_larm", "l_hand", "r_hand", "l_thigh", "r_thigh", "l_shank", "r_shank", "l_foot", "r_foot"]
+# where the bones of the skeleton model join, in the model's own units (metres): hip and shoulder sockets, top of the sacrum, neck, sole of the foot
+RIG = dict(hipX=0.085, shX=0.17, shY=0.0, shZ=-0.04, sacrum=0.07, neck=0.147, sole=0.075, torso=0.361, head=0.102, uarm=0.313, larm=0.254, thigh=0.438, shank=0.488)
+
+
+def rig_skeleton(pose, ext, rise, hand, height):
+    """Joint positions -> one position + rotation per bone and frame, for a skeleton `height` metres tall. World: x right, y forward, z up, floor at z = 0.
+
+    Every bone keeps one length and thickness for the whole clip and the joints are chained from the pelvis outwards, so a bone can only swing,
+    never stretch or spin about its own length. The whole body gets one fixed turn: upright (over the last frames on the ground the weight between
+    hips and chest sits above the feet, which removes the camera's tilt) and square (at lift-off, the fastest rise of the hips before the release,
+    the shoulder line faces the shot head on). Feet stay planted until lift-off; after it the measured rise of the hips drives the jump.
+    Palms face each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick."""
+    P, E, rise = np.asarray(pose, float), np.asarray(ext, float), np.nan_to_num(np.asarray(rise, float))
+    ok = ~np.isnan(P).any((1, 2)); v0 = int(np.argmax(ok)); v1 = int(len(ok) - 1 - np.argmax(ok[::-1])); eok = ~np.isnan(E).any((1, 2))
+    out = _rig_solve(P, E, eok, rise, hand, 1.8, v0, v1)
+    return _rig_solve(P, E, eok, rise, hand, 1.8 * height / out["stand"], v0, v1)
+
+
+def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
+    from scipy.spatial.transform import Rotation
+    T, Z = RIG, np.array([0.0, 0.0, 1.0]); fr = range(v0, v1 + 1)
+    nrm = lambda v: v / max(float(np.linalg.norm(v)), 1e-12)
+    cv = lambda q: np.array([-q[0], -q[2], -q[1]])                        # stored pose (x to the shooter's left, y down, z behind) -> x right, y forward, z up
+    quat = lambda x, y, z: Rotation.from_matrix(np.column_stack([x, y, z])).as_quat()
+
+    def perp(h, z, alt):
+        x = h - z * (h @ z)
+        if x @ x < 1e-4: x = alt - z * (alt @ z)
+        return nrm(x)
+
+    def bone(down, hint, alt):
+        z = -down; x = perp(hint, z, alt); y = np.cross(z, x); return x, y, z, quat(x, y, z)
+    # ---- one fixed turn of the whole body
+    lift, best = max(v0, min(30, v1)), -1e9
+    for i in range(max(v0 + 1, 12), min(30, v1 - 1) + 1):
+        if rise[i + 1] - rise[i - 1] > best: best, lift = rise[i + 1] - rise[i - 1], i
+    bal = nrm(sum(0.6 * cv(P[i, 0]) + 0.4 * cv(P[i, 8]) - 0.5 * cv(P[i, 3]) - 0.5 * cv(P[i, 6]) for i in range(max(v0, lift - 6), lift + 1)))
+    ax = np.cross(bal, Z); R0 = Rotation.from_rotvec(nrm(ax) * np.arctan2(np.linalg.norm(ax), bal @ Z)).as_matrix() if np.linalg.norm(ax) > 1e-9 else np.eye(3)
+    sh = R0 @ cv(P[lift, 14] - P[lift, 11]); R0 = Rotation.from_rotvec(Z * -np.arctan2(sh[1], sh[0])).as_matrix() @ R0
+
+    def W(q, i):
+        v = R0 @ cv(q) * H; v[2] += rise[i] * H; return v
+    J_all = {i: np.array([W(q, i) for q in P[i]]) for i in fr}
+    med = lambda a, b: float(np.median([np.linalg.norm(J_all[i][a] - J_all[i][b]) for i in fr]))
+    Lth, Lsh, Lua, Lfa, Ltr = (med(1, 2) + med(4, 5)) / 2, (med(2, 3) + med(5, 6)) / 2, (med(14, 15) + med(11, 12)) / 2, (med(15, 16) + med(12, 13)) / 2, med(0, 8)
+    g = (Lth + Lsh) / (T["thigh"] + T["shank"]); st = float(np.clip((Ltr - T["sacrum"] * g) / T["torso"], 0.92 * g, 1.2 * g)); k = lambda a, b: float(np.clip(a / b / g, 0.85, 1.2)) * g
+    scale = dict(pelvis=[g, g, g], torso=[st, st, st], head=[g, g, g], uarm=[g, g, k(Lua, T["uarm"])], larm=[g, g, k(Lfa, T["larm"])], hand=[g, g, g],
+                 thigh=[g, g, Lth / T["thigh"]], shank=[g, g, Lsh / T["shank"]], foot=[g, g, g])
+    LEN = dict(uarm=T["uarm"] * scale["uarm"][2], larm=T["larm"] * scale["larm"][2], thigh=Lth, shank=Lsh)
+    # ---- wrist flick of the shooting hand: how far the fingertip is bent forward-and-down from the forearm line (+) or cocked back (-), smoothed
+    s_sh, tip, el, wr = ("l", 0, 12, 13) if hand == "L" else ("r", 1, 15, 16); flick, last = {}, 0.0
+    for i in fr:
+        if eok[i]:
+            J = J_all[i]; f = nrm(J[wr] - J[el]); dd = nrm(W(E[i, tip], i) - J[wr]); fw = nrm(np.cross(nrm(J[8] - J[0]), nrm(J[1] - J[4])))
+            nn = perp(fw + np.array([0, 0, -0.5]), f, -Z); last = float(np.clip(np.arctan2(dd @ nn, dd @ f), -1.3, 1.3))
+        flick[i] = last
+    sm = {i: sum(flick[j] * (3 - abs(j - i)) for j in range(i - 2, i + 3) if v0 <= j <= v1) / sum(3 - abs(j - i) for j in range(i - 2, i + 3) if v0 <= j <= v1) for i in fr}
+
+    def set_leg(F, s):
+        q = F["_leg"][s]; tx_, ty_, _, tq_ = bone(nrm(q["K"] - q["P"]), F["_px"], F["_py"]); _, cy_, _, cq_ = bone(nrm(q["A"] - q["K"]), tx_, ty_)
+        fy = np.array([cy_[0], cy_[1], 0.0])
+        if fy @ fy < 1e-4: fy = np.array([F["_py"][0], F["_py"][1], 0.0])
+        fy = nrm(fy); F[s + "_thigh"] = [q["P"].copy(), tq_]; F[s + "_shank"] = [q["K"].copy(), cq_]; F[s + "_foot"] = [q["A"].copy(), quat(np.cross(fy, Z), fy, Z)]
+    prev, FR = {}, {}
+    for i in fr:
+        J, F = J_all[i], {}; d = lambda a, b: nrm(J[b] - J[a])
+        up = d(0, 8); px = perp(J[1] - J[4], up, np.array([1.0, 0, 0])); py = np.cross(up, px); O = J[0].copy(); F["pelvis"] = [O, quat(px, py, up)]
+        tz = nrm(d(7, 8) + up); tx = perp(J[14] - J[11], tz, px); ty = np.cross(tz, tx); T0 = O + tz * (T["sacrum"] * g + T["torso"] * st); tq = quat(tx, ty, tz)
+        F["torso"] = [T0, tq]; F["head"] = [T0 + tz * T["neck"] * g, tq]; hands = {}
+        for s, sg, a_sh, a_el, a_wr in (("r", 1, 14, 15, 16), ("l", -1, 11, 12, 13)):
+            Ps = T0 + tx * sg * T["shX"] * st + tz * T["shZ"] * st + ty * T["shY"] * st
+            ux, uy, uz, uq = bone(d(a_sh, a_el), prev.get(s + "u", tx), ty); prev[s + "u"] = ux; F[s + "_uarm"] = [Ps, uq]; El = Ps - uz * LEN["uarm"]
+            lx, ly, lz, lq = bone(d(a_el, a_wr), prev.get(s + "l", ux), uy); prev[s + "l"] = lx; F[s + "_larm"] = [El, lq]; hz = lz
+            if s == s_sh:
+                f = -lz; nn = perp(ty + np.array([0, 0, -0.5]), f, -Z); hz = -nrm(f * np.cos(sm[i]) + nn * np.sin(sm[i]))
+            hands[s] = dict(p=El - lz * LEN["larm"], z=hz, x=lx)
+        for s, o in (("r", "l"), ("l", "r")):                               # palms face each other
+            h = hands[s]; m = hands[o]["p"] - h["p"]; m = m - h["z"] * (m @ h["z"])
+            y = nrm(m) if np.linalg.norm(m) > 0.06 else (perp(prev[s + "h"], h["z"], h["x"]) if s + "h" in prev else h["x"] * (-1 if s == "r" else 1))
+            prev[s + "h"] = y; F[s + "_hand"] = [h["p"], quat(np.cross(y, h["z"]), y, h["z"])]
+        F["_px"], F["_py"], F["_leg"] = px, py, {}
+        for s, sg, hp, kn, an in (("r", 1, 1, 2, 3), ("l", -1, 4, 5, 6)):
+            Ph = O + px * sg * T["hipX"] * g; K = Ph + d(hp, kn) * LEN["thigh"]; A = K + d(kn, an) * LEN["shank"]; F["_leg"][s] = dict(P=Ph, K=K, A=A); set_leg(F, s)
+        FR[i] = F
+    # ---- feet planted until lift-off: working back from lift-off, move the body so a grounded foot neither slides nor sinks; with both feet down, re-bend each knee to reach its own spot
+    sole = T["sole"] * g
+
+    def move(F, o):
+        for n_ in RIG_SEGMENTS: F[n_][0] = F[n_][0] + o
+        for s in "rl":
+            for kk in "PKA": F["_leg"][s][kk] = F["_leg"][s][kk] + o
+
+    def reach(F, s, Tg):
+        q = F["_leg"][s]; a, b = LEN["thigh"], LEN["shank"]; v = Tg - q["P"]; dd = float(np.clip(np.linalg.norm(v), abs(a - b) + 1e-3, a + b - 1e-3)); al = nrm(v)
+        x = (a * a - b * b + dd * dd) / (2 * dd); h = np.sqrt(max(a * a - x * x, 0.0)); kd = q["K"] - q["P"]; kd = kd - al * (kd @ al)
+        if kd @ kd < 1e-6: kd = F["_py"] - al * (F["_py"] @ al)
+        q["K"] = q["P"] + al * x + nrm(kd) * h; q["A"] = q["P"] + al * dd; set_leg(F, s)
+    o, oL, Tg = np.zeros(3), np.zeros(3), {}
+    for i in range(lift, v0 - 1, -1):
+        F = FR[i]; q = F["_leg"]; zm = min(q["r"]["A"][2], q["l"]["A"][2]); down = {s: q[s]["A"][2] - zm < 0.06 for s in "rl"}
+        ds = [Tg[s] - q[s]["A"] for s in "rl" if down[s] and Tg.get(s) is not None]
+        o = np.mean(ds, 0) if ds else np.array([o[0], o[1], sole - zm])
+        if i == lift: oL = o.copy()
+        move(F, o)
+        for s in "rl":
+            if not down[s]: Tg[s] = None; continue
+            if Tg.get(s) is None: Tg[s] = np.array([q[s]["A"][0], q[s]["A"][1], sole])
+            reach(F, s, Tg[s])
+    for i in range(lift + 1, v1 + 1): move(FR[i], oL)
+    N = len(P); idx = np.clip(np.arange(N), v0, v1); pos, rot = {}, {}                          # frames outside the usable range hold the nearest pose
+    for n_ in RIG_SEGMENTS:
+        pos[n_] = np.array([FR[i][n_][0] for i in idx]); qq = np.array([FR[i][n_][1] for i in idx])
+        for j in range(1, N):
+            if qq[j] @ qq[j - 1] < 0: qq[j] = -qq[j]                                             # keep the rotation continuous for interpolation
+        rot[n_] = qq
+    return dict(pos=pos, rot=rot, scale={n_: scale[n_.split("_")[-1]] for n_ in RIG_SEGMENTS}, lift=lift,
+                stand=T["sole"] * g + Lsh + Lth + T["sacrum"] * g + T["torso"] * st + (T["neck"] + T["head"]) * g)
+
+
+def write_glb(path, skeletons, fps=30.0):
+    """Animated 3D file: each (name, rig, rgba) in `skeletons` becomes a group of 15 bone meshes with one position + rotation key per frame. glTF is y-up, so the root turns z-up into y-up."""
+    with open(os.path.join(ROOT, "assets", "skeleton_plain.glb"), "rb") as fh:
+        raw = fh.read()
+    jl = struct.unpack_from("<I", raw, 12)[0]; src = json.loads(raw[20:20 + jl]); binc = raw[20 + jl + 8:]
+    DT = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}; NC = dict(SCALAR=1, VEC2=2, VEC3=3, VEC4=4)
+
+    def read(ai):
+        a = src["accessors"][ai]; bv = src["bufferViews"][a["bufferView"]]; dt = np.dtype(DT[a["componentType"]]); nc = NC[a["type"]]
+        return np.ndarray((a["count"], nc), dt, binc, bv.get("byteOffset", 0) + a.get("byteOffset", 0), (bv.get("byteStride") or dt.itemsize * nc, dt.itemsize)).copy()
+    out = dict(asset=dict(version="2.0", generator="shot_coach"), scene=0, scenes=[dict(nodes=[0])], nodes=[], meshes=[], materials=[], accessors=[], bufferViews=[], buffers=[], animations=[])
+    blob = bytearray()
+
+    def add(arr, typ, target=None, minmax=False):
+        arr = np.ascontiguousarray(arr)
+        while len(blob) % 4: blob.append(0)
+        bv = dict(buffer=0, byteOffset=len(blob), byteLength=arr.nbytes)
+        if target: bv["target"] = target
+        blob.extend(arr.tobytes()); out["bufferViews"].append(bv)
+        acc = dict(bufferView=len(out["bufferViews"]) - 1, componentType={v: k for k, v in DT.items()}[arr.dtype.type], count=len(arr), type=typ)
+        if minmax: acc["min"], acc["max"] = np.atleast_1d(arr.min(0)).astype(float).tolist(), np.atleast_1d(arr.max(0)).astype(float).tolist()
+        out["accessors"].append(acc); return len(out["accessors"]) - 1
+    geo = {}
+    for nd in src["nodes"]:
+        if nd.get("name") in RIG_SEGMENTS and "mesh" in nd:
+            pr = src["meshes"][nd["mesh"]]["primitives"][0]; ix = read(pr["indices"]).ravel()
+            geo[nd["name"]] = dict(POSITION=add(read(pr["attributes"]["POSITION"]).astype(np.float32), "VEC3", 34962, True), NORMAL=add(read(pr["attributes"]["NORMAL"]).astype(np.float32), "VEC3", 34962),
+                                   indices=add(ix.astype(np.uint16 if ix.max() < 65535 else np.uint32), "SCALAR", 34963))
+    n_fr = len(next(iter(skeletons[0][1]["pos"].values()))); t_acc = add((np.arange(n_fr) / fps).astype(np.float32), "SCALAR", None, True)
+    out["nodes"].append(dict(name="shot", rotation=[0, 0.7071067811865476, 0.7071067811865476, 0], children=[]))   # z up, facing +y  ->  y up, facing +z; anim = dict(name="shot", samplers=[], channels=[])
+    for k, (name, rg, rgba) in enumerate(skeletons):
+        mat = dict(name=name, pbrMetallicRoughness=dict(baseColorFactor=list(rgba), metallicFactor=0.0, roughnessFactor=0.9))
+        if rgba[3] < 1: mat["alphaMode"] = "BLEND"
+        out["materials"].append(mat); grp = dict(name=name, children=[]); out["nodes"].append(grp); out["nodes"][0]["children"].append(len(out["nodes"]) - 1)
+        for seg in RIG_SEGMENTS:
+            if seg not in geo: continue
+            out["meshes"].append(dict(name=f"{name} {seg}", primitives=[dict(attributes=dict(POSITION=geo[seg]["POSITION"], NORMAL=geo[seg]["NORMAL"]), indices=geo[seg]["indices"], material=k)]))
+            p, q = rg["pos"][seg].astype(np.float32), rg["rot"][seg].astype(np.float32); q = q / np.linalg.norm(q, axis=1, keepdims=True)
+            out["nodes"].append(dict(name=f"{name} {seg}", mesh=len(out["meshes"]) - 1, translation=p[0].tolist(), rotation=q[0].tolist(), scale=[float(x) for x in rg["scale"][seg]]))
+            ni = len(out["nodes"]) - 1; grp["children"].append(ni)
+            for pth, arr, typ in (("translation", p, "VEC3"), ("rotation", q, "VEC4")):
+                anim["samplers"].append(dict(input=t_acc, output=add(arr, typ), interpolation="LINEAR")); anim["channels"].append(dict(sampler=len(anim["samplers"]) - 1, target=dict(node=ni, path=pth)))
+    out["animations"].append(anim); out["scenes"][0]["extras"] = dict(release_s=30 / fps, fps=fps, units="metres, y up", skeletons=[s[0] for s in skeletons])
+    while len(blob) % 4: blob.append(0)
+    out["buffers"].append(dict(byteLength=len(blob))); js = json.dumps(out, separators=(",", ":")).encode(); js += b" " * (-len(js) % 4)
+    with open(path, "wb") as fh:
+        fh.write(struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(js) + 8 + len(blob)) + struct.pack("<I4s", len(js), b"JSON") + js + struct.pack("<I4s", len(blob), b"BIN\x00") + bytes(blob))
+
+
 # ===================================================================== 3D viewer (your skeleton over the player's average shot)
 VIEWER_HTML = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>__TITLE__</title>
@@ -991,8 +1164,6 @@ import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 const D=__DATA__,NT=46,REL=30,$=id=>document.getElementById(id);
-// where the bones of the model join, in the model's own units: hip and shoulder sockets, top of the sacrum, neck, sole of the foot
-const TR={hipX:0.085,shX:0.17,shY:0,shZ:-0.04,sacrum:0.07,neck:0.147,headFwd:0,sole:0.075};
 const canvas=$('cv'),scene=new THREE.Scene();scene.background=new THREE.Color(0x1a1a1a);
 scene.add(new THREE.AmbientLight(0xffffff,0.6));const dl=new THREE.DirectionalLight(0xffffff,0.8);dl.position.set(5,10,5);scene.add(dl);
 const camera=new THREE.PerspectiveCamera(75,1,0.1,1000);camera.up.set(0,0,1);camera.position.set(1.4,2.3,1.5);camera.lookAt(0,0,1.2);
@@ -1004,69 +1175,13 @@ const grid=new THREE.GridHelper(20,40,0x424242,0x424242);grid.rotation.x=Math.PI
 const b64=atob(D.glb),buf=new Uint8Array(b64.length);for(let i=0;i<b64.length;i++)buf[i]=b64.charCodeAt(i);
 const draco=new DRACOLoader();draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');const loader=new GLTFLoader();loader.setDRACOLoader(draco);
 const SEG=['pelvis','torso','head','l_uarm','r_uarm','l_larm','r_larm','l_hand','r_hand','l_thigh','r_thigh','l_shank','r_shank','l_foot','r_foot'];
-function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.name)src[c.name]=c;S.mesh={};S.group=new THREE.Group();
- for(const n of SEG){if(!src[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m)}scene.add(S.group);
- S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);S.H=1.8;solve(S);S.H*=S.height/S.stand;solve(S)}   // second pass: scale to the real standing height
-// Rigid skeleton: every bone keeps one length and one thickness for the whole clip, joints are chained from the pelvis outwards,
-// and a bone can only swing, never spin about its own length. Hands keep their palms turned towards each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick; feet stay flat, pointing where the shin faces.
-function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
- const H=S.H;
- // One fixed turn of the whole body, the same for every frame:
- //  - upright: over the last frames on the ground the body's weight (between hips and chest) has to sit above the feet, so any lean of that line, sideways or forward/back, is the camera's and is removed;
- //  - square: at lift-off (fastest rise of the hips before the release) the shoulder line is turned to face the shot head on.
- let lift=Math.max(S.v0,Math.min(REL,S.v1)),best=-1e9;for(let i=Math.max(S.v0+1,12);i<=Math.min(REL,S.v1-1);i++){const v=S.rise[i+1]-S.rise[i-1];if(v>best){best=v;lift=i}}
- S.lift=lift;const bal=V();for(let i=Math.max(S.v0,lift-6);i<=lift;i++){const p=S.pose[i],c=k=>V(-p[k][0],-p[k][2],-p[k][1]);bal.add(c(0).multiplyScalar(0.6).addScaledVector(c(8),0.4).addScaledVector(c(3),-0.5).addScaledVector(c(6),-0.5))}
- const Q0=new THREE.Quaternion().setFromUnitVectors(bal.normalize(),V(0,0,1)),sl=S.pose[lift],sh=V(-(sl[14][0]-sl[11][0]),-(sl[14][2]-sl[11][2]),-(sl[14][1]-sl[11][1])).applyQuaternion(Q0);
- Q0.premultiply(new THREE.Quaternion().setFromAxisAngle(V(0,0,1),-Math.atan2(sh.y,sh.x)));S.tilt=Math.acos(Math.min(1,bal.z))*180/Math.PI;
- const W=(q,i)=>{const v=V(-q[0]*H,-q[2]*H,-q[1]*H).applyQuaternion(Q0);v.z+=S.rise[i]*H;return v};
- for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>W(q,i));
- const med=f=>{const a=[];for(let i=S.v0;i<=S.v1;i++)a.push(f(all[i]));a.sort((x,y)=>x-y);return a[a.length>>1]},d=(a,b)=>med(J=>J[a].distanceTo(J[b]));
- const Lth=(d(1,2)+d(4,5))/2,Lsh=(d(2,3)+d(5,6))/2,Lua=(d(14,15)+d(11,12))/2,Lfa=(d(15,16)+d(12,13))/2,Ltr=d(0,8);
- const g=(Lth+Lsh)/0.927,st=Math.max(0.92*g,Math.min(1.2*g,(Ltr-TR.sacrum*g)/0.361)),k=(a,b)=>Math.max(0.85,Math.min(1.2,a/b/g))*g;
- S.scale={pelvis:V(g,g,g),torso:V(st,st,st),head:V(g,g,g),uarm:V(g,g,k(Lua,0.313)),larm:V(g,g,k(Lfa,0.254)),hand:V(g,g,g),thigh:V(g,g,Lth/0.438),shank:V(g,g,Lsh/0.488),foot:V(g,g,g)};
- const LEN={uarm:0.313*S.scale.uarm.z,larm:0.254*S.scale.larm.z,thigh:Lth,shank:Lsh},M4=new THREE.Matrix4();
- const quat=(x,y,z)=>new THREE.Quaternion().setFromRotationMatrix(M4.makeBasis(x,y,z)),perp=(h,z,alt)=>{const x=h.clone().addScaledVector(z,-h.dot(z));if(x.lengthSq()<1e-4)x.copy(alt).addScaledVector(z,-alt.dot(z));return x.normalize()};
- const bone=(down,hint,alt)=>{const z=down.clone().negate(),x=perp(hint,z,alt),y=V().crossVectors(z,x);return{x,y,z,q:quat(x,y,z)}};
- // wrist flick of the shooting hand: how far the fingertip is bent forward-and-down from the forearm line (+) or cocked back (-), smoothed over time
- const SH=S.hand==='L'?{s:'l',tip:0,el:12,wr:13}:{s:'r',tip:1,el:15,wr:16},flick=[];for(let i=S.v0;i<=S.v1;i++){const J=all[i],e=S.ext[i];flick[i]=null;if(!e)continue;const tip=W(e[SH.tip],i);
-  const f=V().subVectors(J[SH.wr],J[SH.el]).normalize(),dd=tip.sub(J[SH.wr]).normalize(),fw=V().crossVectors(V().subVectors(J[8],J[0]).normalize(),V().subVectors(J[1],J[4]).normalize()).normalize();
-  const n=perp(fw.add(V(0,0,-0.5)),f,V(0,0,-1));flick[i]=Math.max(-1.3,Math.min(1.3,Math.atan2(dd.dot(n),dd.dot(f))))}
- for(let i=S.v0,last=0;i<=S.v1;i++){if(flick[i]===null)flick[i]=last;last=flick[i]}
- const sm=flick.slice();for(let i=S.v0;i<=S.v1;i++){let a=0,w=0;for(let k=-2;k<=2;k++){const j=i+k;if(j>=S.v0&&j<=S.v1){const ww=3-Math.abs(k);a+=flick[j]*ww;w+=ww}}sm[i]=a/w}
- const setLeg=(F,s)=>{const q=F._leg[s],t=bone(V().subVectors(q.K,q.P).normalize(),F._px,F._py),c=bone(V().subVectors(q.A,q.K).normalize(),t.x,t.y);
-  let fy=V(c.y.x,c.y.y,0);if(fy.lengthSq()<1e-4)fy=V(F._py.x,F._py.y,0);fy.normalize();const fz=V(0,0,1);
-  F[s+'_thigh']={p:q.P.clone(),q:t.q};F[s+'_shank']={p:q.K.clone(),q:c.q};F[s+'_foot']={p:q.A.clone(),q:quat(V().crossVectors(fy,fz),fy,fz)}};
- const prev={};S.fr=[];
- for(let i=S.v0;i<=S.v1;i++){const J=all[i],F={},dir=(a,b)=>V().subVectors(J[b],J[a]).normalize();
-  const up=dir(0,8),px=perp(V().subVectors(J[1],J[4]),up,V(1,0,0)),py=V().crossVectors(up,px),O=J[0].clone();F.pelvis={p:O,q:quat(px,py,up)};
-  const tz=dir(7,8).add(up).normalize(),tx=perp(V().subVectors(J[14],J[11]),tz,px),ty=V().crossVectors(tz,tx),T0=O.clone().addScaledVector(tz,TR.sacrum*g+0.361*st),tq=quat(tx,ty,tz);
-  F.torso={p:T0,q:tq};F.head={p:T0.clone().addScaledVector(tz,TR.neck*g).addScaledVector(ty,TR.headFwd*g),q:tq};
-  for(const[s,sg,sh,el,wr]of[['r',1,14,15,16],['l',-1,11,12,13]]){const P=T0.clone().addScaledVector(tx,sg*TR.shX*st).addScaledVector(tz,TR.shZ*st).addScaledVector(ty,TR.shY*st);
-   const u=bone(dir(sh,el),prev[s+'u']||tx,ty);prev[s+'u']=u.x;F[s+'_uarm']={p:P,q:u.q};const E=P.clone().addScaledVector(u.z,-LEN.uarm);
-   const l=bone(dir(el,wr),prev[s+'l']||u.x,u.y);prev[s+'l']=l.x;F[s+'_larm']={p:E,q:l.q};let hz=l.z;if(s===SH.s){const f=l.z.clone().negate(),n=perp(ty.clone().add(V(0,0,-0.5)),f,V(0,0,-1));hz=f.multiplyScalar(Math.cos(sm[i])).addScaledVector(n,Math.sin(sm[i])).normalize().negate()}
-   F[s+'_hand']={p:E.clone().addScaledVector(l.z,-LEN.larm),z:hz,x:l.x}}
-  for(const[s,o]of[['r','l'],['l','r']]){const h=F[s+'_hand'],m=V().subVectors(F[o+'_hand'].p,h.p);m.addScaledVector(h.z,-m.dot(h.z));   // palms face each other
-   const y=m.length()>0.06?m.normalize():(prev[s+'h']?perp(prev[s+'h'],h.z,h.x):h.x.clone().multiplyScalar(s==='r'?-1:1));prev[s+'h']=y;h.q=quat(V().crossVectors(y,h.z),y,h.z)}
-  F._px=px;F._py=py;F._leg={};
-  for(const[s,sg,hp,kn,an]of[['r',1,1,2,3],['l',-1,4,5,6]]){const P=O.clone().addScaledVector(px,sg*TR.hipX*g),K=P.clone().addScaledVector(dir(hp,kn),LEN.thigh),A=K.clone().addScaledVector(dir(kn,an),LEN.shank);
-   F._leg[s]={P,K,A};setLeg(F,s)}
-  S.fr[i]=F}
- // Feet stay planted until lift-off: working back from lift-off, the body is moved so a foot on the ground does not slide or sink,
- // and when both feet are down each leg is re-bent at the knee to reach its own planted spot. After lift-off the hips' measured rise drives the jump.
- const sole=TR.sole*g,L=S.lift,SIDES=['r','l'],move=(F,o)=>{for(const n of SEG)if(F[n])F[n].p.add(o);for(const s of SIDES){const q=F._leg[s];q.P.add(o);q.K.add(o);q.A.add(o)}};
- const reach=(F,s,T)=>{const q=F._leg[s],a=LEN.thigh,b=LEN.shank,v=V().subVectors(T,q.P),d=Math.max(Math.abs(a-b)+1e-3,Math.min(a+b-1e-3,v.length())),al=v.normalize();
-  const x=(a*a-b*b+d*d)/(2*d),h=Math.sqrt(Math.max(a*a-x*x,0)),kd=V().subVectors(q.K,q.P);kd.addScaledVector(al,-kd.dot(al));if(kd.lengthSq()<1e-6)kd.copy(F._py).addScaledVector(al,-F._py.dot(al));kd.normalize();
-  q.K.copy(q.P).addScaledVector(al,x).addScaledVector(kd,h);q.A.copy(q.P).addScaledVector(al,d);setLeg(F,s)};
- let o=V(0,0,0),oL=o;const T={};
- for(let i=L;i>=S.v0;i--){const F=S.fr[i],q=F._leg,zm=Math.min(q.r.A.z,q.l.A.z),down={r:q.r.A.z-zm<0.06,l:q.l.A.z-zm<0.06},ds=[];
-  for(const s of SIDES)if(down[s]&&T[s])ds.push(V().subVectors(T[s],q[s].A));
-  o=ds.length?ds.reduce((u,w)=>u.add(w),V()).multiplyScalar(1/ds.length):V(o.x,o.y,sole-zm);if(i===L)oL=o.clone();move(F,o);
-  for(const s of SIDES){if(!down[s]){T[s]=null;continue}if(!T[s]){T[s]=q[s].A.clone();T[s].z=sole}reach(F,s,T[s])}}
- for(let i=L+1;i<=S.v1;i++)move(S.fr[i],oL);
- S.stand=TR.sole*g+Lsh+Lth+TR.sacrum*g+0.361*st+(TR.neck+0.102)*g}                 // height of this skeleton standing straight
+function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.name)src[c.name]=c;S.mesh={};S.group=new THREE.Group();const R=S.rig;S.p={};S.q={};S.s={};
+ for(const n of SEG){if(!src[n]||!R.pos[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m);
+  S.p[n]=R.pos[n].map(v=>new THREE.Vector3(v[0],v[1],v[2]));S.q[n]=R.rot[n].map(v=>new THREE.Quaternion(v[0],v[1],v[2],v[3]));S.s[n]=new THREE.Vector3(R.scale[n][0],R.scale[n][1],R.scale[n][2])}scene.add(S.group)}
+// The bone positions and rotations for every frame come ready-made from shot_coach.py (rig_skeleton); the page only blends between frames.
 const P_=new THREE.Vector3(),Q_=new THREE.Quaternion();
-function pose(S,tt){const c=Math.max(S.v0,Math.min(S.v1,tt)),a=Math.floor(c),b=Math.min(a+1,S.v1),f=c-a,A=S.fr[a],B=S.fr[b];
- for(const n in S.mesh){const m=S.mesh[n];P_.lerpVectors(A[n].p,B[n].p,f);Q_.slerpQuaternions(A[n].q,B[n].q,f);m.matrix.compose(P_,Q_,S.scale[n.replace(/^[lr]_/,'')]);m.matrixWorldNeedsUpdate=true}}
+function pose(S,tt){const c=Math.max(0,Math.min(NT-1,tt)),a=Math.floor(c),b=Math.min(a+1,NT-1),f=c-a;
+ for(const n in S.mesh){const m=S.mesh[n];P_.lerpVectors(S.p[n][a],S.p[n][b],f);Q_.slerpQuaternions(S.q[n][a],S.q[n][b],f);m.matrix.compose(P_,Q_,S.s[n]);m.matrixWorldNeedsUpdate=true}}
 let t=0,playing=true,last=0,ready=false;
 loader.parse(buf.buffer,'',gltf=>{build(gltf,D.you,new THREE.MeshLambertMaterial({color:0xcccccc}));build(gltf,D.player,new THREE.MeshLambertMaterial({color:0xffaa00,transparent:true,opacity:0.8}));draco.dispose();ready=true;$('msg').remove()},
  e=>{$('msg').textContent='Could not load the skeleton model.'});
@@ -1082,7 +1197,7 @@ addEventListener('keydown',e=>{if(e.target.tagName==='SELECT')return;if(e.code==
 function tick(ts){const dt=Math.min((ts-last)/1000,0.1);last=ts;if(playing&&ready){t+=dt*30*parseFloat($('speed').value);if(t>NT-1)t=0}
  if(ready){pose(D.you,t);pose(D.player,t)}knob.style.left=(t/(NT-1)*100)+'%';const s=(t-REL)/30;$('time').textContent=(s>=0?'+':'−')+Math.abs(s).toFixed(2)+' s';
  controls.update();renderer.render(scene,camera);requestAnimationFrame(tick)}
-window.__viewer={get t(){return t},set t(v){t=v},setPlay,camera,controls,TR,D,solve};requestAnimationFrame(ts=>{last=ts;tick(ts)});
+window.__viewer={get t(){return t},set t(v){t=v},setPlay,camera,controls,D};requestAnimationFrame(ts=>{last=ts;tick(ts)});
 </script></body></html>
 '''
 
@@ -1110,15 +1225,17 @@ def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
         p, ext, rise = shift(p), shift(ext), shift(rise)
     rise = np.nan_to_num(rise)
     Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
-    lst = lambda x: [None if np.isnan(f).any() else np.round(f, 3).tolist() for f in x]
-    kind = "three" if stype == "three" else "mid-range"
+    kind = "three" if stype == "three" else "mid-range"; h = PLAYER_HEIGHT_CM.get(player, 193) / 100       # both skeletons are drawn at the player's height
+    nan = lambda x: np.array([[[np.nan] * 3] * len(x[0] if x[0] is not None else x[-1]) if f is None else f for f in x], float)
+    you = rig_skeleton(p, ext, rise, hand, h); pro = rig_skeleton(nan(avg["pose"]), nan(avg["ext"]), avg["rise"], avg.get("hand", "R"), h)
+    pack = lambda r: dict(pos={k: np.round(v, 4).tolist() for k, v in r["pos"].items()}, rot={k: np.round(v, 5).tolist() for k, v in r["rot"].items()}, scale=r["scale"])
     with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
         glb = base64.b64encode(fh.read()).decode()
-    h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
-    data = dict(you=dict(label="You, " + shot["name"], hand=hand, pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist(), height=h),
-                player=dict(label=f"{player}, average {kind} shot", hand=avg.get("hand", "R"), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"], height=h), glb=glb)
+    data = dict(you=dict(label="You, " + shot["name"], rig=pack(you)), player=dict(label=f"{player}, average {kind} shot", rig=pack(pro)), glb=glb)
     with open(path, "w") as fh:
         fh.write(VIEWER_HTML.replace("__TITLE__", f"You vs {player}").replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
+    if os.path.exists(os.path.join(ROOT, "assets", "skeleton_plain.glb")):
+        write_glb(os.path.splitext(path)[0] + ".glb", [("You", you, (0.8, 0.8, 0.8, 1.0)), (player, pro, (1.0, 0.667, 0.0, 0.8))])
     return True
 
 
@@ -1263,7 +1380,7 @@ def main():
         saved.append(base + ".csv")
     who = res["player"] if a.mode == "difference" else res["closest"]
     if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot):
-        saved.append(base + ".html"); print(f"\n3D viewer, you vs {who}:  {base}.html")
+        saved += [base + ".html"] + ([base + ".glb"] if os.path.exists(base + ".glb") else []); print(f"\n3D viewer, you vs {who}:  {base}.html")
     print("Saved in " + out_dir + ": " + ", ".join(os.path.basename(x) for x in saved))
 
 if __name__ == "__main__":
