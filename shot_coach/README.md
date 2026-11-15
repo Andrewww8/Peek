@@ -44,7 +44,6 @@ python shot_coach.py difference my_shot.mov mid curry --hand L
   - `--all`: include the less reliable measures.
   - `--explain`: print what each measure means.
   - `--top N`: how many differences to list (default 8).
-  - `--height H`: your height (`178`, `5'10`, `70in`). The 3D viewer then draws you at your real size next to the player, who is drawn at his listed height. Without it, both skeletons are drawn the same height.
 
 ## Outputs
 
@@ -59,7 +58,7 @@ All in `outputs/`:
   - `similar` ranks the players and lists the three most alike and three most different measures.
 - `<video name>_difference_<type>_<player>.txt`, `.json` and `.csv`: the report, the same result as data, and the full table of measures.
   - `difference` lists the top 3 you already match, the bottom 3 furthest apart, and other differences, each with a short cue.
-- The same name with `.html`: the 3D viewer. Your skeleton (grey) is overlaid on the player's average shot (orange), both scaled to the same height, facing the same way and lined up at the release.
+- The same name with `.html`: the 3D viewer. Your skeleton (grey) is overlaid on the player's average shot (orange), with you scaled to the player's height, both facing the same way and lined up at the release.
   - `similar` shows you against the closest player; `difference` shows you against the player you chose.
   - Drag to rotate, scroll to zoom, space to play or pause, arrow keys to step a frame. The dashed line on the bar is the release.
   - A left-handed shooter is mirrored so both skeletons shoot with the same hand; the legend says so.

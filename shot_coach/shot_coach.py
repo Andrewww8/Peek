@@ -16,7 +16,6 @@ INPUTS
                --all        include the measures that rely on estimated depth / fingertip position
                --explain    print what each measure means
                --top N      how many differences to list (default 8)
-               --height H   your height (178, 5'10, 70in) so the 3D viewer draws you at your real size next to the player
 
 OUTPUTS (all in outputs/)
   <video>.npz                               the pose, clipped to 1.0 s before the release .. 0.5 s after, 30 fps, 46 samples, release at index 30:
@@ -77,7 +76,7 @@ PRE, POST, NT = 1.0, 0.5, 46                       # shot window: seconds before
 EXT_THREADS = 3                                        # fingertip/toe frames processed at once
 FRAME_BUDGET = 1.6e9                               # bytes of decoded frames kept in memory (longer videos are re-read instead)
 PLAYER_HEIGHT_CM = {"Stephen Curry": 188, "Damian Lillard": 188, "Kyrie Irving": 188, "Ray Allen": 196, "Anthony Edwards": 193, "Luke Kennard": 196,
-                    "Luka Doncic": 198, "Donte DiVincenzo": 193, "LaMelo Ball": 201, "Shai Gilgeous-Alexander": 198}      # listed heights, for the 3D viewer
+                    "Luka Doncic": 198, "Donte DiVincenzo": 193, "LaMelo Ball": 201, "Shai Gilgeous-Alexander": 198}      # listed heights; the 3D viewer draws both skeletons at the player's height
 ALIAS = {"sga": "Shai Gilgeous-Alexander", "steph": "Stephen Curry", "ant": "Anthony Edwards", "dame": "Damian Lillard", "luka": "Luka Doncic", "melo": "LaMelo Ball"}
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1079,21 +1078,7 @@ def canon_rot(p):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
-def parse_height(text):
-    """'178', '178cm', '1.78m', '70in', 5'10, 5-10 or 5ft10 -> centimetres."""
-    t = text.strip().lower().replace('"', "").replace("inches", "in").replace(" ", "")
-    m = re.fullmatch(r"(\d)(?:'|ft|-)(\d{1,2}(?:\.\d+)?)?(?:in)?", t)
-    if m: cm = int(m.group(1)) * 30.48 + float(m.group(2) or 0) * 2.54
-    elif t.endswith("cm"): cm = float(t[:-2])
-    elif t.endswith("in"): cm = float(t[:-2]) * 2.54
-    elif t.endswith("m"): cm = float(t[:-1]) * 100
-    else:
-        cm = float(t); cm = cm * 100 if cm < 3 else (cm * 2.54 if cm < 100 else cm)
-    if not 100 <= cm <= 250: raise ValueError(text)
-    return cm
-
-
-def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot, height_cm=None):
+def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
     """3D viewer page: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
     avg = ref.get("averages", {}).get(player, {}).get(stype)
     if avg is None or not os.path.exists(os.path.join(ROOT, "assets", "skeleton.glb")): return False
@@ -1116,11 +1101,9 @@ def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot, hei
     kind = "three" if stype == "three" else "mid-range"
     with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
         glb = base64.b64encode(fh.read()).decode()
-    pcm = PLAYER_HEIGHT_CM.get(player, 193); ycm = height_cm or pcm                        # without your height both are drawn the same size
-    ft = lambda cm: f"{int(cm / 2.54 // 12)}'{int(round(cm / 2.54 % 12)) % 12}\"" if round(cm / 2.54 % 12) < 12 else f"{int(cm / 2.54 // 12) + 1}'0\""
-    data = dict(you=dict(label="You, " + shot["name"] + (f", {ft(ycm)}" if height_cm else ", drawn at his height") + (" (mirrored)" if hand == "L" else ""),
-                         pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist(), height=ycm / 100),
-                player=dict(label=f"{player}, {ft(pcm)}, average {kind} shot" + (" (mirrored)" if avg.get("hand") == "L" else ""), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"], height=pcm / 100), glb=glb)
+    h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
+    data = dict(you=dict(label="You, " + shot["name"] + (" (mirrored)" if hand == "L" else ""), pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist(), height=h),
+                player=dict(label=f"{player}, average {kind} shot" + (" (mirrored)" if avg.get("hand") == "L" else ""), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"], height=h), glb=glb)
     with open(path, "w") as fh:
         fh.write(VIEWER_HTML.replace("__TITLE__", f"You vs {player}").replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
     return True
@@ -1219,10 +1202,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["similar", "difference", "lift"]); ap.add_argument("shot"); ap.add_argument("shot_type", nargs="?", choices=["three", "mid", "midrange"])
     ap.add_argument("player", nargs="?"); ap.add_argument("--hand", choices=["R", "L"]); ap.add_argument("--relift", action="store_true"); ap.add_argument("--clip", action="store_true")
-    ap.add_argument("--out"); ap.add_argument("--all", action="store_true"); ap.add_argument("--explain", action="store_true"); ap.add_argument("--top", type=int, default=8); ap.add_argument("--height")
+    ap.add_argument("--out"); ap.add_argument("--all", action="store_true"); ap.add_argument("--explain", action="store_true"); ap.add_argument("--top", type=int, default=8)
     a = ap.parse_args(); t_start = time.time()
-    try: height_cm = parse_height(a.height) if a.height else None
-    except ValueError: sys.exit(f"Could not read the height '{a.height}'. Examples: 178   5'10   70in")
     if a.mode != "lift" and not a.shot_type: sys.exit(f"{a.mode} needs a shot type: three or mid")
     if a.mode == "difference" and not a.player: sys.exit('difference needs a player, e.g.  shot_coach.py difference shot.mov three curry')
     if os.path.isdir(a.shot) or not os.path.exists(a.shot): sys.exit(f"'{a.shot}' is not a file. Give ONE shot: a video or a pose .npz.")
@@ -1268,7 +1249,7 @@ def main():
             w = csv.DictWriter(fh, fieldnames=list(res["measures"][0])); w.writeheader(); w.writerows(res["measures"])
         saved.append(base + ".csv")
     who = res["player"] if a.mode == "difference" else res["closest"]
-    if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot, height_cm):
+    if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot):
         saved.append(base + ".html"); print(f"\n3D viewer, you vs {who}:  {base}.html")
     print("Saved in " + out_dir + ": " + ", ".join(os.path.basename(x) for x in saved))
 
