@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -18,30 +19,40 @@ def ensure_loaded(coach, key):
         coach._load(key)
 
 
-def lift_extremities(coach, video, data, frames, joints, pose, tagged_frame):
-    if not frames.size or not hasattr(coach, "EXT_NAMES"):
-        return {}
+def extremity_points(coach, video, data, frames, joints, tagged_frame):
+    """2D fingertips, knuckles and toes for the frames around the tag, several frames at a time."""
     ensure_loaded(coach, "ext")
     points = np.full((len(frames), len(coach.EXT_NAMES), 2), np.nan, dtype=np.float32)
     fps = data["fps"]
     window = np.flatnonzero((frames >= tagged_frame - 1.2 * fps) & (frames <= tagged_frame + fps))
-    capture = None
+    capture = []
+    lock = threading.Lock()
+
+    def detect(row):
+        frame = int(frames[row])
+        image = data["store"].get(frame)
+        if image is None:
+            with lock:
+                if not capture:
+                    capture.append(coach.cv2.VideoCapture(video))
+                capture[0].set(coach.cv2.CAP_PROP_POS_FRAMES, frame)
+                ok, image = capture[0].read()
+            if not ok:
+                return
+        kpts, scores = coach.extremities_2d(image, joints[row], coach._M["wb"], coach._M["hand"])
+        points[row] = np.where((scores >= 0.2)[:, None], kpts, np.nan)
+
     try:
-        for row in window:
-            frame = int(frames[row])
-            image = data["store"].get(frame)
-            if image is None:
-                if capture is None:
-                    capture = coach.cv2.VideoCapture(video)
-                capture.set(coach.cv2.CAP_PROP_POS_FRAMES, frame)
-                ok, image = capture.read()
-                if not ok:
-                    continue
-            kpts, scores = coach.extremities_2d(image, joints[row], coach._M["wb"], coach._M["hand"])
-            points[row] = np.where((scores >= 0.2)[:, None], kpts, np.nan)
+        # Each frame is independent; ONNX releases the GIL, as in shot_coach.lift.
+        with ThreadPoolExecutor(getattr(coach, "EXT_THREADS", 3)) as pool:
+            list(pool.map(detect, window))
     finally:
-        if capture is not None:
-            capture.release()
+        for opened in capture:
+            opened.release()
+    return points
+
+
+def lift_extremities(coach, points, joints, pose):
     lifted = coach.extremities_3d(points.astype(float), joints.astype(float), pose.astype(float))
     return {"extremities3d": lifted.astype("<f4"), "extremity_names": np.array(coach.EXT_NAMES)}
 
@@ -72,19 +83,27 @@ def export_pose(coach, video, release_offset_ms, output):
     joints = joints[selected]
     confidence = confidence[selected]
     pose = np.empty((0, 17, 3), dtype=np.float32)
+    extremities = {}
     if frames.size:
         joints = coach.fill_gaps(joints, confidence).astype(np.float64)
         joints, confidence, _ = coach.fix_swaps(joints, confidence)
-        ensure_loaded(coach, "lift")
-        model_input = coach.normalize(joints).astype(np.float32)
-        pose = coach.lift_track(coach._M["lift"], model_input, True)
-        pose /= max(float(np.median(coach.skeleton_height(pose))), 1e-6)
-        pose = coach.lowpass(pose, data["eff"])
-        joints = coach.lowpass(joints, data["eff"])
+        smoothed = coach.lowpass(joints, data["eff"])
+        with ThreadPoolExecutor(1) as background:
+            # The fingertip pass needs only the smoothed 2D joints, so it runs while the 3D lifter does.
+            points = None
+            if hasattr(coach, "EXT_NAMES"):
+                points = background.submit(extremity_points, coach, video, data, frames, smoothed, tagged_frame)
+            ensure_loaded(coach, "lift")
+            model_input = coach.normalize(joints).astype(np.float32)
+            pose = coach.lift_track(coach._M["lift"], model_input, True)
+            pose /= max(float(np.median(coach.skeleton_height(pose))), 1e-6)
+            pose = coach.lowpass(pose, data["eff"])
+            joints = smoothed
+            if points is not None:
+                extremities = lift_extremities(coach, points.result(), joints, pose)
 
     # Keep the source video frame numbers, including gaps when the tracker
     # skips frames. The API aligns the user's tag against this time base.
-    extremities = lift_extremities(coach, video, data, frames, joints, pose, tagged_frame)
     np.savez_compressed(
         output,
         track=data["track"][selected].astype("<i4"),
