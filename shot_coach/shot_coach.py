@@ -1029,6 +1029,9 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
   const n=perp(fw.add(V(0,0,-0.5)),f,V(0,0,-1));flick[i]=Math.max(-1.3,Math.min(1.3,Math.atan2(dd.dot(n),dd.dot(f))))}
  for(let i=S.v0,last=0;i<=S.v1;i++){if(flick[i]===null)flick[i]=last;last=flick[i]}
  const sm=flick.slice();for(let i=S.v0;i<=S.v1;i++){let a=0,w=0;for(let k=-2;k<=2;k++){const j=i+k;if(j>=S.v0&&j<=S.v1){const ww=3-Math.abs(k);a+=flick[j]*ww;w+=ww}}sm[i]=a/w}
+ const setLeg=(F,s)=>{const q=F._leg[s],t=bone(V().subVectors(q.K,q.P).normalize(),F._px,F._py),c=bone(V().subVectors(q.A,q.K).normalize(),t.x,t.y);
+  let fy=V(c.y.x,c.y.y,0);if(fy.lengthSq()<1e-4)fy=V(F._py.x,F._py.y,0);fy.normalize();const fz=V(0,0,1);
+  F[s+'_thigh']={p:q.P.clone(),q:t.q};F[s+'_shank']={p:q.K.clone(),q:c.q};F[s+'_foot']={p:q.A.clone(),q:quat(V().crossVectors(fy,fz),fy,fz)}};
  const prev={};S.fr=[];
  for(let i=S.v0;i<=S.v1;i++){const J=all[i],F={},dir=(a,b)=>V().subVectors(J[b],J[a]).normalize();
   const up=dir(0,8),px=perp(V().subVectors(J[1],J[4]),up,V(1,0,0)),py=V().crossVectors(up,px),O=J[0].clone();F.pelvis={p:O,q:quat(px,py,up)};
@@ -1040,13 +1043,22 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
    F[s+'_hand']={p:E.clone().addScaledVector(l.z,-LEN.larm),z:hz,x:l.x}}
   for(const[s,o]of[['r','l'],['l','r']]){const h=F[s+'_hand'],m=V().subVectors(F[o+'_hand'].p,h.p);m.addScaledVector(h.z,-m.dot(h.z));   // palms face each other
    const y=m.length()>0.06?m.normalize():(prev[s+'h']?perp(prev[s+'h'],h.z,h.x):h.x.clone().multiplyScalar(s==='r'?-1:1));prev[s+'h']=y;h.q=quat(V().crossVectors(y,h.z),y,h.z)}
-  for(const[s,sg,hp,kn,an]of[['r',1,1,2,3],['l',-1,4,5,6]]){const P=O.clone().addScaledVector(px,sg*TR.hipX*g);
-   const t=bone(dir(hp,kn),px,py);F[s+'_thigh']={p:P,q:t.q};const K=P.clone().addScaledVector(t.z,-LEN.thigh);
-   const c=bone(dir(kn,an),t.x,t.y);F[s+'_shank']={p:K,q:c.q};const A=K.clone().addScaledVector(c.z,-LEN.shank);
-   let fy=V(c.y.x,c.y.y,0);if(fy.lengthSq()<1e-4)fy=V(py.x,py.y,0);fy.normalize();const fz=V(0,0,1);F[s+'_foot']={p:A,q:quat(V().crossVectors(fy,fz),fy,fz)}}
+  F._px=px;F._py=py;F._leg={};
+  for(const[s,sg,hp,kn,an]of[['r',1,1,2,3],['l',-1,4,5,6]]){const P=O.clone().addScaledVector(px,sg*TR.hipX*g),K=P.clone().addScaledVector(dir(hp,kn),LEN.thigh),A=K.clone().addScaledVector(dir(kn,an),LEN.shank);
+   F._leg[s]={P,K,A};setLeg(F,s)}
   S.fr[i]=F}
- let lo=1e9;for(let i=S.v0;i<=Math.min(S.v0+12,S.v1);i++)lo=Math.min(lo,S.fr[i].r_foot.p.z,S.fr[i].l_foot.p.z);lo-=TR.sole*g;
- for(let i=S.v0;i<=S.v1;i++)for(const n in S.fr[i])S.fr[i][n].p.z-=lo;
+ // Feet stay planted until lift-off: working back from lift-off, the body is moved so a foot on the ground does not slide or sink,
+ // and when both feet are down each leg is re-bent at the knee to reach its own planted spot. After lift-off the hips' measured rise drives the jump.
+ const sole=TR.sole*g,L=S.lift,SIDES=['r','l'],move=(F,o)=>{for(const n of SEG)if(F[n])F[n].p.add(o);for(const s of SIDES){const q=F._leg[s];q.P.add(o);q.K.add(o);q.A.add(o)}};
+ const reach=(F,s,T)=>{const q=F._leg[s],a=LEN.thigh,b=LEN.shank,v=V().subVectors(T,q.P),d=Math.max(Math.abs(a-b)+1e-3,Math.min(a+b-1e-3,v.length())),al=v.normalize();
+  const x=(a*a-b*b+d*d)/(2*d),h=Math.sqrt(Math.max(a*a-x*x,0)),kd=V().subVectors(q.K,q.P);kd.addScaledVector(al,-kd.dot(al));if(kd.lengthSq()<1e-6)kd.copy(F._py).addScaledVector(al,-F._py.dot(al));kd.normalize();
+  q.K.copy(q.P).addScaledVector(al,x).addScaledVector(kd,h);q.A.copy(q.P).addScaledVector(al,d);setLeg(F,s)};
+ let o=V(0,0,0),oL=o;const T={};
+ for(let i=L;i>=S.v0;i--){const F=S.fr[i],q=F._leg,zm=Math.min(q.r.A.z,q.l.A.z),down={r:q.r.A.z-zm<0.06,l:q.l.A.z-zm<0.06},ds=[];
+  for(const s of SIDES)if(down[s]&&T[s])ds.push(V().subVectors(T[s],q[s].A));
+  o=ds.length?ds.reduce((u,w)=>u.add(w),V()).multiplyScalar(1/ds.length):V(o.x,o.y,sole-zm);if(i===L)oL=o.clone();move(F,o);
+  for(const s of SIDES){if(!down[s]){T[s]=null;continue}if(!T[s]){T[s]=q[s].A.clone();T[s].z=sole}reach(F,s,T[s])}}
+ for(let i=L+1;i<=S.v1;i++)move(S.fr[i],oL);
  S.stand=TR.sole*g+Lsh+Lth+TR.sacrum*g+0.361*st+(TR.neck+0.102)*g}                 // height of this skeleton standing straight
 const P_=new THREE.Vector3(),Q_=new THREE.Quaternion();
 function pose(S,tt){const c=Math.max(S.v0,Math.min(S.v1,tt)),a=Math.floor(c),b=Math.min(a+1,S.v1),f=c-a,A=S.fr[a],B=S.fr[b];
