@@ -17,7 +17,7 @@ import {
   Animated, AppState, BackHandler, Easing, Linking, Pressable, ScrollView, StyleSheet, Text,
   useAnimatedValue, useWindowDimensions, View,
 } from 'react-native';
-import { initialWindowMetrics, SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { AccountScreen, AuthScreen, SwitchAccount } from './AccountScreen';
 import type { EntryMode } from './AccountScreen';
@@ -432,7 +432,6 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccoun
   const progress = useAnimatedValue(0);
   const reduceMotion = useReduceMotion();
   const { width } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
   const drawerWidth = Math.min(width * 306 / 390, 334);
 
   useLayoutEffect(() => {
@@ -473,7 +472,7 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccoun
       accessibilityElementsHidden={!visible}
       importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
       onAccessibilityEscape={onDismiss}
-      style={[styles.drawerOverlay, { top: -insets.top, bottom: -insets.bottom, left: -insets.left, right: -insets.right }]}
+      style={styles.drawerOverlay}
     >
       <Animated.View pointerEvents="none" style={[styles.drawerScrim, { opacity }]} />
       <Pressable style={StyleSheet.absoluteFill} onPress={onDismiss} accessible={false} />
