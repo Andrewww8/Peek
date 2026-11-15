@@ -15,6 +15,11 @@ export const CLIP_BEFORE_MS = 3_000;
 export const CLIP_AFTER_MS = 1_000;
 export const UPLOAD_URL_TTL_MS = 15 * 60_000;
 export const SIGNED_GET_TTL_MS = 15 * 60_000;
+/** Shot clips are temporary inputs to analysis; Blob deletes them after this many days if CV never runs. */
+export const CLIP_TTL_DAYS = 7;
+export const CLIP_TTL_MS = CLIP_TTL_DAYS * 24 * 3600_000;
+/** Largest CV npz the API reads for one shot clip. */
+export const MAX_NPZ_BYTES = 64 * 1024 * 1024;
 export const MAX_SHOTS_PER_REQUEST = 200;
 
 export const RECORDING_TYPES: Record<string, string> = { mov: 'video/quicktime', mp4: 'video/mp4', m4v: 'video/x-m4v' };
@@ -38,7 +43,7 @@ export interface BlobStore {
   head(pathname: string): Promise<{ sizeBytes: number } | null>;
   /** The blob's content, or null when it does not exist. */
   read(pathname: string): Promise<Readable | null>;
-  put(pathname: string, body: Buffer, contentType: string): Promise<void>;
+  put(pathname: string, body: Buffer, contentType: string, opts?: { ttlDays?: number }): Promise<void>;
   /** Idempotent: deleting a missing blob succeeds. */
   delete(pathname: string): Promise<void>;
   /** Deletes every blob whose pathname starts with `prefix` (which must end in `/`). */
@@ -54,16 +59,24 @@ export interface ClipRow {
   shotType: string;
   releaseMs: number;
   outcome: Outcome;
-  clipPathname: string;
+  /** Null once the clip's media was deleted after analysis. */
+  clipPathname: string | null;
   startMs: number;
   endMs: number;
   sizeBytes: number;
-  analysisStatus: string;
+  analysisStatus: AnalysisStatus;
   analysis: unknown;
+  mediaDeletedAt: string | null;
+  /** The player's declared shooting hand, or null (then analysis detects it). */
+  shootingHand: 'right' | 'left' | null;
   createdAt: string;
   updatedAt: string;
 }
-export type NewClip = Omit<ClipRow, 'analysisStatus' | 'analysis' | 'createdAt' | 'updatedAt'>;
+export type AnalysisStatus = 'pending' | 'complete' | 'failed' | 'expired';
+export type NewClip = Omit<ClipRow, 'analysisStatus' | 'analysis' | 'mediaDeletedAt' | 'createdAt' | 'updatedAt' | 'clipPathname' | 'shootingHand'> & {
+  clipPathname: string;
+  shootingHand?: 'right' | 'left' | null;
+};
 
 export interface ClipRepo {
   /** Insert or replace the clip for (userId, sessionId, shotNumber); a re-cut resets analysis to pending. */
@@ -74,6 +87,13 @@ export interface ClipRepo {
   deleteSession(userId: string, sessionId: string): Promise<void>;
   /** Ordered by sessionId, then shotNumber. */
   list(userId: string, sessionId?: string): Promise<ClipRow[]>;
+  get(userId: string, sessionId: string, shotNumber: number): Promise<ClipRow | null>;
+  /** Writes analysis and status in one update. False when the row does not exist. */
+  setAnalysis(userId: string, sessionId: string, shotNumber: number, status: AnalysisStatus, analysis: unknown): Promise<boolean>;
+  /** Sets the declared shooting hand on every clip of a session. */
+  setShootingHand(userId: string, sessionId: string, hand: 'right' | 'left'): Promise<void>;
+  /** Records that the clip mp4 and npz were deleted: clip_pathname = null, media_deleted_at = now. */
+  markMediaDeleted(userId: string, sessionId: string, shotNumber: number): Promise<void>;
 }
 
 export class AuthError extends Error {}
@@ -95,6 +115,12 @@ export interface Deps {
   clips: ClipRepo;
   auth: AuthVerifier;
   trimmer: Trimmer;
+  /** Shared secret the CV worker uses for POST /v1/internal/analysis; the route answers 503 without it. */
+  cvToken?: string;
+  /** Pro reference library (scripts and the coach's compare_to_reference). */
+  references?: import('./coach/deps.js').ReferenceRepo;
+  /** The AI coach; its routes answer 503 not_configured without it. */
+  coach?: import('./coach/deps.js').CoachDeps;
   /** Extra routes a dependency needs (the local blob store's presigned PUT/GET endpoint). */
   routes?: (app: import('fastify').FastifyInstance) => Promise<void>;
 }
@@ -105,6 +131,10 @@ export const paths = {
   recordingsOf: (userId: string, sessionId: string) => `recordings/${userId}/${sessionId}/`,
   clip: (userId: string, sessionId: string, shotNumber: number) => `clips/${userId}/${sessionId}/${shotNumber}.mp4`,
   clipsOf: (userId: string, sessionId: string) => `clips/${userId}/${sessionId}/`,
+  analysis: (userId: string, sessionId: string, shotNumber: number) => `analysis/${userId}/${sessionId}/${shotNumber}.npz`,
+  analysisOf: (userId: string, sessionId: string) => `analysis/${userId}/${sessionId}/`,
+  reference: (clipId: string, file: string) => `reference/${clipId}/${file}`,
+  referenceOf: (clipId: string) => `reference/${clipId}/`,
 };
 
 export function clipWindow(releaseMs: number, durationMs: number): { startMs: number; endMs: number } {

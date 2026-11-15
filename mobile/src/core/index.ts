@@ -1,5 +1,7 @@
 import { createApiClient } from './apiClient';
 import { ClipSync } from './clips';
+import { CoachClient } from './coach';
+import { PlayerSettings } from './player';
 import { DIRS } from './config';
 import { DemoService } from './demos';
 import { toDocumentUri } from './paths';
@@ -11,6 +13,8 @@ import { recoverStorage, storageUsage } from './storage';
 
 export * from './apiClient';
 export * from './clips';
+export * from './coach';
+export * from './player';
 export * from './config';
 export * from './demos';
 export * from './errors';
@@ -44,6 +48,8 @@ export async function createPerspectiveBackend(
     shots: new ShotStore(platform),
     demos: new DemoService(platform, api),
     clips: new ClipSync(platform, api),
+    coach: new CoachClient(platform, api),
+    player: new PlayerSettings(platform),
     storageUsage: () => storageUsage(platform),
     close: () => platform.db.close(),
   };

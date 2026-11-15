@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { CatalogError, checkCatalogAssets, createCatalogReader, mediaFileName, type DemoEntry } from './catalog.js';
+import { analysisRoutes } from './analysis.js';
 import { clipRoutes } from './clips.js';
 import type { Deps } from './deps.js';
 
@@ -70,6 +71,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   });
 
   await app.register(clipRoutes, { deps: opts.deps, depsError: opts.depsError });
+  await app.register(analysisRoutes, { blob: opts.deps?.blob, clips: opts.deps?.clips, cvToken: opts.deps?.cvToken });
   if (opts.deps?.routes) await opts.deps.routes(app);
 
   app.get<{ Querystring: { shotType?: string } }>(

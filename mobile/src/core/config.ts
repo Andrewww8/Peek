@@ -24,6 +24,12 @@ export const NETWORK = {
   apiTimeoutMs: 15_000,
   /** POST …/clips: the API cuts every clip before it answers. */
   clipCutTimeoutMs: 120_000,
+  /** Coach reply: until the response headers arrive. */
+  coachConnectTimeoutMs: 30_000,
+  /** Coach reply: longest silence between two chunks (tools can run in between). */
+  coachIdleTimeoutMs: 90_000,
+  /** Coach reply: whole answer (the API function's maxDuration is 300 s). */
+  coachTotalTimeoutMs: 300_000,
   /** PUT of one recording (cap 60 MB) straight to Blob storage. */
   recordingUploadTimeoutMs: 300_000,
 } as const;

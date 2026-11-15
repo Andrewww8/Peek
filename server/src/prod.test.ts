@@ -195,7 +195,7 @@ describe('Supabase clip repo', () => {
     assert.match(up!.prefer ?? '', /resolution=merge-duplicates/);
     assert.deepEqual(up!.body, {
       user_id: A, session_id: S, shot_number: 1, shot_type: 'three_point', release_ms: 4000, outcome: 'made', clip_pathname: row.clip_pathname,
-      start_ms: 1000, end_ms: 5000, size_bytes: 1234, analysis_status: 'pending', analysis: null,
+      start_ms: 1000, end_ms: 5000, size_bytes: 1234, analysis_status: 'pending', analysis: null, media_deleted_at: null,
     });
     assert.equal(p1!.method, 'PATCH');
     assert.deepEqual(p1!.body, { outcome: 'missed' });
@@ -206,7 +206,7 @@ describe('Supabase clip repo', () => {
     assert.deepEqual(filters(l1!.url), ['order=session_id.asc,shot_number.asc', 'select=*', `session_id=eq.${S}`, `user_id=eq.${A}`]);
     assert.deepEqual(filters(l2!.url), ['order=session_id.asc,shot_number.asc', 'select=*', `user_id=eq.${A}`]);
     assert.deepEqual(listed, [
-      { userId: A, sessionId: S, shotNumber: 1, shotType: 'three_point', releaseMs: 4000, outcome: 'made', clipPathname: row.clip_pathname, startMs: 1000, endMs: 5000, sizeBytes: 1234, analysisStatus: 'pending', analysis: null, createdAt: 't0', updatedAt: 't1' },
+      { userId: A, sessionId: S, shotNumber: 1, shotType: 'three_point', releaseMs: 4000, outcome: 'made', clipPathname: row.clip_pathname, startMs: 1000, endMs: 5000, sizeBytes: 1234, analysisStatus: 'pending', analysis: null, mediaDeletedAt: null, shootingHand: null, createdAt: 't0', updatedAt: 't1' },
     ]);
     for (const r of requests) assert.equal(r.url.origin, 'https://proj.supabase.co');
   });
@@ -330,6 +330,7 @@ describe('environment and the Vercel entry', () => {
     assert.equal(fn.maxDuration, 300);
     assert.match(fn.includeFiles, /node_modules\/ffmpeg-static\/\*\*/);
     assert.match(fn.includeFiles, /catalog\/\*\*/);
+    assert.match(fn.includeFiles, /@langchain\/langgraph-sdk\/dist\/node_modules\/\*\*/); // vendored ESM markers (fix-vendored-esm.mjs)
     assert.deepEqual(cfg.rewrites, [{ source: '/(.*)', destination: '/api' }]);
   });
 
@@ -342,5 +343,57 @@ describe('environment and the Vercel entry', () => {
     assert.match(sql, /alter table public\.shot_clips enable row level security/);
     assert.equal((sql.match(/user_id = \(select auth\.uid\(\)\)/g) ?? []).length, 5);
     assert.match(sql, /before update on public\.shot_clips/);
+  });
+});
+
+describe('coach and CV env', () => {
+  const base = { VERCEL: '1', CATALOG_PATH: '', MEDIA_DIR: '', SUPABASE_URL: 'https://proj.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'k', BLOB_READ_WRITE_TOKEN: 'vercel_blob_rw_Abc123_x' };
+
+  test('without ANTHROPIC_API_KEY /health stays ok and the coach answers 503 not_configured', async () => {
+    const { missingCoachEnv } = await import('./prod/coach.js');
+    assert.deepEqual(missingCoachEnv({}), ['ANTHROPIC_API_KEY', 'POSTGRES_URL']);
+    const app = await buildAppFromEnv({ ...base, CATALOG_PATH: join(dir, 'demos.json'), MEDIA_DIR: dir }, false);
+    assert.equal((await app.inject({ url: '/health' })).statusCode, 200);
+    const local = await signLocalToken('x', A); // rejected first anyway: proves the route exists behind auth
+    assert.equal((await app.inject({ method: 'POST', url: `/v1/sessions/${S}/coach/messages`, headers: { authorization: `Bearer ${local}` }, payload: { message: 'hi' } })).statusCode, 401);
+    assert.equal((await app.inject({ method: 'POST', url: '/v1/internal/analysis', headers: { authorization: 'Bearer t' }, payload: {} })).json().error, 'not_configured');
+    await app.close();
+  });
+
+  test('with ANTHROPIC_API_KEY, POSTGRES_URL and CV_SERVICE_TOKEN the coach and the CV route are configured, without connecting', async () => {
+    const { createProductionDeps } = await import('./prod/index.js');
+    const { LazyPostgresSaver } = await import('./prod/coach.js');
+    const deps = createProductionDeps({ ...base, ANTHROPIC_API_KEY: 'sk-test', POSTGRES_URL: 'postgres://u:p@aws-0.pooler.supabase.com:6543/postgres?sslmode=require&supa=base-pooler.x', CV_SERVICE_TOKEN: 'cv' });
+    assert.equal(deps.cvToken, 'cv');
+    assert.ok(deps.coach);
+    assert.equal(deps.coach.modelName, 'claude-sonnet-5-5');
+    assert.ok(deps.coach.checkpointer instanceof LazyPostgresSaver);
+    assert.equal(deps.coach.dailyLimit, 50);
+    const model = deps.coach.createModel('coach') as unknown as { model: string; betas: string[]; outputConfig: unknown; invocationKwargs: unknown; maxTokens: number };
+    assert.deepEqual([model.model, model.betas, model.outputConfig, model.invocationKwargs, model.maxTokens], ['claude-sonnet-5-5', ['server-side-fallback-2026-07-01'], { effort: 'medium' }, { fallbacks: 'default' }, 16000]);
+    await (deps.coach.checkpointer as unknown as { pool: { end(): Promise<void> } }).pool.end();
+  });
+});
+
+describe('Supabase reference_templates', () => {
+  test('upsert is keyed on (player, shot_type) and rows map back', async () => {
+    const { createSupabaseReferenceRepo } = await import('./prod/coach.js');
+    const reqs: { method: string; url: URL; body: any; prefer: string | null }[] = [];
+    const row = { player: 'Stephen Curry', shot_type: 'three_point', shooting_hand: 'right', fps: 30, release_index: 24, shots_averaged: 96, shots_confident_distance: 61, metrics: { kneeDipDeg: 118.4 }, curves: {}, template: {}, source_file: 'Stephen_Curry_three.npz', low_confidence: false, uncertain_distance: false, created_at: 't0', updated_at: 't1' };
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = new Request(input, init);
+      const text = await req.text();
+      reqs.push({ method: req.method, url: new URL(req.url), body: text ? JSON.parse(text) : undefined, prefer: req.headers.get('prefer') });
+      return new Response(JSON.stringify(req.method === 'GET' ? [row] : []), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const repo = createSupabaseReferenceRepo(createSupabaseClient('https://proj.supabase.co', 'k', fetchImpl));
+    await repo.upsertTemplate({ player: 'Stephen Curry', shotType: 'three_point', shootingHand: 'right', fps: 30, releaseIndex: 24, shotsAveraged: 96, shotsConfidentDistance: 61, metrics: { kneeDipDeg: 118.4 } as never, curves: {} as never, template: {} as never, sourceFile: 'Stephen_Curry_three.npz', lowConfidence: false, uncertainDistance: false });
+    const listed = await repo.listTemplates('three_point');
+    assert.equal(reqs[0]!.url.pathname, '/rest/v1/reference_templates');
+    assert.equal(reqs[0]!.url.searchParams.get('on_conflict'), 'player,shot_type');
+    assert.match(reqs[0]!.prefer ?? '', /resolution=merge-duplicates/);
+    assert.equal(reqs[0]!.body.shots_confident_distance, 61);
+    assert.equal(reqs[1]!.url.searchParams.get('shot_type'), 'eq.three_point');
+    assert.deepEqual([listed[0]!.player, listed[0]!.shotsAveraged, listed[0]!.uncertainDistance, listed[0]!.sourceFile], ['Stephen Curry', 96, false, 'Stephen_Curry_three.npz']);
   });
 });

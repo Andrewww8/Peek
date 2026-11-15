@@ -16,11 +16,17 @@ import type { AddressInfo } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildApp } from '../server/src/app';
-import { createLocalDeps, signLocalToken, type LocalDeps } from '../server/src/local';
+import { createLocalDeps, signLocalToken, LOCAL_CV_TOKEN, type LocalDeps } from '../server/src/local';
+import { paths } from '../server/src/deps';
+import { SHOT as POSE_SHOT, syntheticShot, writeNpz } from '../server/src/cv/test-pose';
+import { ScriptedChatModel, type Script, type ScriptTurn } from './coachModel';
+import { ingestTemplates } from '../server/scripts/reference-templates-ingest';
+import type { TemplateRow } from '../server/src/coach/deps';
+import { TEMPLATE_CLIP_RELEASE_MS, expectedPhaseDeltas, expectedSpreadDeviation, playerNpzFromTemplate, symmetricPlayerNpz } from './proClips';
 import { makeVideo, videoInfo } from '../server/src/test-video';
 import { placeholderUsdz } from '../server/scripts/make-placeholder-usdz';
 import { BackendError, createPerspectiveBackend, type OpenDemoResult, type Outcome, type PerspectiveBackend } from '../mobile/src/core';
-import { RECORDING } from '../mobile/src/core/config';
+import { NETWORK, RECORDING } from '../mobile/src/core/config';
 import { SCHEMA_VERSION } from '../mobile/src/core/schema';
 import { OUTCOMES } from '../mobile/src/core/stats';
 import { resolveAssetUrl } from '../mobile/src/core/apiClient';
@@ -210,7 +216,23 @@ interface Cloud {
   token(user: string, ttlSec?: number): Promise<string>;
   /** Every session a signed-in phone handed to syncNow, with the phone and the user it synced as. */
   sessions: Map<string, { phone: Phone; user: string }>;
+  cvToken: string;
+  /** The coach's model (scripted per scenario). */
+  coach: ScriptedChatModel;
+  /** The coach's "today" for the daily cap: one fresh day per iteration. */
+  day: string;
+  /** One-shot server faults: a crash before the analysis write, or in the media cleanup after it. */
+  faults: { setAnalysis: number; cleanup: number };
+  /** Rows (user|session|shot) whose clips are past their 7-day TTL, and the Blob TTL emulation. */
+  aged: Set<string>;
+  /** Makes every clip-repo read slow (a slow coach tool). */
+  slowListMs: number;
+  /** Hides the ingested pro templates (a deployment where the ingest has not run). */
+  hideTemplates: boolean;
 }
+const DEFAULT_SCRIPT: Script = () => {
+  throw new Error('sim: no coach script installed for this scenario');
+};
 let CLOUD!: Cloud;
 
 // ---------- simulated phones ----------
@@ -355,6 +377,14 @@ const BRANCHES: Record<string, Record<string, readonly string[]>> = {
   clip_sync_edits: { edit: ['outcome', 'delete_shot', 'delete_session'] },
   clip_sync_kill_sweep: { await_points: ['odd', 'even'] },
   clip_sync_responsive: { stall: ['upload_put', 'api_delay', 'slow_auth'] },
+  cv_analysis_lifecycle: { case: ['valid', 'user_token', 'malformed', 'expired'] },
+  cv_analysis_faults: { fault: ['before_update', 'after_update_before_cleanup'] },
+  coach_availability: { state: ['ready', 'signed_out', 'not_synced', 'offline', 'daily_limit', 'not_configured'] },
+  coach_stream_faults: { fault: ['stalled', 'cancelled', 'keepalive'] },
+  pro_comparison: { shot_type: ['three_point', 'midrange'] },
+  pro_comparison_left_handed: { player: ['kennard', 'mirrored_right_hander'] },
+  pro_comparison_unavailable: { reason: ['no_templates', 'not_analyzed'] },
+  declared_hand: { case: ['declared', 'changed_after_analysis', 'undeclared_low_confidence'] },
 };
 const laptopMode = (v: string): FaultMode => (v === 'on' ? { kind: 'pass' } : { kind: 'down' });
 
@@ -617,7 +647,7 @@ async function syncOk(ph: Phone, what: string) {
   return report;
 }
 
-async function blobFiles(prefix: 'clips' | 'recordings'): Promise<string[]> {
+async function blobFiles(prefix: 'clips' | 'recordings' | 'analysis'): Promise<string[]> {
   const root = CLOUD.deps.blob.fileOf(`${prefix}/`);
   const names = await readdir(root, { recursive: true }).catch(() => [] as string[]);
   const out: string[] = [];
@@ -636,14 +666,29 @@ async function blobFiles(prefix: 'clips' | 'recordings'): Promise<string[]> {
 async function checkCloudInvariants(phones: Iterable<Phone>) {
   const rows = CLOUD.deps.clips.rows();
   const blobs = new Set(await blobFiles('clips'));
+  const npzs = new Set(await blobFiles('analysis'));
   for (const r of rows) {
+    const id = `${r.sessionId}#${r.shotNumber}`;
     const reg = CLOUD.sessions.get(r.sessionId);
-    assert(reg, `server holds clip ${r.sessionId}#${r.shotNumber} for a session no signed-in phone synced`);
-    assert(r.userId === reg.user, `clip ${r.sessionId}#${r.shotNumber} is stored under user ${r.userId}, but ${reg.user} synced it`);
-    assert(blobs.has(r.clipPathname), `clip row ${r.clipPathname} has no blob`);
-    blobs.delete(r.clipPathname);
+    assert(reg, `server holds clip ${id} for a session no signed-in phone synced`);
+    assert(r.userId === reg.user, `clip ${id} is stored under user ${r.userId}, but ${reg.user} synced it`);
+    const clipPath = paths.clip(r.userId, r.sessionId, r.shotNumber);
+    const npzPath = paths.analysis(r.userId, r.sessionId, r.shotNumber);
+    if (r.analysisStatus === 'complete' || r.mediaDeletedAt !== null) {
+      // Analyzed: only the extracted data is kept.
+      assert(!blobs.has(clipPath) && !npzs.has(npzPath), `clip ${id} is ${r.analysisStatus} (media deleted ${r.mediaDeletedAt}) but its ${blobs.has(clipPath) ? 'mp4' : 'npz'} is still stored`);
+      assert(r.analysis !== null && r.analysis !== undefined, `clip ${id} is ${r.analysisStatus} with no analysis stored`);
+      assert(r.mediaDeletedAt !== null && r.clipPathname === null, `clip ${id} is ${r.analysisStatus} but media_deleted_at/clip_pathname were not updated`);
+    } else if (r.analysisStatus === 'expired') {
+      assert(!blobs.has(clipPath), `clip ${id} expired but its mp4 is still stored`);
+    } else {
+      assert(r.clipPathname === clipPath && blobs.has(clipPath), `clip ${id} is ${r.analysisStatus} but its mp4 is missing`);
+    }
+    blobs.delete(clipPath);
+    if (r.analysisStatus === 'pending') npzs.delete(npzPath);
   }
-  assert(blobs.size === 0, `clip blobs without a row: ${[...blobs].slice(0, 5)}`);
+  assert(blobs.size === 0, `clip blobs without a waiting row: ${[...blobs].slice(0, 5)}`);
+  assert(npzs.size === 0, `analysis npz files left behind: ${[...npzs].slice(0, 5)}`);
 
   for (const ph of phones) {
     const mine = [...CLOUD.sessions].filter(([, v]) => v.phone === ph).map(([id]) => id);
@@ -671,6 +716,190 @@ async function checkCloudInvariants(phones: Iterable<Phone>) {
       }
     } finally {
       db.close();
+    }
+  }
+}
+
+// ---------- CV analysis and coach helpers ----------
+const COACH_DAILY_CAP = 3;
+const ANALYSIS_MAX_BYTES = 64 * 1024;
+const rowKey = (u: string, s: string, n: number) => `${u}|${s}|${n}`;
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Server-side fault and clock hooks, installed on the shared local deps (the
+ * routes call these methods at request time):
+ * - setAnalysis can crash once before the single analysis update;
+ * - deleting a clip mp4 or npz can crash once, after that update;
+ * - aged rows read back with created_at 8 days ago (past the 7-day TTL);
+ * - repo reads can be slowed down, which makes the coach's tools slow.
+ */
+function installServerHooks() {
+  const repo = CLOUD.deps.clips;
+  const blob = CLOUD.deps.blob;
+  const setAnalysis = repo.setAnalysis.bind(repo);
+  repo.setAnalysis = async (...a) => {
+    if (CLOUD.faults.setAnalysis > 0) {
+      CLOUD.faults.setAnalysis--;
+      throw new Error('sim: injected crash before the analysis update');
+    }
+    return setAnalysis(...a);
+  };
+  const del = blob.delete.bind(blob);
+  blob.delete = async (pathname) => {
+    if (CLOUD.faults.cleanup > 0 && /^(analysis|clips)\//.test(pathname)) {
+      CLOUD.faults.cleanup--;
+      throw new Error('sim: injected crash in the media cleanup');
+    }
+    return del(pathname);
+  };
+  const refs = CLOUD.deps.references;
+  const listTemplates = refs.listTemplates.bind(refs);
+  refs.listTemplates = async (shotType) => (CLOUD.hideTemplates ? [] : listTemplates(shotType));
+  const list = repo.list.bind(repo);
+  repo.list = async (userId, sessionId) => {
+    if (CLOUD.slowListMs) await sleepMs(CLOUD.slowListMs);
+    const rows = await list(userId, sessionId);
+    return rows.map((r) =>
+      CLOUD.aged.has(rowKey(r.userId, r.sessionId, r.shotNumber)) ? { ...r, createdAt: new Date(Date.parse(r.createdAt) - 8 * 86_400_000).toISOString() } : r,
+    );
+  };
+}
+
+/** One shot's CV output: a synthetic shooter whose release is 3 s into the clip (frame 90 at 30 fps). */
+const shotNpz = () => Buffer.from(writeNpz([{ track: 1, series: syntheticShot() }], { fps: POSE_SHOT.fps }));
+
+/** The CV worker: write the npz to the shot's analysis path, then call the internal route through the proxy. */
+async function cvAttach(w: World, user: string, sessionId: string, shotNumber: number, npz: Buffer | null, token = CLOUD.cvToken) {
+  if (npz) await CLOUD.deps.blob.put(paths.analysis(user, sessionId, shotNumber), npz, 'application/octet-stream');
+  const res = await fetch(`${w.proxy.url}/v1/internal/analysis`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: user, sessionId, shotNumber, npzPathname: paths.analysis(user, sessionId, shotNumber) }),
+  });
+  return { status: res.status, body: (await res.json().catch(() => null)) as any };
+}
+
+const blobExists = async (pathname: string) => (await fileSize(CLOUD.deps.blob.fileOf(pathname))) !== null;
+const rowOf = (u: string, s: string, n: number) => CLOUD.deps.clips.rows().find((r) => r.userId === u && r.sessionId === s && r.shotNumber === n);
+
+/** After analysis: only the extracted data is kept, and it is small. */
+async function expectAnalyzed(u: string, sid: string, n: number, status: 'complete' | 'failed', what: string) {
+  const r = rowOf(u, sid, n);
+  assert(r && r.analysisStatus === status, `${what}: shot #${n} is ${r?.analysisStatus}, expected ${status}`);
+  assert(r.mediaDeletedAt !== null && r.clipPathname === null, `${what}: shot #${n} media not marked deleted`);
+  assert(!(await blobExists(paths.clip(u, sid, n))), `${what}: shot #${n} mp4 still stored`);
+  assert(!(await blobExists(paths.analysis(u, sid, n))), `${what}: shot #${n} npz still stored`);
+  const bytes = Buffer.byteLength(JSON.stringify(r.analysis));
+  assert(bytes < ANALYSIS_MAX_BYTES, `${what}: shot #${n} stores ${bytes} bytes of analysis (limit ${ANALYSIS_MAX_BYTES})`);
+  if (status === 'complete') {
+    const a = r.analysis as { metrics?: Record<string, unknown>; pose?: unknown };
+    assert(a.metrics && typeof a.metrics.elbowAngleReleaseDeg === 'number', `${what}: shot #${n} has no metrics: ${json(a).slice(0, 200)}`);
+  }
+}
+
+async function listClips(w: World, user: string, sessionId: string) {
+  const token = await CLOUD.token(user);
+  const res = await fetch(`${w.proxy.url}/v1/clips?sessionId=${sessionId}`, { headers: { authorization: `Bearer ${token}` } });
+  assert(res.ok, `GET /v1/clips: HTTP ${res.status}`);
+  return ((await res.json()) as { clips: { shotNumber: number; url: string | null; analysisStatus: string; metrics: Record<string, unknown> | null }[] }).clips;
+}
+
+/**
+ * A signed-in phone's synced session whose shots were each analyzed by the CV
+ * worker. Releases sit 3 s or more into the recording, so the synthetic
+ * shooter's release frame lines up with the clip window.
+ */
+async function analyzedSession(w: World, ph: Phone, outcomes: Outcome[], analyze = true) {
+  const s = await ph.recordSession(undefined, (v) => v.durationMs >= 5_000);
+  const shots = new Map<number, Outcome>();
+  for (const o of outcomes) shots.set((await ph.backend.shots.addShot(s.id, randInt(3_000, s.video.durationMs - 1_000), o)).shotNumber, o);
+  await syncOk(ph, 'sync before analysis');
+  if (analyze) {
+    for (const n of shots.keys()) {
+      const r = await cvAttach(w, ph.user!, s.id, n, shotNpz());
+      assert(r.status === 200 && r.body?.status === 'complete', `analysis of shot #${n}: HTTP ${r.status} ${json(r.body)}`);
+      await expectAnalyzed(ph.user!, s.id, n, 'complete', 'after analysis');
+    }
+  }
+  return { s, shots };
+}
+
+/** The phone's coach timeouts in simulated time (the real ones are 30 s and 90 s). */
+async function withCoachTimeouts<T>(ms: { connect: number; idle: number }, run: () => Promise<T>): Promise<T> {
+  const net = NETWORK as unknown as Record<string, number>;
+  const saved = { connect: net.coachConnectTimeoutMs!, idle: net.coachIdleTimeoutMs! };
+  net.coachConnectTimeoutMs = ms.connect;
+  net.coachIdleTimeoutMs = ms.idle;
+  try {
+    return await run();
+  } finally {
+    net.coachConnectTimeoutMs = saved.connect;
+    net.coachIdleTimeoutMs = saved.idle;
+  }
+}
+
+async function sendRejects(p: Promise<unknown>) {
+  return p.then(
+    (v) => ({ ok: true as const, v, code: null }),
+    (err) => ({ ok: false as const, v: null, code: (err as BackendError)?.code ?? String(err) }),
+  );
+}
+
+// ---------- pro template comparison helpers ----------
+const otherHand = (h: string) => (h === 'right' ? 'left' : 'right');
+/** The hand a player built from this template shoots with. */
+const playerHandOf = (pro: TemplateRow, flip: boolean) => (flip ? otherHand(pro.shootingHand) : pro.shootingHand);
+
+/** A synced session of the given shot type with one shot released 1.8 s in, analyzed from a pro template. */
+async function proSession(w: World, ph: Phone, shotType: string, pro: TemplateRow, flip = false, npzOverride?: Buffer) {
+  const clip = await ph.fakeRecording('mov', (v) => v.durationMs >= 3_000);
+  const s = await ph.backend.sessions.saveRecording({ tempUri: clip.uri, durationMs: clip.video.durationMs, shotType });
+  const shot = await ph.backend.shots.addShot(s.id, TEMPLATE_CLIP_RELEASE_MS, 'made');
+  await syncOk(ph, 'pro session sync');
+  const npz = npzOverride ?? playerNpzFromTemplate(pro, { poseSeed: randInt(1, 2 ** 30), flip });
+  const r = await cvAttach(w, ph.user!, s.id, shot.shotNumber, npz);
+  assert(r.status === 200 && r.body?.status === 'complete', `analysis of a clip built from ${pro.player} ${pro.shotType}: HTTP ${r.status} ${json(r.body).slice(0, 200)}`);
+  const row = rowOf(ph.user!, s.id, shot.shotNumber)!;
+  const a = row.analysis as { version: number; metrics: { shootingHand?: string }; hand?: { value: string; source: string; detected: string; confidence: string }; comparison: { curves: Record<string, (number | null)[]>; series: never } | null };
+  assert(a.version === 2 && a.comparison, `analysis version ${a.version}, comparison ${a.comparison ? 'present' : 'missing'}`);
+  return { s, n: shot.shotNumber, analysis: a };
+}
+
+interface ProEntry {
+  player: string;
+  mirrored: boolean;
+  similarity: number;
+  lowConfidence: boolean;
+  uncertainDistance: boolean;
+  spreadDeviation?: { byPhase: Record<string, number | null> } | null;
+}
+
+/** The scripted coach asks for compare_to_reference and find_similar_pros, then answers with numbers taken from them. */
+function proCoachScript(n: number | undefined, answer: (t: ScriptTurn) => string): Script {
+  return (t) =>
+    t.results.length === 0
+      ? { tools: [{ name: 'compare_to_reference', args: n === undefined ? {} : { shotNumber: n } }, { name: 'find_similar_pros', args: n === undefined ? {} : { shotNumber: n } }] }
+      : { text: answer(t), chunks: randInt(3, 9) };
+}
+const resultOf = (t: ScriptTurn, name: string) => t.results.find((r) => r.name === name)?.content as any;
+
+/** Every number in the coach's text must appear in a tool output: the coach never invents numbers. */
+function assertNumbersFromTools(text: string, t: ScriptTurn, what: string) {
+  const outputs = json(t.results.map((r) => r.content));
+  for (const num of text.match(/-?\d+(?:\.\d+)?/g) ?? []) {
+    assert(new RegExp(`(^|[^0-9.])${num.replace('.', '\\.')}($|[^0-9])`).test(outputs), `${what}: the coach cited ${num}, which no tool returned`);
+  }
+}
+
+/** Each listed pro's spread deviation equals an independent recomputation (mirroring, spread floor, phase windows). */
+function assertSpreadDeviation(closest: ProEntry[], analysis: { comparison: { series: never } | null }, templates: TemplateRow[], what: string) {
+  for (const p of closest) {
+    const t = templates.find((x) => x.player === p.player)!;
+    const want = expectedSpreadDeviation(analysis.comparison!.series, t);
+    for (const [phase, v] of Object.entries(want ?? {})) {
+      const got = p.spreadDeviation?.byPhase?.[phase];
+      assert(v === null ? got === null : typeof got === 'number' && Math.abs(got - v) <= 0.011, `${what}: ${p.player} spread deviation in ${phase} is ${got}, recomputed ${v}`);
     }
   }
 }
@@ -1818,9 +2047,13 @@ const SCENARIOS: Record<string, Scenario> = {
       const startMs = Math.max(0, rel - 3_000);
       const endMs = Math.min(dur, rel + 1_000);
       assert(r.startMs === startMs && r.endMs === endMs, `clip #${r.shotNumber} (release ${rel} ms of ${dur}): window ${r.startMs}-${r.endMs}, expected ${startMs}-${endMs}`);
-      const info = await videoInfo(CLOUD.deps.blob.fileOf(r.clipPathname));
+      const info = await videoInfo(CLOUD.deps.blob.fileOf(r.clipPathname!));
       const realMs = (info.frames * 1000) / video.fps;
-      assert(Math.abs(realMs - (endMs - startMs)) <= frameMs + 1, `clip #${r.shotNumber} (release ${rel} ms of ${dur}): ${info.frames} frames = ${realMs.toFixed(1)} ms, expected ${endMs - startMs} ms within one frame`);
+      // The container duration can run past the last video frame (the AAC track), so the frames a
+      // clip can hold end where the video stream ends.
+      const videoEndMs = (video.frames * 1000) / video.fps;
+      const frameWindowMs = Math.min(endMs, videoEndMs) - startMs;
+      assert(Math.abs(realMs - frameWindowMs) <= frameMs + 1, `clip #${r.shotNumber} (release ${rel} ms of ${dur}, video ends ${videoEndMs.toFixed(1)}): ${info.frames} frames = ${realMs.toFixed(1)} ms, expected ${frameWindowMs.toFixed(1)} ms within one frame`);
       assert(info.videoCodec === 'h264', `clip #${r.shotNumber}: video codec ${info.videoCodec}`);
       assert((info.audioCodec === 'aac') === withAudio, `clip #${r.shotNumber}: audio ${info.audioCodec}, source ${withAudio ? 'has' : 'has no'} audio`);
     }
@@ -2104,6 +2337,517 @@ const SCENARIOS: Record<string, Scenario> = {
       await expectStates(ph, first.s.id, 'synced', `${stall}: first session`);
     }
   },
+
+  /**
+   * The CV worker attaches an npz per shot: metrics are stored, the mp4 and
+   * npz are deleted, GET /v1/clips shows url null plus metrics, the stored
+   * data stays under 64 KB per shot. A user token cannot call the internal
+   * route; a malformed npz ends failed with its media cleaned up; a clip past
+   * its TTL unanalyzed ends expired.
+   */
+  async cv_analysis_lifecycle(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+
+    w.cover('case', 'valid');
+    const { s, shots } = await analyzedSession(w, ph, ['made', 'missed']);
+    const listed = await listClips(w, A, s.id);
+    assert(listed.length === shots.size, `GET /v1/clips: ${listed.length} clips`);
+    for (const c of listed) {
+      assert(c.url === null && c.analysisStatus === 'complete' && c.metrics && typeof c.metrics.elbowAngleReleaseDeg === 'number', `GET /v1/clips shot #${c.shotNumber}: ${json(c).slice(0, 200)}`);
+    }
+
+    w.cover('case', 'user_token');
+    const pending = await analyzedSession(w, ph, ['made'], false);
+    const n1 = [...pending.shots.keys()][0]!;
+    const asUser = await cvAttach(w, A, pending.s.id, n1, shotNpz(), await CLOUD.token(A));
+    assert(asUser.status === 401, `a user token on the internal route got HTTP ${asUser.status}`);
+    const still = rowOf(A, pending.s.id, n1)!;
+    assert(still.analysisStatus === 'pending' && (await blobExists(paths.clip(A, pending.s.id, n1))), 'a refused analysis call changed the clip');
+    const ok = await cvAttach(w, A, pending.s.id, n1, null);
+    assert(ok.status === 200 && ok.body?.status === 'complete', `analysis with the CV token: ${json(ok.body)}`);
+    await expectAnalyzed(A, pending.s.id, n1, 'complete', 'after the CV-token call');
+
+    w.cover('case', 'malformed');
+    const bad = await analyzedSession(w, ph, ['missed'], false);
+    const n2 = [...bad.shots.keys()][0]!;
+    const junk = pick([randomBytes(randInt(10, 4_000)), Buffer.concat([Buffer.from('PK\x03\x04'), randomBytes(200)]), Buffer.from(writeNpz([], { fps: 30 }))]);
+    const r = await cvAttach(w, A, bad.s.id, n2, junk);
+    assert(r.status === 200 && r.body?.status === 'failed', `malformed npz: HTTP ${r.status} ${json(r.body)}`);
+    await expectAnalyzed(A, bad.s.id, n2, 'failed', 'after a malformed npz');
+
+    w.cover('case', 'expired');
+    const old = await analyzedSession(w, ph, ['made'], false);
+    const n3 = [...old.shots.keys()][0]!;
+    // Seven days pass without CV: Blob's TTL removes the mp4.
+    CLOUD.aged.add(rowKey(A, old.s.id, n3));
+    await CLOUD.deps.blob.delete(paths.clip(A, old.s.id, n3));
+    const after = await listClips(w, A, old.s.id);
+    assert(after.length === 1 && after[0]!.analysisStatus === 'expired' && after[0]!.url === null, `unanalyzed clip past its TTL: ${json(after)}`);
+    assert(rowOf(A, old.s.id, n3)!.analysisStatus === 'expired', 'expiry not stored');
+  },
+
+  /**
+   * The analysis step crashes before its single update (the inputs must
+   * survive for the retry), or after it but before the media cleanup (the
+   * retry only cleans up). Either way the retry ends exact: analysis stored,
+   * mp4 and npz gone, nothing orphaned.
+   */
+  async cv_analysis_faults(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    for (const fault of ['before_update', 'after_update_before_cleanup'] as const) {
+      w.cover('fault', fault);
+      const { s, shots } = await analyzedSession(w, ph, ['made'], false);
+      const n = [...shots.keys()][0]!;
+      if (fault === 'before_update') CLOUD.faults.setAnalysis = 1;
+      else CLOUD.faults.cleanup = 1;
+      const first = await cvAttach(w, A, s.id, n, shotNpz());
+      assert(first.status >= 500, `${fault}: the faulted call answered HTTP ${first.status} ${json(first.body)}`);
+      const row = rowOf(A, s.id, n)!;
+      if (fault === 'before_update') {
+        assert(row.analysisStatus === 'pending' && row.mediaDeletedAt === null, `${fault}: after the crash the row is ${row.analysisStatus}, media deleted ${row.mediaDeletedAt}`);
+        assert((await blobExists(paths.clip(A, s.id, n))) && (await blobExists(paths.analysis(A, s.id, n))), `${fault}: the inputs were deleted before the analysis was stored`);
+      } else {
+        assert(row.analysisStatus === 'complete' && row.analysis !== null, `${fault}: the analysis was not stored before the cleanup: ${row.analysisStatus}`);
+      }
+      const retry = await cvAttach(w, A, s.id, n, null);
+      assert(retry.status === 200 && retry.body?.status === 'complete', `${fault}: retry HTTP ${retry.status} ${json(retry.body)}`);
+      assert(retry.body.alreadyAnalyzed === (fault !== 'before_update'), `${fault}: alreadyAnalyzed ${retry.body.alreadyAnalyzed}`);
+      await expectAnalyzed(A, s.id, n, 'complete', `${fault}: after the retry`);
+      await checkCloudInvariants([ph]);
+    }
+  },
+
+  /** The coach calls the session tools; streamed tokens reassemble to done.text; history survives a relaunch; reset clears it. */
+  async coach_chat(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const { s, shots } = await analyzedSession(w, ph, ['made', 'missed', 'made']);
+    const target = pick([...shots.keys()]);
+    let expected = '';
+    CLOUD.coach.script = (t) => {
+      if (t.results.length === 0) return { tools: [{ name: 'get_session_overview', args: {} }, { name: 'get_shot_metrics', args: { shotNumber: target } }] };
+      const ov = t.results.find((r) => r.name === 'get_session_overview')?.content as { shots?: unknown[] } | undefined;
+      const m = t.results.find((r) => r.name === 'get_shot_metrics')?.content as { outcome?: string; metrics?: { elbowAngleReleaseDeg?: number } } | undefined;
+      expected = `You took ${ov?.shots?.length} shots. Shot ${target} was ${m?.outcome}: your elbow reached ${m?.metrics?.elbowAngleReleaseDeg}° at release. Hold your finish until the ball reaches the rim.`;
+      return { text: expected, chunks: randInt(5, 15) };
+    };
+    assert((await ph.backend.coach.availability(s.id)) === 'ready', 'coach not ready for a synced session');
+    const tokens: string[] = [];
+    const statuses: string[] = [];
+    const reply = await ph.backend.coach.send(s.id, 'How did I shoot today?', { onToken: (x) => tokens.push(x), onStatus: (x) => statuses.push(x.message) });
+    assert(tokens.length > 1 && tokens.join('') === expected && reply.text === expected, `stream: ${tokens.length} tokens ${json(tokens.join(''))}, done ${json(reply.text)}, expected ${json(expected)}`);
+    assert(statuses.includes('Reviewing your session…') && statuses.includes(`Looking at shot ${target}…`), `tool_status events: ${json(statuses)}`);
+    const seen = CLOUD.coach.seen.at(-1)!;
+    const ov = seen.results.find((r) => r.name === 'get_session_overview')?.content as { shots: { outcome: string }[] };
+    assert(ov.shots.length === shots.size, `the overview tool returned ${ov.shots.length} shots, the session has ${shots.size}`);
+    const m = seen.results.find((r) => r.name === 'get_shot_metrics')?.content as { outcome: string; metrics: unknown };
+    assert(m.outcome === shots.get(target) && m.metrics, `shot metrics tool: ${json(m).slice(0, 200)}`);
+
+    const want = [{ role: 'user', text: 'How did I shoot today?' }, { role: 'assistant', text: expected }];
+    const roles = (h: { role: string; text: string }[]) => json(h.map((x) => ({ role: x.role, text: x.text })));
+    assert(roles(await ph.backend.coach.history(s.id)) === json(want), `history: ${roles(await ph.backend.coach.history(s.id))}`);
+    await ph.relaunch();
+    assert(roles(await ph.backend.coach.history(s.id)) === json(want), 'history lost across a relaunch');
+    CLOUD.coach.script = () => ({ text: 'Keep the ball on your fingertips.', chunks: 3 });
+    await ph.backend.coach.send(s.id, 'Anything else?');
+    assert((await ph.backend.coach.history(s.id)).length === 4, 'second turn not in the history');
+    await ph.backend.coach.reset(s.id);
+    assert((await ph.backend.coach.history(s.id)).length === 0, 'reset did not clear the history');
+  },
+
+  /** A model that asks for another player's session through tool args still only sees the caller's data. */
+  async coach_isolation(w) {
+    const { A, B } = CLOUD.users;
+    const pa = await w.fresh();
+    pa.auth = { kind: 'user', user: A };
+    const pb = await w.fresh();
+    pb.auth = { kind: 'user', user: B };
+    const a = await analyzedSession(w, pa, ['made', 'missed']);
+    const b = await analyzedSession(w, pb, ['missed', 'made', 'missed']);
+    CLOUD.coach.script = (t) =>
+      t.results.length === 0
+        ? {
+            tools: [
+              { name: 'get_session_overview', args: { userId: B, sessionId: b.s.id } },
+              { name: 'get_shot_metrics', args: { shotNumber: 1, userId: B, sessionId: b.s.id } },
+              { name: 'compare_made_vs_missed', args: { user_id: B, session_id: b.s.id } },
+            ],
+          }
+        : { text: 'Here is what I see in your session.' };
+    await pa.backend.coach.send(a.s.id, "Show me the other player's shots");
+    const results = CLOUD.coach.seen.at(-1)!.results;
+    const all = json(results);
+    assert(!all.includes(b.s.id) && !all.includes(B), `a tool returned another player's ids: ${all.slice(0, 300)}`);
+    const ov = results.find((r) => r.name === 'get_session_overview')?.content as { shots: { outcome: string }[] };
+    assert(json(ov.shots.map((x) => x.outcome)) === json(['made', 'missed']), `overview shows ${json(ov.shots.map((x) => x.outcome))}, the caller's shots are made, missed`);
+    const m = results.find((r) => r.name === 'get_shot_metrics')?.content as { outcome: string };
+    assert(m.outcome === 'made', `shot 1 came back ${m.outcome}: that is the other player's shot`);
+    const direct = await sendRejects(pa.backend.coach.send(b.s.id, 'hi'));
+    assert(direct.code === 'not_found', `A chatting about B's session: ${direct.code}`);
+    assert((await pa.backend.coach.history(b.s.id)).length === 0, "A can read a history for B's session");
+  },
+
+  /** signed_out, not_synced, offline, daily_limit (cap 3), not_configured, ready; local stats work in every state. */
+  async coach_availability(w) {
+    const { A, B } = CLOUD.users;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const { s } = await analyzedSession(w, ph, ['made']);
+    const stats = async (what: string) => assert((await ph.backend.shots.stats(s.id)).made === 1, `${what}: local stats broke`);
+    CLOUD.coach.script = () => ({ text: 'Nice shooting.', chunks: 2 });
+
+    w.cover('state', 'ready');
+    assert((await ph.backend.coach.availability(s.id)) === 'ready', 'ready');
+
+    w.cover('state', 'signed_out');
+    ph.auth = { kind: 'signed_out' };
+    assert((await ph.backend.coach.availability(s.id)) === 'signed_out', 'signed out');
+    assert((await sendRejects(ph.backend.coach.send(s.id, 'hi'))).code === 'unauthorized', 'signed-out send');
+    await stats('signed out');
+    ph.auth = { kind: 'user', user: A };
+
+    w.cover('state', 'not_synced');
+    const local = await ph.recordSession();
+    await ph.backend.shots.addShot(local.id, 500, 'made');
+    assert((await ph.backend.coach.availability(local.id)) === 'not_synced', 'an unsynced session');
+
+    w.cover('state', 'offline');
+    w.proxy.mode = { kind: 'down' };
+    assert((await ph.backend.coach.availability(s.id)) === 'offline', 'offline');
+    const off = await sendRejects(ph.backend.coach.send(s.id, 'hi'));
+    assert(off.code === 'unreachable' || off.code === 'timeout', `offline send: ${off.code}`);
+    await stats('offline');
+    w.proxy.mode = { kind: 'pass' };
+
+    w.cover('state', 'daily_limit');
+    CLOUD.day = `${CLOUD.day}-cap`;
+    for (let i = 1; i <= COACH_DAILY_CAP; i++) {
+      const r = await sendRejects(ph.backend.coach.send(s.id, `question ${i}`));
+      assert(r.ok, `message ${i} of ${COACH_DAILY_CAP} refused: ${r.code}`);
+    }
+    const over = await sendRejects(ph.backend.coach.send(s.id, 'one more'));
+    assert(over.code === 'coach_daily_limit', `message ${COACH_DAILY_CAP + 1}: ${over.code}`);
+    assert((await ph.backend.coach.availability(s.id)) === 'daily_limit', 'availability after the cap');
+    await stats('daily limit');
+    const other = await w.fresh();
+    other.auth = { kind: 'user', user: B };
+    const bs = await analyzedSession(w, other, ['missed']);
+    assert((await sendRejects(other.backend.coach.send(bs.s.id, 'hi'))).ok, "one player's cap blocked another player");
+
+    w.cover('state', 'not_configured');
+    const bare = w.unlaunched();
+    bare.apiBase = null;
+    bare.auth = { kind: 'user', user: A };
+    await bare.launch();
+    const bareSession = await bare.recordSession();
+    assert((await bare.backend.coach.availability(bareSession.id)) === 'not_configured', 'no API URL');
+    assert((await sendRejects(bare.backend.coach.send(bareSession.id, 'hi'))).code === 'not_configured', 'no API URL send');
+  },
+
+  /** A stalled stream ends in timeout, a cancelled send in cancelled, and keep-alive pings carry a slow tool past the idle timeout. */
+  async coach_stream_faults(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const { s } = await analyzedSession(w, ph, ['made', 'missed']);
+    const IDLE = 600;
+    await withCoachTimeouts({ connect: IDLE, idle: IDLE }, async () => {
+      w.cover('fault', 'stalled');
+      CLOUD.coach.script = () => ({ text: 'This answer never fully arrives.', chunks: 4 });
+      const hold = deferred();
+      w.proxy.mode = { kind: 'stall_response', match: /^POST \/v1\/sessions\/[^/]+\/coach\/messages/, afterBytes: randInt(0, 40), until: hold.promise };
+      try {
+        const t0 = Date.now();
+        const r = await sendRejects(ph.backend.coach.send(s.id, 'Are you there?'));
+        assert(r.code === 'timeout', `a stalled stream ended ${r.code}`);
+        assert(Date.now() - t0 < IDLE * 5, `the stalled stream took ${Date.now() - t0} ms to time out`);
+      } finally {
+        hold.resolve();
+        w.proxy.mode = { kind: 'pass' };
+      }
+
+      w.cover('fault', 'cancelled');
+      CLOUD.coach.script = () => ({ text: 'A long answer that the player stops reading. '.repeat(4), chunks: 20, chunkDelayMs: 40 });
+      const ctrl = new AbortController();
+      const r = await sendRejects(ph.backend.coach.send(s.id, 'Tell me everything', { signal: ctrl.signal, onToken: () => ctrl.abort() }));
+      assert(r.code === 'cancelled', `a cancelled send ended ${r.code}`);
+
+      w.cover('fault', 'keepalive');
+      const SLOW = IDLE * 3;
+      CLOUD.coach.script = (t) => {
+        if (t.results.length === 0) {
+          CLOUD.slowListMs = SLOW; // the tool about to run reads slowly
+          return { tools: [{ name: 'get_session_overview', args: {} }] };
+        }
+        CLOUD.slowListMs = 0;
+        return { text: 'Thanks for waiting: here is your overview.', chunks: 3 };
+      };
+      const t0 = Date.now();
+      const ok = await sendRejects(ph.backend.coach.send(s.id, 'Give me the overview'));
+      CLOUD.slowListMs = 0;
+      assert(ok.ok, `a slow tool with keep-alive pings ended ${ok.code}`);
+      assert(Date.now() - t0 >= SLOW, `the slow tool only took ${Date.now() - t0} ms, the idle timeout is ${IDLE} ms`);
+    });
+  },
+
+  /** Recording and tagging stay responsive while a coach reply is streaming. */
+  async coach_responsive(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const { s } = await analyzedSession(w, ph, ['made']);
+    const text = 'Your set point is consistent; keep your guide hand quiet through release. '.repeat(3);
+    CLOUD.coach.script = () => ({ text, chunks: 30, chunkDelayMs: 40 });
+    let tokens = 0;
+    let settled = false;
+    const reply = ph.backend.coach.send(s.id, 'What should I work on?', { onToken: () => tokens++ }).finally(() => (settled = true));
+    reply.catch(() => undefined); // a failed check below must not leave this rejection unhandled
+    const deadline = Date.now() + 5_000;
+    while (tokens === 0 && Date.now() < deadline) await sleepMs(5);
+    assert(tokens > 0, 'the reply never started streaming');
+    const t0 = Date.now();
+    const s2 = await ph.recordSession();
+    for (const r of someReleases(s2.video.durationMs, 2)) {
+      const t = Date.now();
+      await ph.backend.shots.addShot(s2.id, r, 'made');
+      assert(Date.now() - t <= 150, `tagging took ${Date.now() - t} ms while the coach was streaming`);
+    }
+    assert((await ph.backend.sessions.replaySource(s2.id)).state === 'available', 'replay unavailable while streaming');
+    assert(Date.now() - t0 <= 700, `recording and tagging took ${Date.now() - t0} ms while the coach was streaming`);
+    assert(!settled, 'the reply finished before the check, so it was not concurrent');
+    const r = await reply;
+    assert(r.text === text, 'the streamed reply was damaged');
+  },
+
+  /**
+   * A player's shot built from a pro template (rotated, rescaled, noisy, in
+   * camera coordinates) is synced and analyzed; the coach's comparison tools
+   * rank that pro first, list only the session's shot type, surface the
+   * reliability flags, report per-phase deltas that match an independent
+   * recomputation and finite spread deviations, and the coach's answer only
+   * cites numbers the tools returned.
+   */
+  async pro_comparison(w) {
+    const type = w.branch('shot_type');
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const templates = await CLOUD.deps.references.listTemplates(type);
+    assert(templates.length === 10, `${templates.length} ${type} templates ingested`);
+    // Any of the type's 10 pros, shooting with either hand: 20 templates x 2 hands over both branches.
+    const pro = pick(templates);
+    const flip = rng() < 0.5;
+    const hand = playerHandOf(pro, flip);
+    const { s, n, analysis } = await proSession(w, ph, type, pro, flip);
+    let answer = '';
+    CLOUD.coach.script = proCoachScript(n, (t) => {
+      const cmp = resultOf(t, 'compare_to_reference');
+      const top = cmp?.closestPros?.[0];
+      const knee = cmp?.metrics?.kneeDipDeg;
+      answer = `Your shot is closest to ${top?.player} (similarity ${top?.similarity}). Knee dip ${knee?.player}° against a pro average of ${knee?.proMean}°.`;
+      return answer;
+    });
+    const statuses: (string | null)[] = [];
+    const reply = await ph.backend.coach.send(s.id, 'Which pro do I shoot like?', { onStatus: (x) => statuses.push(x.tool) });
+    const turn = CLOUD.coach.seen.at(-1)!;
+    const cmp = resultOf(turn, 'compare_to_reference');
+    const sim = resultOf(turn, 'find_similar_pros');
+    const what = `${pro.player} ${type} as a ${hand}-handed player`;
+    assert(analysis.metrics.shootingHand === hand, `${what}: detected hand ${analysis.metrics.shootingHand}`);
+    assert(statuses.includes('pro_reference') && statuses.includes('similar_pros'), `${what}: tool_status ${json(statuses)}`);
+    assert(cmp.available === true && cmp.shotType === type && sim.available === true && sim.shotType === type, `${what}: ${json(cmp).slice(0, 200)}`);
+
+    // The source pro first, in both tools; only the session's shot type.
+    assert(cmp.closestPros[0].player === pro.player && sim.closest[0].player === pro.player, `${what}: ranked ${cmp.closestPros.map((p: ProEntry) => `${p.player} ${p.similarity}`).join(', ')}`);
+    for (const p of [...cmp.closestPros, ...sim.closest] as ProEntry[]) {
+      const proHand = templates.find((t) => t.player === p.player)!.shootingHand;
+      assert(p.mirrored === (proHand !== hand), `${what}: ${p.player} (${proHand}-handed) mirrored=${p.mirrored}`);
+    }
+    const named = [...sim.closest.map((p: ProEntry) => p.player), ...sim.others];
+    assert(named.length === 10 && new Set(named).size === 10 && cmp.reliability.proTemplates === 10, `${what}: compared with ${named.length} templates (${cmp.reliability.proTemplates}), expected the 10 ${type} ones`);
+    assert(named.every((p: string) => templates.some((t) => t.player === p)), `${what}: a pro outside ${type}`);
+
+    // Reliability flags.
+    const low = type === 'midrange' ? ['Luke Kennard'] : [];
+    const uncertain = type === 'three_point' ? ['Luka Doncic', 'Shai Gilgeous-Alexander'] : [];
+    assert(json([...cmp.reliability.lowConfidencePros].sort()) === json(low), `${what}: low-confidence pros ${json(cmp.reliability.lowConfidencePros)}`);
+    assert(json([...cmp.reliability.uncertainDistancePros].sort()) === json(uncertain), `${what}: uncertain-distance pros ${json(cmp.reliability.uncertainDistancePros)}`);
+    for (const p of sim.closest as ProEntry[]) {
+      assert(p.lowConfidence === low.includes(p.player) && p.uncertainDistance === uncertain.includes(p.player), `${what}: flags of ${p.player} ${json(p)}`);
+    }
+
+    // Per-phase deltas match an independent recomputation (release index 24).
+    const expected = expectedPhaseDeltas(analysis.comparison!.curves as never, templates);
+    for (const [phase, curves] of Object.entries(expected)) {
+      for (const [k, v] of Object.entries(curves)) {
+        const got = cmp.phases[phase]?.[k];
+        const tol = k === 'elbow' || k === 'knee' ? 0.11 : 0.0011;
+        assert(v === null ? got === null : typeof got === 'number' && Math.abs(got - v) <= tol, `${what}: ${phase}.${k} delta ${got}, recomputed ${v}`);
+      }
+    }
+    // Deviation in units of each pro's spread: finite, sane, and equal to a recomputation.
+    assertSpreadDeviation(cmp.closestPros, analysis, templates, what);
+    for (const p of cmp.closestPros as ProEntry[]) {
+      for (const [phase, v] of Object.entries(p.spreadDeviation?.byPhase ?? {})) {
+        assert(typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1_000, `${what}: ${p.player} spread deviation in ${phase} is ${v}`);
+      }
+    }
+    assert(reply.text === answer, `${what}: reply ${json(reply.text)}`);
+    assertNumbersFromTools(reply.text, turn, what);
+  },
+
+  /** A left-handed player: Kennard (left) matches unmirrored; a right-handed pro mirrored into a lefty matches mirrored. */
+  async pro_comparison_left_handed(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    for (const which of ['kennard', 'mirrored_right_hander'] as const) {
+      w.cover('player', which);
+      const type = pick(['three_point', 'midrange']);
+      const templates = await CLOUD.deps.references.listTemplates(type);
+      const pro = which === 'kennard' ? templates.find((t) => t.player === 'Luke Kennard')! : pick(templates.filter((t) => t.shootingHand === 'right'));
+      const { s, n, analysis } = await proSession(w, ph, type, pro, which === 'mirrored_right_hander');
+      const what = `${which} (${pro.player} ${type})`;
+      assert(analysis.metrics.shootingHand === 'left', `${what}: detected hand ${analysis.metrics.shootingHand}`);
+      CLOUD.coach.script = proCoachScript(n, (t) => `Closest: ${resultOf(t, 'find_similar_pros')?.closest?.[0]?.player}.`);
+      await ph.backend.coach.send(s.id, 'Who do I shoot like?');
+      const turn = CLOUD.coach.seen.at(-1)!;
+      const sim = resultOf(turn, 'find_similar_pros');
+      const ranked = sim.closest as ProEntry[];
+      assert(ranked[0]!.player === pro.player, `${what}: ranked ${ranked.map((p) => `${p.player}${p.mirrored ? ' (mirrored)' : ''} ${p.similarity}`).join(', ')}`);
+      for (const p of ranked) {
+        const hand = templates.find((t) => t.player === p.player)!.shootingHand;
+        assert(p.mirrored === (hand === 'right'), `${what}: ${p.player} (${hand}-handed) mirrored=${p.mirrored} for a left-handed player`);
+      }
+      const cmp = resultOf(turn, 'compare_to_reference');
+      assert(cmp.closestPros[0].player === pro.player, `${what}: compare_to_reference ranked ${cmp.closestPros[0].player} first`);
+      assertSpreadDeviation(cmp.closestPros, analysis, templates, what);
+    }
+  },
+
+  /** No templates ingested, or no analyzed shot yet: the tools say unavailable, and the coach still answers from stats. */
+  async pro_comparison_unavailable(w) {
+    const A = CLOUD.users.A;
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    for (const reason of ['no_templates', 'not_analyzed'] as const) {
+      w.cover('reason', reason);
+      CLOUD.hideTemplates = reason === 'no_templates';
+      const type = pick(['three_point', 'midrange']);
+      let sessionId: string;
+      if (reason === 'no_templates') {
+        const all = await (async () => {
+          CLOUD.hideTemplates = false;
+          const t = await CLOUD.deps.references.listTemplates(type);
+          CLOUD.hideTemplates = true;
+          return t;
+        })();
+        sessionId = (await proSession(w, ph, type, pick(all), rng() < 0.5)).s.id;
+      } else {
+        const clip = await ph.fakeRecording('mov');
+        const s = await ph.backend.sessions.saveRecording({ tempUri: clip.uri, durationMs: clip.video.durationMs, shotType: type });
+        await ph.backend.shots.addShot(s.id, randInt(0, clip.video.durationMs), 'missed');
+        await syncOk(ph, 'unanalyzed session sync');
+        sessionId = s.id;
+      }
+      CLOUD.coach.script = (t) =>
+        t.results.length === 0
+          ? { tools: [{ name: 'compare_to_reference', args: {} }, { name: 'find_similar_pros', args: {} }, { name: 'list_pro_references', args: {} }, { name: 'get_session_overview', args: {} }] }
+          : { text: `No pro comparison yet. From your tags: ${resultOf(t, 'get_session_overview')?.shots?.length} shot(s) logged.`, chunks: 3 };
+      const r = await sendRejects(ph.backend.coach.send(sessionId, 'How do I compare with the pros?'));
+      assert(r.ok, `${reason}: the coach failed with ${r.code}`);
+      const turn = CLOUD.coach.seen.at(-1)!;
+      const cmp = resultOf(turn, 'compare_to_reference');
+      const sim = resultOf(turn, 'find_similar_pros');
+      const list = resultOf(turn, 'list_pro_references');
+      assert(cmp?.available === false && sim?.available === false && typeof cmp.reason === 'string', `${reason}: ${json(cmp)} / ${json(sim)}`);
+      if (reason === 'no_templates') assert(Array.isArray(list?.pros) && list.pros.length === 0, `${reason}: listed ${json(list).slice(0, 120)}`);
+      else assert(list?.pros?.length === 10, `${reason}: templates should still be listed`);
+      assertNumbersFromTools((r.v as { text: string }).text, turn, reason);
+      CLOUD.hideTemplates = false;
+    }
+  },
+
+  /**
+   * The player's declared shooting hand drives the analysis and the pro
+   * comparisons; changing it after analysis re-derives the comparison with
+   * the other hand; with no declared hand and a low-confidence detection the
+   * tools say the hand is uncertain.
+   */
+  async declared_hand(w) {
+    const A = CLOUD.users.A;
+    const letter = (h: string) => (h === 'right' ? 'R' : 'L') as 'R' | 'L';
+    const askBoth: Script = (t) =>
+      t.results.length === 0
+        ? { tools: [{ name: 'compare_to_reference', args: { shotNumber: 1 } }, { name: 'find_similar_pros', args: { shotNumber: 1 } }, { name: 'get_shot_metrics', args: { shotNumber: 1 } }] }
+        : { text: 'Here is how your shot compares.', chunks: 2 };
+    const ask = async (ph: Phone, sid: string) => {
+      CLOUD.coach.script = askBoth;
+      await ph.backend.coach.send(sid, 'How do I compare with the pros?');
+      const turn = CLOUD.coach.seen.at(-1)!;
+      return { cmp: resultOf(turn, 'compare_to_reference'), sim: resultOf(turn, 'find_similar_pros'), shot: resultOf(turn, 'get_shot_metrics') };
+    };
+    const mirroredFor = (out: { cmp: any; sim: any }, templates: TemplateRow[], hand: string, what: string) => {
+      assert(out.cmp.shootingHand === hand && out.sim.shootingHand === hand, `${what}: tools compared as ${out.cmp.shootingHand}/${out.sim.shootingHand}-handed, expected ${hand}`);
+      for (const p of [...out.cmp.closestPros, ...out.sim.closest] as ProEntry[]) {
+        const proHand = templates.find((t) => t.player === p.player)!.shootingHand;
+        assert(p.mirrored === (proHand !== hand), `${what}: ${p.player} (${proHand}-handed) mirrored=${p.mirrored} for a ${hand}-handed player`);
+      }
+    };
+
+    // Declared: the opposite of the clip's geometry, so only the declaration can make it so.
+    w.cover('case', 'declared');
+    const type = pick(['three_point', 'midrange']);
+    const templates = await CLOUD.deps.references.listTemplates(type);
+    const ph = await w.fresh();
+    ph.auth = { kind: 'user', user: A };
+    const pro = pick(templates);
+    const flip = rng() < 0.5;
+    const geometric = playerHandOf(pro, flip);
+    const declared = otherHand(geometric);
+    await ph.backend.player.setShootingHand(letter(declared));
+    const first = await proSession(w, ph, type, pro, flip);
+    const what = `${pro.player} ${type} clip (${geometric}-handed geometry), declared ${declared}`;
+    assert(rowOf(A, first.s.id, first.n)!.shootingHand === declared, `${what}: the server stored hand ${rowOf(A, first.s.id, first.n)!.shootingHand}`);
+    const hand = first.analysis.hand;
+    assert(hand?.source === 'declared' && hand.value === declared, `${what}: analysis hand ${json(hand)}`);
+    assert(hand.detected === geometric, `${what}: detection says ${hand.detected}`);
+    const before = await ask(ph, first.s.id);
+    mirroredFor(before, templates, declared, what);
+    assert(before.shot.shootingHand?.value === declared && before.shot.shootingHand?.source === 'declared', `${what}: get_shot_metrics hand ${json(before.shot.shootingHand)}`);
+    assert(!before.cmp.handUncertain, `${what}: a declared hand is reported uncertain`);
+
+    // Changed after analysis: the next clips POST carries the new hand; the tools re-derive.
+    w.cover('case', 'changed_after_analysis');
+    await ph.backend.player.setShootingHand(letter(geometric));
+    const waiting = await sync(ph);
+    assert(waiting.handPending >= 1, `the changed hand is not waiting for a sync: ${json(waiting)}`);
+    await ph.backend.shots.addShot(first.s.id, randInt(0, 2_500), 'missed');
+    await syncOk(ph, 'sync carrying the new hand');
+    assert(rowOf(A, first.s.id, first.n)!.shootingHand === geometric, `the server kept hand ${rowOf(A, first.s.id, first.n)!.shootingHand} after the change`);
+    const after = await ask(ph, first.s.id);
+    const what2 = `${pro.player} ${type}, hand changed ${declared} → ${geometric}`;
+    mirroredFor(after, templates, geometric, what2);
+    assert(after.shot.shootingHand?.value === geometric && after.shot.shootingHand?.source === 'declared', `${what2}: get_shot_metrics hand ${json(after.shot.shootingHand)}`);
+    assert(after.cmp.closestPros[0].player === pro.player && after.sim.closest[0].player === pro.player, `${what2}: with the true hand, ${pro.player} should rank first; got ${after.sim.closest.map((p: ProEntry) => p.player).join(', ')}`);
+
+    // Undeclared and ambiguous: the tools flag the hand as uncertain.
+    w.cover('case', 'undeclared_low_confidence');
+    const ph2 = await w.fresh();
+    ph2.auth = { kind: 'user', user: A };
+    const sym = await proSession(w, ph2, type, pro, false, symmetricPlayerNpz(pro, randInt(1, 2 ** 30)));
+    const h2 = sym.analysis.hand;
+    assert(h2?.source === 'detected' && h2.confidence === 'low', `a mirror-symmetric player: hand ${json(h2)}`);
+    const unsure = await ask(ph2, sym.s.id);
+    assert(unsure.cmp.handUncertain === true && typeof unsure.cmp.handNote === 'string', `compare_to_reference with an uncertain hand: ${json(unsure.cmp).slice(0, 200)}`);
+    assert(unsure.sim.handUncertain === true, `find_similar_pros with an uncertain hand: ${json(unsure.sim).slice(0, 200)}`);
+    assert(typeof unsure.shot.handNote === 'string', 'get_shot_metrics gave no hand note');
+  },
 };
 
 // ---------- invariants ----------
@@ -2214,8 +2958,26 @@ async function main() {
   console.log(`  video pool: ${VIDEOS.map((v) => `${v.durationMs} ms${v.audio ? '+audio' : ''}`).join(', ')} (${Date.now() - t0Pool} ms)`);
   const secret = randomBytes(32).toString('hex');
   const tokens = new Map<string, Promise<string>>();
+  const coachModel = new ScriptedChatModel();
+  const analystModel = new ScriptedChatModel();
+  const cvToken = randomBytes(16).toString('hex');
   CLOUD = {
-    deps: createLocalDeps(join(ROOT, 'cloud'), { jwtSecret: secret, inMemory: true }),
+    cvToken,
+    coach: coachModel,
+    day: 'sim-day-0',
+    faults: { setAnalysis: 0, cleanup: 0 },
+    aged: new Set(),
+    slowListMs: 0,
+    hideTemplates: false,
+    deps: createLocalDeps(join(ROOT, 'cloud'), {
+      jwtSecret: secret,
+      inMemory: true,
+      cvToken,
+      coachModel: (role) => (role === 'coach' ? coachModel : analystModel),
+      coachDailyLimit: COACH_DAILY_CAP,
+      coachKeepAliveMs: 150,
+      today: () => CLOUD.day,
+    }),
     users: { A: randomUUID(), B: randomUUID() },
     token: (user, ttl = 3_600) => {
       const key = `${user}/${ttl}`;
@@ -2224,6 +2986,8 @@ async function main() {
     },
     sessions: new Map(),
   };
+  installServerHooks();
+  await ingestTemplates(CLOUD.deps.references);
   const app = await buildApp({ catalogPath: laptop.catalogPath, mediaDir: laptop.mediaDir, deps: CLOUD.deps });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const proxy = await startFaultProxy((app.server.address() as AddressInfo).port);
@@ -2310,6 +3074,11 @@ async function main() {
     stats.set(name, s);
     s.runs++;
     current = name;
+    CLOUD.day = `sim-day-${i + 1}`;
+    CLOUD.faults = { setAnalysis: 0, cleanup: 0 };
+    CLOUD.slowListMs = 0;
+    CLOUD.hideTemplates = false;
+    CLOUD.coach.script = DEFAULT_SCRIPT;
     if (!BRANCHES[name]) branchRuns[name]!.all!++;
     world.touched = new Set(pool);
     const start = Date.now();

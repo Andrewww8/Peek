@@ -19,7 +19,7 @@ export function createLocalClipRepo(file?: string, now: () => Date = () => new D
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
-    for (const r of saved) rows.set(key(r.userId, r.sessionId, r.shotNumber), r);
+    for (const r of saved) rows.set(key(r.userId, r.sessionId, r.shotNumber), { ...r, mediaDeletedAt: r.mediaDeletedAt ?? null, shootingHand: r.shootingHand ?? null });
   }
   let writing: Promise<void> = Promise.resolve();
   const persist = () => {
@@ -35,12 +35,13 @@ export function createLocalClipRepo(file?: string, now: () => Date = () => new D
     list.sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : a.shotNumber - b.shotNumber));
 
   return {
-    rows: () => sorted([...rows.values()].map((r) => ({ ...r }))),
+    rows: () => sorted([...rows.values()].map((r) => structuredClone(r))),
 
     async upsert(c) {
       const k = key(c.userId, c.sessionId, c.shotNumber);
       const at = now().toISOString();
-      rows.set(k, { ...c, analysisStatus: 'pending', analysis: null, createdAt: rows.get(k)?.createdAt ?? at, updatedAt: at });
+      const prev = rows.get(k);
+      rows.set(k, { ...c, shootingHand: c.shootingHand ?? prev?.shootingHand ?? null, analysisStatus: 'pending', analysis: null, mediaDeletedAt: null, createdAt: prev?.createdAt ?? at, updatedAt: at });
       await persist();
     },
 
@@ -65,8 +66,43 @@ export function createLocalClipRepo(file?: string, now: () => Date = () => new D
       if (changed) await persist();
     },
 
+    async get(userId, sessionId, shotNumber) {
+      const r = rows.get(key(userId, sessionId, shotNumber));
+      return r ? structuredClone(r) : null;
+    },
+
+    async setAnalysis(userId, sessionId, shotNumber, status, analysis) {
+      const r = rows.get(key(userId, sessionId, shotNumber));
+      if (!r) return false;
+      // One assignment, like the single UPDATE in production.
+      rows.set(key(userId, sessionId, shotNumber), { ...r, analysisStatus: status, analysis: structuredClone(analysis), updatedAt: now().toISOString() });
+      await persist();
+      return true;
+    },
+
+    async setShootingHand(userId, sessionId, hand) {
+      let changed = false;
+      for (const r of rows.values()) {
+        if (r.userId === userId && r.sessionId === sessionId && r.shootingHand !== hand) {
+          r.shootingHand = hand;
+          r.updatedAt = now().toISOString();
+          changed = true;
+        }
+      }
+      if (changed) await persist();
+    },
+
+    async markMediaDeleted(userId, sessionId, shotNumber) {
+      const r = rows.get(key(userId, sessionId, shotNumber));
+      if (!r) return;
+      r.clipPathname = null;
+      r.mediaDeletedAt ??= now().toISOString();
+      r.updatedAt = now().toISOString();
+      await persist();
+    },
+
     async list(userId, sessionId) {
-      return sorted([...rows.values()].filter((r) => r.userId === userId && (!sessionId || r.sessionId === sessionId)).map((r) => ({ ...r })));
+      return sorted([...rows.values()].filter((r) => r.userId === userId && (!sessionId || r.sessionId === sessionId)).map((r) => structuredClone(r)));
     },
   };
 }

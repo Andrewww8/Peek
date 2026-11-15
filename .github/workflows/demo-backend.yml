@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - frontend/ios-demo-v5-*
+      - frontend/ios-demo-v6-*
 
 permissions:
   contents: read

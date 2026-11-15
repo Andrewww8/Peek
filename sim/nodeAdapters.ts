@@ -45,7 +45,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, statfs } from 'node:f
 import { join, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { AuthPort, FetchLike, FileStore, Platform, SqlDatabase, SqlValue } from '../mobile/src/core/ports';
+import type { AuthPort, FetchLike, FileStore, Platform, SqlDatabase, SqlValue, StreamFetch } from '../mobile/src/core/ports';
 
 /** Wraps every bridge call. The simulated process uses it to freeze a killed app. */
 export type Gate = <T>(label: string, op: () => Promise<T>) => Promise<T>;
@@ -459,9 +459,43 @@ export function createNodePlatform(root: string, opts: NodeFileStoreOptions = {}
     },
   };
 
+  // Minimal stub (phone agent): expo/fetch-style streaming. Resolves at the headers; the body
+  // then arrives chunk by chunk as decoded text. Gated like every port call: once the
+  // process is killed, nothing more arrives and nothing settles.
+  const streamLike: StreamFetch = (url, init) =>
+    gate('stream', async () => {
+      const signal = init?.signal ? AbortSignal.any([init.signal, ctrl.signal]) : ctrl.signal;
+      const res = await fetch(url, { method: init?.method, headers: init?.headers, body: init?.body, signal });
+      const headers: Record<string, string> = {};
+      res.headers.forEach((v, k) => (headers[k.toLowerCase()] = v));
+      async function* chunks() {
+        if (!res.body) return;
+        const decoder = new TextDecoder();
+        const reader = res.body.getReader();
+        let done = false;
+        try {
+          for (;;) {
+            const r = await reader.read();
+            if (state !== 'alive') await hang();
+            if (r.done) {
+              done = true;
+              break;
+            }
+            const text = decoder.decode(r.value, { stream: true });
+            if (text) yield text;
+          }
+          const tail = decoder.decode();
+          if (tail) yield tail;
+        } finally {
+          if (!done) await reader.cancel().catch(() => undefined);
+        }
+      }
+      return { status: res.status, headers, chunks: chunks() };
+    });
+
   const auth: AuthPort = {
     getAccessToken: () => gate('auth.getAccessToken', () => opts.auth?.getAccessToken() ?? Promise.resolve(null)),
   };
 
-  return { db, files, fetch: fetchLike, auth, newId: () => randomUUID(), now: () => Date.now(), process };
+  return { db, files, fetch: fetchLike, stream: streamLike, auth, newId: () => randomUUID(), now: () => Date.now(), process };
 }

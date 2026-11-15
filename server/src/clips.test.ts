@@ -296,6 +296,20 @@ describe('POST /v1/recordings/:uploadId/clips', () => {
     assert.equal((await stat(clipFile)).mtimeMs, before);
   });
 
+  test('shootingHand "R"/"L" on the clips POST is stored on every clip of the session', async () => {
+    const sessionId = randomUUID();
+    const up = await upload(tokenA, sessionId, six);
+    const bad = await cut(tokenA, up.uploadId, { sessionId, shotType: 'three_point', shootingHand: 'left', shots: [shots[0]] });
+    assert.deepEqual([bad.statusCode, bad.json().error], [400, 'invalid_request']);
+    const res = await cut(tokenA, up.uploadId, { sessionId, shotType: 'three_point', shootingHand: 'L', shots: [shots[0], shots[1]] });
+    assert.equal(res.statusCode, 200, res.payload);
+    assert.deepEqual(deps.clips.rows().filter((r) => r.sessionId === sessionId).map((r) => r.shootingHand), ['left', 'left']);
+    // A later retry can change it for the whole session; omitting it keeps it.
+    await cut(tokenA, up.uploadId, { sessionId, shotType: 'three_point', shootingHand: 'R', shots: [shots[0]] });
+    await cut(tokenA, up.uploadId, { sessionId, shotType: 'three_point', shots: [shots[0]] });
+    assert.deepEqual(deps.clips.rows().filter((r) => r.sessionId === sessionId).map((r) => r.shootingHand), ['right', 'right']);
+  });
+
   test('works for a .mov recording without an audio track', async () => {
     const sessionId = randomUUID();
     const up = await upload(tokenA, sessionId, silentMov, 'mov');
@@ -399,7 +413,7 @@ describe('PATCH, DELETE and GET', () => {
     const mine = await listClips(tokenA, sessionA);
     assert.deepEqual(mine.map((c) => c.shotNumber), [1, 2, 3]);
     assert.deepEqual(Object.keys(mine[0]).sort(), [
-      'analysisStatus', 'createdAt', 'endMs', 'outcome', 'releaseMs', 'sessionId', 'shotNumber', 'shotType', 'sizeBytes', 'startMs', 'updatedAt', 'url', 'urlExpiresAt',
+      'analysisStatus', 'createdAt', 'endMs', 'metrics', 'outcome', 'quality', 'releaseMs', 'sessionId', 'shotNumber', 'shotType', 'sizeBytes', 'startMs', 'updatedAt', 'url', 'urlExpiresAt',
     ]);
     const got = await app.inject({ url: rel(mine[0].url) });
     assert.equal(got.statusCode, 200);

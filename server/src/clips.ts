@@ -9,8 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { coachRoutes } from './coach/routes.js';
 import {
   AuthError,
+  CLIP_TTL_DAYS,
+  CLIP_TTL_MS,
   DURATION_TOLERANCE_MS,
   MAX_RECORDING_BYTES,
   MAX_RECORDING_DURATION_MS,
@@ -139,6 +142,9 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     const sessionId = sessionParam(b.sessionId);
     if (typeof b.shotType !== 'string' || !SHOT_TYPE.test(b.shotType)) throw bad('shotType must be snake_case');
     const shotType = b.shotType;
+    // Optional player-declared shooting hand for the session: "R" or "L". Analysis uses it instead of detecting.
+    if (b.shootingHand !== undefined && b.shootingHand !== null && b.shootingHand !== 'R' && b.shootingHand !== 'L') throw bad('shootingHand must be "R" or "L"');
+    const shootingHand = b.shootingHand === 'R' ? 'right' : b.shootingHand === 'L' ? 'left' : null;
     if (!Array.isArray(b.shots) || b.shots.length === 0 || b.shots.length > MAX_SHOTS_PER_REQUEST) {
       throw bad(`shots must be an array of 1 to ${MAX_SHOTS_PER_REQUEST} shots`);
     }
@@ -153,6 +159,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     });
 
     const userId = req.userId;
+    if (shootingHand) await clips.setShootingHand(userId, sessionId, shootingHand);
     const existing = new Map((await clips.list(userId, sessionId)).map((r) => [r.shotNumber, r]));
     const toCut = shots.filter((s) => !existing.has(s.shotNumber));
     const results = new Map<number, { shotNumber: number; startMs: number; endMs: number; sizeBytes: number }>();
@@ -194,8 +201,9 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
           await trimmer.trim(input, startMs, endMs, out);
           const body = await readFile(out);
           const clipPathname = paths.clip(userId, sessionId, s.shotNumber);
-          await blob.put(clipPathname, body, 'video/mp4');
-          await clips.upsert({ userId, sessionId, shotNumber: s.shotNumber, shotType, releaseMs: s.releaseMs, outcome: s.outcome, clipPathname, startMs, endMs, sizeBytes: body.length });
+          // Clips are temporary inputs to analysis: Blob removes them after 7 days if CV never runs.
+          await blob.put(clipPathname, body, 'video/mp4', { ttlDays: CLIP_TTL_DAYS });
+          await clips.upsert({ userId, sessionId, shotNumber: s.shotNumber, shotType, releaseMs: s.releaseMs, outcome: s.outcome, clipPathname, startMs, endMs, sizeBytes: body.length, shootingHand });
           results.set(s.shotNumber, { shotNumber: s.shotNumber, startMs, endMs, sizeBytes: body.length });
           await rm(out, { force: true });
         }
@@ -247,6 +255,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     // Row first: a listing never points at a deleted clip, and a retry still removes the blob by its fixed path.
     await clips.deleteOne(req.userId, sessionId, shotNumber);
     await blob.delete(paths.clip(req.userId, sessionId, shotNumber));
+    await blob.delete(paths.analysis(req.userId, sessionId, shotNumber));
     return reply.code(204).send();
   });
 
@@ -255,31 +264,50 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     await clips.deleteSession(req.userId, sessionId);
     await blob.deletePrefix(paths.clipsOf(req.userId, sessionId));
     await blob.deletePrefix(paths.recordingsOf(req.userId, sessionId));
+    await blob.deletePrefix(paths.analysisOf(req.userId, sessionId));
     return reply.code(204).send();
   });
+
+  coachRoutes(app, { coach: deps?.coach, clips, sessionParam });
 
   app.get<{ Querystring: { sessionId?: string } }>('/v1/clips', async (req) => {
     const q = req.query.sessionId;
     const sessionId = q === undefined ? undefined : sessionParam(q);
     const rows = await clips.list(req.userId, sessionId);
+    // A clip whose 7-day TTL passed before CV ran is gone from Blob: record it as expired.
+    for (const r of rows) {
+      if (r.analysisStatus === 'pending' && Date.now() - Date.parse(r.createdAt) > CLIP_TTL_MS) {
+        await clips.setAnalysis(r.userId, r.sessionId, r.shotNumber, 'expired', null);
+        r.analysisStatus = 'expired';
+      }
+    }
+    // Only clips still waiting for analysis have media; analyzed shots are kept as data only.
+    const withMedia = rows.filter((r) => r.analysisStatus === 'pending' && r.clipPathname);
     const expiresAt = Date.now() + SIGNED_GET_TTL_MS;
-    const urls = rows.length ? await blob.signedGetUrls(rows.map((r) => r.clipPathname), expiresAt, origin(req)) : [];
+    const signed = withMedia.length ? await blob.signedGetUrls(withMedia.map((r) => r.clipPathname!), expiresAt, origin(req)) : [];
+    const urlOf = new Map(withMedia.map((r, i) => [r.shotNumber + '|' + r.sessionId, signed[i]!]));
     return {
-      clips: rows.map((r, i) => ({
-        sessionId: r.sessionId,
-        shotNumber: r.shotNumber,
-        shotType: r.shotType,
-        releaseMs: r.releaseMs,
-        outcome: r.outcome,
-        startMs: r.startMs,
-        endMs: r.endMs,
-        sizeBytes: r.sizeBytes,
-        analysisStatus: r.analysisStatus,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-        url: urls[i],
-        urlExpiresAt: new Date(expiresAt).toISOString(),
-      })),
+      clips: rows.map((r) => {
+        const url = urlOf.get(r.shotNumber + '|' + r.sessionId) ?? null;
+        const a = r.analysisStatus === 'complete' ? (r.analysis as { metrics?: unknown; quality?: unknown } | null) : null;
+        return {
+          sessionId: r.sessionId,
+          shotNumber: r.shotNumber,
+          shotType: r.shotType,
+          releaseMs: r.releaseMs,
+          outcome: r.outcome,
+          startMs: r.startMs,
+          endMs: r.endMs,
+          sizeBytes: r.sizeBytes,
+          analysisStatus: r.analysisStatus,
+          metrics: a?.metrics ?? null,
+          quality: a?.quality ?? null,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+          url,
+          urlExpiresAt: url ? new Date(expiresAt).toISOString() : null,
+        };
+      }),
     };
   });
 }

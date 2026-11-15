@@ -3,7 +3,7 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 300,
-      "includeFiles": "{catalog/**,node_modules/ffmpeg-static/**}"
+      "includeFiles": "{catalog/**,node_modules/ffmpeg-static/**,node_modules/@langchain/langgraph-sdk/dist/node_modules/**}"
     }
   },
   "rewrites": [
