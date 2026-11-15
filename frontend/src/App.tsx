@@ -337,7 +337,9 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       break;
     case 'compare':
       content = <ComparisonScreen backLabel={currentRoute.backLabel} onBack={back}
-        source={currentRoute.shot ? { ...currentRoute.shot, userId: cloudUserId } : undefined} />;
+        source={currentRoute.shot ? { ...currentRoute.shot, userId: cloudUserId } : undefined}
+        playerName={playerSession ? accountName(playerSession.user) : undefined}
+        onBrowseClips={() => go({ screen: 'saved' })} />;
       break;
     case 'coach':
       break;

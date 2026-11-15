@@ -9,10 +9,11 @@ import { unzipSync } from 'fflate';
 import { syncCloudClips } from '../frontend/src/clip-sync.ts';
 import { createSessionCoach } from '../frontend/src/coach.ts';
 import { PracticeStore } from '../frontend/src/database.ts';
-import { comparisonUsdz, type Pose } from '../frontend/src/pose-3d.ts';
+import { comparisonUsdz, type NameAtlas, type Pose } from '../frontend/src/pose-3d.ts';
 import { getShotAnalysis } from '../frontend/src/shot-analysis.ts';
 import { processPoseBatch } from '../server/scripts/pose-worker.js';
 import { buildApp } from '../server/src/app.js';
+import { J, NE, NJ } from '../server/src/cv/pose.js';
 import { SHOT, syntheticShot, writeNpz } from '../server/src/cv/test-pose.js';
 import { paths } from '../server/src/deps.js';
 import { LOCAL_CV_TOKEN, createLocalDeps, signLocalToken } from '../server/src/local/index.js';
@@ -141,12 +142,29 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
   const readPose = (bearer: string) => fetch(localUrl + posePath, { headers: { Authorization: 'Bearer ' + bearer } });
   assert.equal((await analysis()).get(1)?.status, 'pending');
   assert.equal((await readPose(token)).status, 409);
-  const pose = writeNpz([{ track: 1, series: syntheticShot() }]);
+  const shotTrack = syntheticShot();
+  const secondTrack = syntheticShot();
+  for (const [trackIndex, series] of [shotTrack, secondTrack].entries()) {
+    series.extremities3d = new Float32Array(series.frames.length * NE * 3).fill(NaN);
+    series.frames.forEach((frame, index) => {
+      const wrist = (index * NJ + J.r_wrist) * 3;
+      if (trackIndex) series.pose3d[wrist + 2]! += Math.sin(frame / 9) * 0.18;
+      const [x, y, z] = series.pose3d.subarray(wrist, wrist + 3);
+      series.extremities3d!.set([x!, y! - 0.06, z! + 0.01], (index * NE + 1) * 3);
+    });
+  }
+  secondTrack.effectiveFps = secondTrack.fps;
+  secondTrack.fps *= 2;
+  secondTrack.frames = secondTrack.frames.map((frame) => frame * 2);
+  const poseInputs = [shotTrack, secondTrack].map((series) => writeNpz([{ track: 1, series }], {
+    fps: series.fps, effectiveFps: series.effectiveFps,
+  }));
+  let liftedShots = 0;
   const batch = await processPoseBatch(workerUrl, LOCAL_CV_TOKEN, async (video, releaseMs, output) => {
     const bytes = await readFile(video);
     assert.equal(bytes.toString('ascii', 4, 8), 'ftyp');
     assert.equal(releaseMs, 3000);
-    await writeFile(output, pose);
+    await writeFile(output, poseInputs[liftedShots++]!);
   }, AbortSignal.timeout(15_000));
   assert.deepEqual(batch, { complete: 2, failed: 0, skipped: 0, retry: 0 });
   const read = await analysis();
@@ -168,14 +186,41 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
   assert.deepEqual([playerPose.fps, playerPose.frameCount, playerPose.releaseIndex],
     [curry.pose.fps, curry.pose.frameCount, curry.pose.releaseIndex]);
   assert.equal(playerPose.joints.length, 37 * 17 * 3);
+  assert.ok(playerPose.fingers?.some((value) => value !== null));
   assert.notDeepEqual(playerPose.joints, curry.pose.joints);
   assert.notDeepEqual(curry.pose.joints, lillard.pose.joints);
   assert.equal((await readPose(otherUser)).status, 404);
-  const ar = unzipSync(comparisonUsdz(playerPose, curry.pose));
+  const secondPoseResponse = await fetch(localUrl + posePath.replace('/1/pose', '/2/pose'), {
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  assert.equal(secondPoseResponse.status, 200, secondPoseResponse.ok ? undefined : await secondPoseResponse.text());
+  const { pose: secondPose } = await secondPoseResponse.json() as { pose: Pose };
+  assert.notDeepEqual(playerPose.joints, secondPose.joints);
+  assert.ok(secondPose.fingers?.some((value) => value !== null));
+  const atlas = JSON.parse(await readFile('frontend/assets/peek-ar-name-atlas.json', 'utf8')) as NameAtlas;
+  const png = await readFile('frontend/assets/peek-ar-name-atlas.png');
+  const labels = { atlas, png, player: 'Player One', reference: curry.player };
+  const ar = unzipSync(comparisonUsdz(playerPose, curry.pose, labels));
   const scene = new TextDecoder().decode(ar['PeekComparison.usda']);
   assert.match(scene, /def Xform "Player"[\s\S]+primvars:displayColor = \[\(1\.00000, 1\.00000, 1\.00000\)\]/);
   assert.match(scene, /def Xform "NBAReference"[\s\S]+primvars:displayColor = \[\(1\.00000, 0\.79000, 0\.04000\)\]/);
   assert.match(scene, /xformOp:orient\.timeSamples/);
+  assert.match(scene, /def Sphere "Finger_1"/);
+  assert.match(scene, /def Mesh "PlayerName"/);
+  assert.match(scene, /def Mesh "NBAReferenceName"/);
+  assert.deepEqual(Buffer.from(ar['NameAtlas.png']!), png);
+  const splitActors = (usda: string) => usda.split('def Scope "NameMaterials"')[0]!.split('def Xform "NBAReference"');
+  const secondScene = new TextDecoder().decode(unzipSync(comparisonUsdz(secondPose, curry.pose, labels))['PeekComparison.usda']);
+  const switchedReference = comparisonUsdz(playerPose, lillard.pose, { ...labels, reference: lillard.player });
+  const switchedScene = new TextDecoder().decode(unzipSync(switchedReference)['PeekComparison.usda']);
+  const [white, yellow] = splitActors(scene);
+  const [secondWhite, secondYellow] = splitActors(secondScene);
+  const [switchedWhite, switchedYellow] = splitActors(switchedScene);
+  assert.notEqual(white, secondWhite);
+  assert.equal(yellow, secondYellow);
+  assert.equal(white, switchedWhite);
+  assert.notEqual(yellow, switchedYellow);
+  assert.match(switchedScene, /custom string peek:name = "Damian Lillard"/);
   assert.equal((await list(token))[0]?.url, null);
   assert.deepEqual(await list(otherUser), []);
   assert.equal(await deps.blob.head(paths.clip(user, sessionId, 1)), null);

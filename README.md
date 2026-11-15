@@ -18,7 +18,7 @@ For a rehearsal that relaunches offline with the JavaScript bundle embedded, ins
 
 Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
 
-Open **NBA comparison** from the menu to play two reference shots side by side. For your own footage, mark the release in **Session details**, wait for **Shot analysis**, then tap **Compare with an NBA player** on that shot. Both views use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with the first skeleton in white and the NBA reference in yellow.
+Open **NBA comparison** from the menu to play two reference shots side by side. For your own footage, mark the release in **Session details**, wait for **Shot analysis**, then tap **Compare with an NBA player** on that shot. Both views use the same release position, camera angle, and playhead. Tap **Change NBA player** to pick a reference. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
 
 ## Connect Vercel and Supabase
 
@@ -56,7 +56,7 @@ export PERSPECTIVE_API_URL=https://perspective-api-eta.vercel.app
 npm run pose-worker -w server -- --watch
 ```
 
-The worker checks for pending clips every 15 seconds after processing a batch. Omit `--watch` to process one batch. For a local Fastify server, use `http://127.0.0.1:3001` and its local CV token. Set the same `CV_SERVICE_TOKEN` in Vercel and the Mac worker. If your Python environment is elsewhere, set `SHOT_COACH_PYTHON` to its interpreter.
+The worker checks for pending clips every 15 seconds after processing a batch. Omit `--watch` to process one batch. For a local Fastify server, use `http://127.0.0.1:3001` and its local CV token. Set the same `CV_SERVICE_TOKEN` in Vercel and the Mac worker. If your Python environment is elsewhere, set `SHOT_COACH_PYTHON` to its interpreter. The worker defaults to this checkout's `shot_coach/shot_coach.py`. If you set `SHOT_COACH_PATH`, use a copy with the hand models and landmark functions from [PR #3](https://github.com/Andrewww8/Peek/pull/3).
 
 After replacing the supplied NBA templates, run `node --import tsx server/scripts/export-peek-reference-poses.ts` from the repository root to regenerate the iPhone's bundled three-point reference poses.
 

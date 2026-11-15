@@ -6,6 +6,34 @@ import importlib.util
 import numpy as np
 
 
+def lift_extremities(coach, video, data, frames, joints, pose, tagged_frame):
+    if not frames.size or not hasattr(coach, "EXT_NAMES"):
+        return {}
+    coach._load("ext")
+    points = np.full((len(frames), len(coach.EXT_NAMES), 2), np.nan, dtype=np.float32)
+    fps = data["fps"]
+    window = np.flatnonzero((frames >= tagged_frame - 1.2 * fps) & (frames <= tagged_frame + 0.75 * fps))
+    capture = None
+    try:
+        for row in window:
+            frame = int(frames[row])
+            image = data["store"].get(frame)
+            if image is None:
+                if capture is None:
+                    capture = coach.cv2.VideoCapture(video)
+                capture.set(coach.cv2.CAP_PROP_POS_FRAMES, frame)
+                ok, image = capture.read()
+                if not ok:
+                    continue
+            kpts, scores = coach.extremities_2d(image, joints[row], coach._M["wb"], coach._M["hand"])
+            points[row] = np.where((scores >= 0.2)[:, None], kpts, np.nan)
+    finally:
+        if capture is not None:
+            capture.release()
+    lifted = coach.extremities_3d(points.astype(float), joints.astype(float), pose.astype(float))
+    return {"extremities3d": lifted.astype("<f4"), "extremity_names": np.array(coach.EXT_NAMES)}
+
+
 def export_pose(coach, video, release_offset_ms, output):
     coach.setup()
     coach._load("2d")
@@ -44,6 +72,7 @@ def export_pose(coach, video, release_offset_ms, output):
 
     # Keep the source video frame numbers, including gaps when the tracker
     # skips frames. The API aligns the user's tag against this time base.
+    extremities = lift_extremities(coach, video, data, frames, joints, pose, tagged_frame)
     np.savez_compressed(
         output,
         track=data["track"][selected].astype("<i4"),
@@ -57,6 +86,7 @@ def export_pose(coach, video, release_offset_ms, output):
         eff_fps=np.float64(data["eff"]),
         width=np.int32(data["W"]),
         height=np.int32(data["H"]),
+        **extremities,
     )
 
 

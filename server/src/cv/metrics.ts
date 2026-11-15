@@ -4,7 +4,7 @@
  * otherwise, so the results do not depend on units. Up is −y (see pose.ts).
  */
 import { NpzError, readNpz, scalar, type NpyArray } from './npz.js';
-import { J, JOINTS, NJ, decodePose, quantize, sliceSeries, type CompactPose, type PoseSeries } from './pose.js';
+import { EXTREMITIES, J, JOINTS, NE, NJ, decodePose, quantize, sliceSeries, type CompactPose, type PoseSeries } from './pose.js';
 import {
   GRID_N,
   WRIST_PEAK_AFTER_RELEASE_MS,
@@ -32,11 +32,13 @@ export class AnalysisError extends Error {
 // ---------- npz → tracks ----------
 export interface PoseArrays {
   fps: number;
+  effectiveFps?: number;
   track: Int32Array;
   frame: Int32Array;
   kpts2d: Float32Array;
   conf: Float32Array;
   pose3d: Float32Array;
+  extremities3d?: Float32Array;
   bbox: Float32Array;
   cuts: number[];
   width: number;
@@ -62,6 +64,7 @@ export function poseArraysFromNpz(bytes: Uint8Array): PoseArrays {
   const conf = arr(a, 'conf', ['<f4'], [NJ]);
   // Prefer the scale-normalized pose (see release.ts for how it compares with the templates).
   const pose3d = arr(a, a.pose3d_unit ? 'pose3d_unit' : 'pose3d', ['<f4'], [NJ, 3]);
+  const extremities = a.extremities3d ? arr(a, 'extremities3d', ['<f4'], [NE, 3]) : undefined;
   const bbox = arr(a, 'bbox', ['<f4'], [4]);
   const n = track.shape[0]!;
   for (const [name, x] of Object.entries({ frame, kpts2d, conf, pose3d, bbox })) {
@@ -69,16 +72,27 @@ export function poseArraysFromNpz(bytes: Uint8Array): PoseArrays {
   }
   const names = a.joint_names?.data;
   if (names && (!Array.isArray(names) || names.join(',') !== JOINTS.join(','))) throw new NpzError('joint_names are not in H36M order');
+  if (extremities) {
+    const landmarkNames = a.extremity_names?.data;
+    if (extremities.shape[0] !== n) throw new NpzError('extremities3d does not match the frame count');
+    if (landmarkNames && (!Array.isArray(landmarkNames) || landmarkNames.join() !== EXTREMITIES.join())) {
+      throw new NpzError('unexpected extremity_names');
+    }
+  }
   const fps = scalar(a.fps, 'fps');
   if (!(fps > 1 && fps < 1000)) throw new NpzError(`fps ${fps} is out of range`);
+  const effectiveFps = a.eff_fps ? scalar(a.eff_fps, 'eff_fps') : fps;
+  if (!(effectiveFps > 1 && effectiveFps <= fps)) throw new NpzError(`eff_fps ${effectiveFps} is out of range`);
   const cuts = a.cuts ? Array.from(a.cuts.data as ArrayLike<number>) : [];
   return {
     fps,
+    ...(effectiveFps < fps ? { effectiveFps } : {}),
     track: track.data as Int32Array,
     frame: frame.data as Int32Array,
     kpts2d: kpts2d.data as Float32Array,
     conf: conf.data as Float32Array,
     pose3d: pose3d.data as Float32Array,
+    ...(extremities ? { extremities3d: extremities.data as Float32Array } : {}),
     bbox: bbox.data as Float32Array,
     cuts,
     width: a.width ? scalar(a.width, 'width') : NaN,
@@ -107,10 +121,12 @@ export function seriesOf(p: PoseArrays, rows: number[]): PoseSeries {
   };
   return {
     fps: p.fps,
+    ...(p.effectiveFps !== undefined ? { effectiveFps: p.effectiveFps } : {}),
     frames: rows.map((r) => p.frame[r]!),
     kpts2d: pick(p.kpts2d, NJ * 2),
     conf: pick(p.conf, NJ),
     pose3d: pick(p.pose3d, NJ * 3),
+    ...(p.extremities3d ? { extremities3d: pick(p.extremities3d, NE * 3) } : {}),
     bbox: pick(p.bbox, 4),
   };
 }
@@ -368,6 +384,7 @@ function detectHand(
 export function computeMetrics(s: PoseSeries, w: WindowInput): Omit<ShotAnalysis, 'version' | 'shooterTrack' | 'pose' | 'fps' | 'comparison'> {
   const F = new Frames(s);
   const fps = s.fps;
+  const trackingStep = Math.max(1, Math.round(fps / (s.effectiveFps ?? fps)));
   const fr = (ms: number) => Math.round((ms * fps) / 1000);
   const inWin = (f: number) => f >= w.windowStart && f <= w.windowEnd;
   const range = (a: number, b: number) => {
@@ -450,7 +467,7 @@ export function computeMetrics(s: PoseSeries, w: WindowInput): Omit<ShotAnalysis
 
   // Follow-through: consecutive frames after release with the wrist above the shoulder and the elbow at least 150°.
   let hold = 0;
-  for (let f = rel + 1; f <= w.windowEnd; f++) {
+  for (let f = rel + trackingStep; f <= w.windowEnd; f += trackingStep) {
     const e = F.has(f) ? elbowAt(f) : null;
     const up = F.has(f) ? F.above(f, WR, SH) : null;
     if (e === null || up === null || e < 150 || up <= 0) break;
@@ -488,7 +505,7 @@ export function computeMetrics(s: PoseSeries, w: WindowInput): Omit<ShotAnalysis
     releaseHeightRatio: round(F.above(rel, WR, J.head), 3),
     trunkLeanDeg: round(trunkAt(rel)),
     elbowFlareRatio: round(flareAt(setPoint), 3),
-    followThroughHoldMs: Math.round((hold * 1000) / fps),
+    followThroughHoldMs: Math.round((hold * trackingStep * 1000) / fps),
     jumpRiseRatio: round(jump, 3),
     ankleSpreadRatio: round(spread, 2),
     pelvisDriftRatio: round(drift, 3),
@@ -497,7 +514,7 @@ export function computeMetrics(s: PoseSeries, w: WindowInput): Omit<ShotAnalysis
   // Quality, over the second before release and half a second after it.
   const qFrom = Math.max(w.windowStart, rel - fr(1000)), qTo = Math.min(w.windowEnd, rel + fr(500));
   const qFrames = range(qFrom, qTo);
-  const expected = qTo - qFrom + 1;
+  const expected = Math.floor((qTo - qFrom) * ((s.effectiveFps ?? fps) / fps)) + 1;
   const confs: number[] = [];
   const jointConf = new Map<string, number[]>();
   let with3d = 0;
@@ -511,7 +528,7 @@ export function computeMetrics(s: PoseSeries, w: WindowInput): Omit<ShotAnalysis
     if (F.p3(f, J.pelvis) && F.p3(f, WR)) with3d++;
   }
   const meanConfidence = Number(mean(confs).toFixed(3));
-  const coverage = Number((qFrames.length / expected).toFixed(3));
+  const coverage = Number(Math.min(1, qFrames.length / expected).toFixed(3));
   const pose3dCoverage = Number((qFrames.length ? with3d / qFrames.length : 0).toFixed(3));
   const cutInWindow = w.cuts.some((c) => c > w.windowStart && c <= w.windowEnd);
   const lowConfidenceJoints = [...jointConf].filter(([, v]) => mean(v) < 0.3).map(([k]) => k);

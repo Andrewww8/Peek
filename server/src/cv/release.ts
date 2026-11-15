@@ -21,7 +21,7 @@
  * The same canonicalization is applied to templates (where it is close to the identity).
  */
 import { deflateSync, inflateSync } from 'fflate';
-import { J, NJ, type PoseSeries } from './pose.js';
+import { EXTREMITIES, J, NE, NJ, type PoseSeries } from './pose.js';
 
 export const GRID_FPS = 30;
 export const RELEASE_INDEX = 24;
@@ -41,12 +41,8 @@ export const MAX_LAG_FRAMES = 3;
 /** Smallest joint_spread used when expressing deviation in spread units, in body heights. */
 export const SPREAD_FLOOR = 0.02;
 
-export const EXTREMITIES = [
-  'l_middle_tip', 'r_middle_tip', 'l_index_tip', 'r_index_tip', 'l_middle_knuckle', 'r_middle_knuckle',
-  'l_big_toe', 'r_big_toe', 'l_small_toe', 'r_small_toe', 'l_heel', 'r_heel',
-] as const;
+export { EXTREMITIES, NE } from './pose.js';
 export const E = Object.fromEntries(EXTREMITIES.map((n, i) => [n, i])) as Record<(typeof EXTREMITIES)[number], number>;
-export const NE = EXTREMITIES.length;
 
 export type Hand = 'right' | 'left';
 
@@ -320,25 +316,37 @@ export function computeCurves(s: ReleaseSeries): Curves {
  * Pelvis rise comes from the 2D pelvis height relative to the window start, per box height.
  */
 export function releaseSeriesFromClip(s: PoseSeries, releaseFrame: number, hand: Hand): ReleaseSeries {
-  const at = new Map(s.frames.map((f, i) => [f, i]));
   const pose = new Float32Array(GRID_N * NJ * 3).fill(NaN);
+  const extremities = s.extremities3d ? new Float32Array(GRID_N * NE * 3).fill(NaN) : null;
   const rise = new Float32Array(GRID_N).fill(NaN);
   const pelvisY = (i: number) => s.kpts2d[(i * NJ + J.pelvis) * 2 + 1]!;
   const boxH = (i: number) => s.bbox[i * 4 + 3]! - s.bbox[i * 4 + 1]!;
   let base: number | null = null;
+  let next = 0;
+  const maxGap = Math.max(1, s.fps * 0.1);
   for (let g = 0; g < GRID_N; g++) {
     const fpos = releaseFrame + ((g - RELEASE_INDEX) * s.fps) / GRID_FPS;
-    const f0 = Math.floor(fpos), w = fpos - f0;
-    const i0 = at.get(f0), i1 = w > 1e-9 ? at.get(f0 + 1) : i0;
-    if (i0 === undefined || i1 === undefined) continue;
+    while (next < s.frames.length && s.frames[next]! < fpos - 1e-9) next++;
+    const upper = s.frames[next];
+    if (upper === undefined) continue;
+    const i1 = next;
+    const i0 = Math.abs(upper - fpos) < 1e-9 ? i1 : i1 - 1;
+    const lower = s.frames[i0];
+    if (lower === undefined || upper - lower > maxGap) continue;
+    const w = i0 === i1 ? 0 : (fpos - lower) / (upper - lower);
     for (let k = 0; k < NJ * 3; k++) pose[g * NJ * 3 + k] = s.pose3d[i0 * NJ * 3 + k]! * (1 - w) + s.pose3d[i1 * NJ * 3 + k]! * w;
+    if (extremities && s.extremities3d) {
+      for (let k = 0; k < NE * 3; k++) {
+        extremities[g * NE * 3 + k] = s.extremities3d[i0 * NE * 3 + k]! * (1 - w) + s.extremities3d[i1 * NE * 3 + k]! * w;
+      }
+    }
     const y = pelvisY(i0) * (1 - w) + pelvisY(i1) * w, h = boxH(i0) * (1 - w) + boxH(i1) * w;
     if (Number.isFinite(y) && h > 0) {
       base ??= y;
       rise[g] = (base - y) / h;
     }
   }
-  return { fps: GRID_FPS, releaseIndex: RELEASE_INDEX, hand, pose, extremities: null, pelvisRise: rise, spread: null };
+  return { fps: GRID_FPS, releaseIndex: RELEASE_INDEX, hand, pose, extremities, pelvisRise: rise, spread: null };
 }
 
 // ---------- compact encoding of a canonical series ----------

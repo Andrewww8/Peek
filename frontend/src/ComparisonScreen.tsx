@@ -1,19 +1,23 @@
 import Slider from '@react-native-community/slider';
-import { File, Paths } from 'expo-file-system';
+import { Asset } from 'expo-asset';
+import { randomUUID } from 'expo-crypto';
+import { Directory, File, Paths } from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { accountFetch, apiUrl } from './api';
 import { accessToken } from './auth';
-import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround } from './pose-3d';
-import type { Pose, PoseSample } from './pose-3d';
-import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Title, ui } from './ui';
+import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount } from './pose-3d';
+import type { NameAtlas, Pose, PoseSample } from './pose-3d';
+import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Sheet, Title, ui } from './ui';
 
 type Reference = { player: string; shotsAveraged: number; pose: Pose };
 type ShotSource = { sessionId: string; shotNumber: number; userId: string | null };
 
 const references: Reference[] = require('../assets/peek-nba-poses.json');
+const nameAtlas: NameAtlas = require('../assets/peek-ar-name-atlas.json');
+const nameAtlasImage: number = require('../assets/peek-ar-name-atlas.png');
 const preferred = references.find(({ player }) => player === 'Stephen Curry') ?? references[0]!;
 const example = references.find(({ player }) => player === 'Damian Lillard') ?? references[1]!;
 
@@ -35,10 +39,12 @@ async function loadShotPose(source: ShotSource, signal: AbortSignal): Promise<Po
   return pose;
 }
 
-export function ComparisonScreen({ source, backLabel, onBack }: {
+export function ComparisonScreen({ source, playerName, backLabel, onBack, onBrowseClips }: {
   source?: ShotSource;
+  playerName?: string;
   backLabel: string;
   onBack: () => void;
+  onBrowseClips: () => void;
 }) {
   const [pose, setPose] = useState<Pose>();
   const [notice, setNotice] = useState<string>();
@@ -68,21 +74,24 @@ export function ComparisonScreen({ source, backLabel, onBack }: {
         {source && !pose ? (
           notice ? <Panel><Notice>{notice}</Notice><Button label="Try again" kind="secondary" onPress={() => setAttempt((old) => old + 1)} /></Panel>
             : <Panel><Loading text="Opening your shot…" /></Panel>
-        ) : <PoseComparison shotPose={pose} />}
+        ) : <PoseComparison shotPose={pose} playerName={playerName} onBrowseClips={onBrowseClips} />}
       </Page>
     </>
   );
 }
 
-function PoseComparison({ shotPose }: { shotPose?: Pose }) {
+function PoseComparison({ shotPose, playerName, onBrowseClips }: {
+  shotPose?: Pose; playerName?: string; onBrowseClips: () => void;
+}) {
   const [reference, setReference] = useState(preferred);
   const playerPose = shotPose ?? example.pose;
-  const playerLabel = shotPose ? 'Your shot' : example.player;
+  const playerLabel = shotPose ? playerName ?? 'Your shot' : example.player;
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [angle, setAngle] = useState(0.55);
   const [openingAR, setOpeningAR] = useState(false);
   const [arNotice, setArNotice] = useState<string>();
+  const [picker, setPicker] = useState(false);
   const opening = useRef(false);
   const startAngle = useRef(angle);
   const liveAngle = useRef(angle);
@@ -131,13 +140,29 @@ function PoseComparison({ shotPose }: { shotPose?: Pose }) {
     setOpeningAR(true);
     setArNotice(undefined);
     setPlaying(false);
+    let asset: File | undefined;
+    let opened = false;
     try {
-      const asset = new File(Paths.cache, 'Peek Comparison.usdz');
-      asset.write(comparisonUsdz(playerPose, reference.pose));
-      await asset.preview({ title: 'Peek shot comparison' });
+      const atlas = await Asset.fromModule(nameAtlasImage).downloadAsync();
+      if (!atlas.localUri) throw new Error('The label artwork could not be opened.');
+      const png = await new File(atlas.localUri).bytes();
+      const bytes = comparisonUsdz(playerPose, reference.pose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
+      const cache = new Directory(Paths.cache, 'peek-ar');
+      cache.create({ idempotent: true, intermediates: true });
+      asset = new File(cache, 'Peek Comparison ' + randomUUID() + '.usdz');
+      asset.create();
+      await asset.write(bytes);
+      if (asset.size !== bytes.length) {
+        throw new Error('The AR file could not be prepared. Tap View in AR to try again.');
+      }
+      await asset.preview({ title: playerLabel + ' vs. ' + reference.player });
+      opened = true;
     } catch (error) {
       setArNotice(message(error, 'Could not open the comparison in AR.'));
     } finally {
+      if (!opened && asset?.exists) {
+        try { asset.delete(); } catch { /* Cached previews can be purged by iOS. */ }
+      }
       opening.current = false;
       setOpeningAR(false);
     }
@@ -154,7 +179,10 @@ function PoseComparison({ shotPose }: { shotPose?: Pose }) {
         <PosePanel label={reference.player} detail={averageLabel(reference)}
           pose={reference.pose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
-      <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR} />
+      <View style={styles.stageActions}>
+        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR} style={styles.action} />
+        <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
+      </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
       <Panel style={styles.playback}>
         <View style={ui.row}>
@@ -173,12 +201,7 @@ function PoseComparison({ shotPose }: { shotPose?: Pose }) {
           <Text style={ui.body}>Drag to rotate</Text>
         </View>
       </Panel>
-      <View style={styles.reference}>
-        <Text accessibilityRole="header" style={ui.title}>NBA reference</Text>
-        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.players}>
-          {chosenReference.map((item) => <Chip key={item.player} label={item.player} selected={item.player === reference.player} onPress={() => setReference(item)} />)}
-        </ScrollView>
-      </View>
+      <Button label={shotPose ? 'Choose another saved shot' : 'Compare a saved shot'} kind="secondary" arrow onPress={onBrowseClips} />
       <Panel>
         <Text accessibilityRole="header" style={ui.title}>Shooting form</Text>
         <View style={styles.metricsRow}>
@@ -192,6 +215,21 @@ function PoseComparison({ shotPose }: { shotPose?: Pose }) {
         <Metric label="Wrist vs. head" left={playerPose.metrics.releaseHeight} right={reference.pose.metrics.releaseHeight} unit="×" />
         <Text style={ui.body}>Both shots are aligned at release and scaled to the same body height.</Text>
       </Panel>
+      <Sheet visible={picker} onClose={() => setPicker(false)}>
+        <Title title="Change NBA player" size={26} />
+        <ScrollView style={styles.pickerList} contentContainerStyle={styles.players}>
+          {chosenReference.map((item) => (
+            <Button key={item.player} label={item.player} kind="secondary"
+              icon={item.player === reference.player ? 'check' : undefined}
+              selected={item.player === reference.player} onPress={() => {
+                setReference(item);
+                setArNotice(undefined);
+                setPicker(false);
+              }} />
+          ))}
+        </ScrollView>
+        <Button label="Cancel" kind="secondary" onPress={() => setPicker(false)} />
+      </Sheet>
     </>
   );
 }
@@ -228,11 +266,10 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
   const scale = Math.min(size.width * 1.07, size.height * 0.54);
   const floor = size.height * 0.92;
   const pelvisRise = pose.pelvisRise?.[frame] ?? 0;
-  const offset = frame * coordinatesPerFrame;
-  const joints = Array.from({ length: jointCount }, (_, index): Point | null => {
-    const start = offset + index * 3;
-    const [x, y, z] = pose.joints.slice(start, start + 3);
-    if (x == null || y == null || z == null) return null;
+  const joints = Array.from({ length: posePointCount }, (_, index): Point | null => {
+    const point = posePoint(pose, frame, index);
+    if (!point) return null;
+    const [x, y, z] = point;
     const horizontal = cos * x + sin * z;
     const depth = cos * z - sin * x;
     const perspective = 3.5 / Math.max(2, 3.5 + depth);
@@ -253,14 +290,15 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
               if (!a || !b) return null;
               const dx = b[0] - a[0], dy = b[1] - a[1];
               const width = Math.hypot(dx, dy);
+              const thickness = to >= jointCount ? 1.25 : 3;
               return <View key={from + '-' + to} style={[styles.bone, {
-                width, backgroundColor: tint, left: (a[0] + b[0] - width) / 2, top: (a[1] + b[1] - 3) / 2,
+                width, height: thickness, backgroundColor: tint, left: (a[0] + b[0] - width) / 2, top: (a[1] + b[1] - thickness) / 2,
                 transform: [{ rotate: String(Math.atan2(dy, dx)) + 'rad' }],
               }]} />;
             })}
             {joints.map((point, index) => {
               if (!point) return null;
-              const radius = index === 10 ? 6 : 2.5;
+              const radius = index >= jointCount ? 1.4 : index === 10 ? 6 : 2.5;
               return <View key={index} style={{
                 position: 'absolute', left: point[0] - radius, top: point[1] - radius,
                 width: 2 * radius, height: 2 * radius, borderRadius: radius, backgroundColor: tint,
@@ -281,9 +319,11 @@ const styles = StyleSheet.create({
   floor: { height: 1, backgroundColor: colors.border, position: 'absolute', left: 7, right: 7 },
   bone: { position: 'absolute', height: 3, borderRadius: 1.5 },
   playback: { gap: 8 },
+  stageActions: { flexDirection: 'row', gap: 8 },
+  action: { flex: 1 },
   angleControls: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
-  reference: { gap: 7 },
-  players: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingRight: 12 },
+  pickerList: { maxHeight: 310 },
+  players: { gap: 8 },
   metricsRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   metricLabel: { flex: 1.18 },
   metric: { flex: 1, textAlign: 'right' },

@@ -12,7 +12,7 @@
  * 2D = (640 + 300·x, 600 + 300·y).
  */
 import { zipSync } from 'fflate';
-import { J, NJ, type PoseSeries } from './pose.js';
+import { J, NE, NJ, type PoseSeries } from './pose.js';
 
 export const SHOT = { fps: 30, frames: 121, release: 90, dip: 75, setPoint: 72, elbowSet: 90, elbowRelease: 170, kneeMin: 120, holdFrames: 10 };
 const L = 0.45; // thigh = shin
@@ -143,19 +143,21 @@ export interface NpzPerson {
 }
 
 /** Builds a CV-contract npz (deflated, like numpy.savez_compressed) from people's series. */
-export function writeNpz(people: NpzPerson[], o: { fps?: number; cuts?: number[]; extra?: Record<string, Uint8Array> } = {}): Uint8Array {
+export function writeNpz(people: NpzPerson[], o: { fps?: number; effectiveFps?: number; cuts?: number[]; extra?: Record<string, Uint8Array> } = {}): Uint8Array {
   const rows: { track: number; frame: number; s: PoseSeries; i: number }[] = [];
   for (const p of people) p.series.frames.forEach((frame, i) => rows.push({ track: p.track, frame, s: p.series, i }));
   rows.sort((a, b) => a.frame - b.frame || a.track - b.track);
   const n = rows.length;
   const track = new Int32Array(n), frame = new Int32Array(n);
   const kpts = new Float32Array(n * NJ * 2), conf = new Float32Array(n * NJ), p3 = new Float32Array(n * NJ * 3), bbox = new Float32Array(n * 4);
+  const ext = rows.some(({ s }) => s.extremities3d) ? new Float32Array(n * NE * 3).fill(NaN) : undefined;
   rows.forEach((r, k) => {
     track[k] = r.track;
     frame[k] = r.frame;
     kpts.set(r.s.kpts2d.subarray(r.i * NJ * 2, (r.i + 1) * NJ * 2), k * NJ * 2);
     conf.set(r.s.conf.subarray(r.i * NJ, (r.i + 1) * NJ), k * NJ);
     p3.set(r.s.pose3d.subarray(r.i * NJ * 3, (r.i + 1) * NJ * 3), k * NJ * 3);
+    if (ext && r.s.extremities3d) ext.set(r.s.extremities3d.subarray(r.i * NE * 3, (r.i + 1) * NE * 3), k * NE * 3);
     bbox.set(r.s.bbox.subarray(r.i * 4, (r.i + 1) * 4), k * 4);
   });
   const names = ['pelvis', 'r_hip', 'r_knee', 'r_ankle', 'l_hip', 'l_knee', 'l_ankle', 'spine', 'thorax', 'nose', 'head', 'l_shoulder', 'l_elbow', 'l_wrist', 'r_shoulder', 'r_elbow', 'r_wrist'];
@@ -168,10 +170,11 @@ export function writeNpz(people: NpzPerson[], o: { fps?: number; cuts?: number[]
     'bbox.npy': npy('<f4', [n, 4], bytesOf(bbox)),
     'pose3d.npy': npy('<f4', [n, NJ, 3], bytesOf(p3)),
     'pose3d_unit.npy': npy('<f4', [n, NJ, 3], bytesOf(p3)),
+    ...(ext ? { 'extremities3d.npy': npy('<f4', [n, NE, 3], bytesOf(ext)) } : {}),
     'joint_names.npy': npy('<U10', [NJ], u10(names)),
     'bones.npy': npy('<i8', [1, 2], bytesOf(new BigInt64Array([0n, 1n]))),
     'fps.npy': npy('<f8', [], bytesOf(new Float64Array([o.fps ?? SHOT.fps]))),
-    'eff_fps.npy': npy('<f8', [], bytesOf(new Float64Array([o.fps ?? SHOT.fps]))),
+    'eff_fps.npy': npy('<f8', [], bytesOf(new Float64Array([o.effectiveFps ?? o.fps ?? SHOT.fps]))),
     'width.npy': npy('<i8', [], bytesOf(new BigInt64Array([1280n]))),
     'height.npy': npy('<i8', [], bytesOf(new BigInt64Array([720n]))),
     'cuts.npy': npy('<i4', [cuts.length], bytesOf(cuts)),
