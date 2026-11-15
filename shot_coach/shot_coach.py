@@ -1011,9 +1011,13 @@ function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.
 // and a bone can only swing, never spin about its own length. Hands keep their palms turned towards each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick; feet stay flat, pointing where the shin faces.
 function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
  const H=S.H;
- // one fixed turn of the whole body so that at lift-off (fastest rise of the hips before the release) the shoulder line is level and square to the shot
+ // One fixed turn of the whole body, the same for every frame:
+ //  - upright: over the last frames on the ground the body's weight (between hips and chest) has to sit above the feet, so any lean of that line, sideways or forward/back, is the camera's and is removed;
+ //  - square: at lift-off (fastest rise of the hips before the release) the shoulder line is turned to face the shot head on.
  let lift=Math.max(S.v0,Math.min(REL,S.v1)),best=-1e9;for(let i=Math.max(S.v0+1,12);i<=Math.min(REL,S.v1-1);i++){const v=S.rise[i+1]-S.rise[i-1];if(v>best){best=v;lift=i}}
- const sl=S.pose[lift],sh=V(-(sl[14][0]-sl[11][0]),-(sl[14][2]-sl[11][2]),-(sl[14][1]-sl[11][1])).normalize(),Q0=new THREE.Quaternion().setFromUnitVectors(sh,V(1,0,0));S.lift=lift;
+ S.lift=lift;const bal=V();for(let i=Math.max(S.v0,lift-6);i<=lift;i++){const p=S.pose[i],c=k=>V(-p[k][0],-p[k][2],-p[k][1]);bal.add(c(0).multiplyScalar(0.6).addScaledVector(c(8),0.4).addScaledVector(c(3),-0.5).addScaledVector(c(6),-0.5))}
+ const Q0=new THREE.Quaternion().setFromUnitVectors(bal.normalize(),V(0,0,1)),sl=S.pose[lift],sh=V(-(sl[14][0]-sl[11][0]),-(sl[14][2]-sl[11][2]),-(sl[14][1]-sl[11][1])).applyQuaternion(Q0);
+ Q0.premultiply(new THREE.Quaternion().setFromAxisAngle(V(0,0,1),-Math.atan2(sh.y,sh.x)));S.tilt=Math.acos(Math.min(1,bal.z))*180/Math.PI;
  const W=(q,i)=>{const v=V(-q[0]*H,-q[2]*H,-q[1]*H).applyQuaternion(Q0);v.z+=S.rise[i]*H;return v};
  for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>W(q,i));
  const med=f=>{const a=[];for(let i=S.v0;i<=S.v1;i++)a.push(f(all[i]));a.sort((x,y)=>x-y);return a[a.length>>1]},d=(a,b)=>med(J=>J[a].distanceTo(J[b]));
