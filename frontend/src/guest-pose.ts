@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from 'expo';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import { guestPoseFromVision, type VisionFrame } from './guest-pose-motion';
-import { coordinatesPerFrame, type Pose } from './pose-3d';
+import { coordinatesPerFrame, fingerCount, type Pose } from './pose-3d';
 
 type NativeProgress = { requestId: string; operation: 'detectRelease' | 'analyze'; progress: number };
 const native = requireOptionalNativeModule<{
@@ -23,7 +23,7 @@ export type ShotAnalysisState = {
 };
 
 const cache = new SQLiteStorage('peek-guest-analysis');
-const analysisVersion = 7;
+const analysisVersion = 8;
 const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
@@ -50,9 +50,12 @@ function readSavedAnalysis(key: string, tag?: ShotAnalysisTag): ShotAnalysisStat
     const result = 'phase' in saved ? saved.result : tag ? { pose: saved, releaseMs: tag.releaseMs } : undefined;
     if (!result || !Number.isFinite(result.releaseMs) ||
         result.pose.frameCount * coordinatesPerFrame !== result.pose.joints.length) return;
-    // Cached on-device poses from the hand-tracking builds can still provide a body preview.
-    const body = { ...result, pose: { ...result.pose, fingers: undefined } };
-    return 'phase' in saved ? { ...saved, result: body } : { phase: 'complete', progress: 1, result: body };
+    // The previous hand data could include repeated end poses. Refresh it from the original clip.
+    const fingers = result.version === analysisVersion && Array.isArray(result.pose.fingers) &&
+      result.pose.fingers.length === result.pose.frameCount * fingerCount * 3
+      ? result.pose.fingers : undefined;
+    const display = { ...result, pose: { ...result.pose, fingers } };
+    return 'phase' in saved ? { ...saved, result: display } : { phase: 'complete', progress: 1, result: display };
   } catch {
     // An unreadable pose can be computed again from the original recording.
   }

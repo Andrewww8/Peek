@@ -16,22 +16,31 @@ export type Pose = {
 
 export const jointCount = 17;
 export const coordinatesPerFrame = jointCount * 3;
-export const fingerCount = 6;
+export const legacyFingerCount = 6;
+export const fingerCount = 8;
 export const posePointCount = jointCount + fingerCount;
+export const handJoints = [[13, 21, 17], [16, 22, 18], [13, 23, 19], [16, 24, 20]] as const;
 export const bones = [
   [0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 6],
   [0, 7], [7, 8], [8, 9], [9, 10], [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16],
-  [13, 21], [16, 22], [21, 17], [22, 18], [21, 19], [22, 20],
+  [13, 21], [16, 22], [21, 17], [22, 18], [13, 23], [16, 24], [23, 19], [24, 20],
 ] as const;
 
+function poseFingerCount(pose: Pose): number {
+  if (pose.fingers?.length === pose.frameCount * fingerCount * 3) return fingerCount;
+  if (pose.fingers?.length === pose.frameCount * legacyFingerCount * 3) return legacyFingerCount;
+  return 0;
+}
+
 export function shotMotionWindow(pose: Pose): [first: number, last: number] {
+  const fingerWidth = poseFingerCount(pose) * 3;
   const sameFrame = (a: number, b: number) => {
     if ((pose.pelvisRise?.[a] ?? 0) !== (pose.pelvisRise?.[b] ?? 0)) return false;
     for (let coordinate = 0; coordinate < coordinatesPerFrame; coordinate++) {
       if (pose.joints[a * coordinatesPerFrame + coordinate] !== pose.joints[b * coordinatesPerFrame + coordinate]) return false;
     }
-    for (let coordinate = 0; coordinate < fingerCount * 3; coordinate++) {
-      if (pose.fingers?.[a * fingerCount * 3 + coordinate] !== pose.fingers?.[b * fingerCount * 3 + coordinate]) return false;
+    for (let coordinate = 0; coordinate < fingerWidth; coordinate++) {
+      if (pose.fingers?.[a * fingerWidth + coordinate] !== pose.fingers?.[b * fingerWidth + coordinate]) return false;
     }
     return true;
   };
@@ -45,6 +54,7 @@ export function shotMotionWindow(pose: Pose): [first: number, last: number] {
 
 export function comparisonPlayback(pose: Pose, first = 0): Pose {
   const frameCount = pose.releaseIndex + pose.fps - first + 1;
+  const handCount = poseFingerCount(pose);
   const visible = Array.from({ length: Math.min(frameCount, Math.max(0, pose.frameCount - first)) }, (_, i) => first + i)
     .filter((frame) => bones.some(([a, b]) => b < jointCount && posePoint(pose, frame, a) && posePoint(pose, frame, b)));
   let next = 0;
@@ -67,19 +77,63 @@ export function comparisonPlayback(pose: Pose, first = 0): Pose {
       return start !== null && end !== null ? start + (end - start) * fraction : null;
     }),
   );
+  const fingers = !pose.fingers || !handCount ? undefined : handCount === fingerCount
+    ? Array.from({ length: frameCount * fingerCount * 3 }, (_, index) => pose.fingers?.[first * fingerCount * 3 + index] ?? null)
+    : samples(pose.fingers, handCount * 3);
   return {
     ...pose,
     frameCount,
     releaseIndex: pose.releaseIndex - first,
     joints: samples(pose.joints, coordinatesPerFrame),
-    fingers: pose.fingers && samples(pose.fingers, fingerCount * 3),
+    fingers,
     jumpSamples: Array.isArray(pose.jumpSamples) ? pose.jumpSamples.slice(first, first + frameCount) : undefined,
     pelvisRise: pose.pelvisRise && samples(pose.pelvisRise, 1),
   };
 }
 
 export function groundedShotPlayback(source: Pose, first: number): Pose {
+  return groundPlayback(comparisonPlayback(source, first), source, first);
+}
+
+export function stabilizedShotPlayback(source: Pose, first: number): Pose {
   const pose = comparisonPlayback(source, first);
+  const [, last] = shotMotionWindow(source);
+  const lastFrame = Math.min(pose.frameCount - 1, last - first);
+  const radius = Math.max(1, Math.round(pose.fps * 0.1));
+  const joints = pose.joints.slice();
+  for (let frame = 1; frame < lastFrame; frame++) {
+    const support = Math.min(radius, frame, lastFrame - frame);
+    const start = frame * coordinatesPerFrame;
+    // The shared centered window attenuates brief pose spikes without shifting the release
+    // or carrying a filtered value into the final measured pose.
+    for (let coordinate = 0; coordinate < coordinatesPerFrame; coordinate++) {
+      const center = pose.joints[start + coordinate];
+      if (center == null) continue;
+      let change = 0, weight = support + 1;
+      for (let step = 1; step <= support; step++) {
+        const before = pose.joints[start - step * coordinatesPerFrame + coordinate];
+        const after = pose.joints[start + step * coordinatesPerFrame + coordinate];
+        if (before == null || after == null) break;
+        const contribution = support + 1 - step;
+        change += ((before - center) + (after - center)) * contribution;
+        weight += 2 * contribution;
+      }
+      joints[start + coordinate] = center + change / weight;
+    }
+  }
+  const fingerWidth = poseFingerCount(pose) * 3;
+  const fingers = pose.fingers?.map((value, index) => {
+    if (value === null || !fingerWidth) return value;
+    // Follow the body wrist with the same translation for every measured point on its hand.
+    const wrist = Math.floor(index / 3) % 2 === 0 ? 13 : 16;
+    const coordinate = Math.floor(index / fingerWidth) * coordinatesPerFrame + wrist * 3 + index % 3;
+    const before = pose.joints[coordinate], after = joints[coordinate];
+    return before == null || after == null ? null : value + (after - before);
+  });
+  return groundPlayback({ ...pose, joints, fingers }, source, first);
+}
+
+function groundPlayback(pose: Pose, source: Pose, first: number): Pose {
   const samples = Array.isArray(source.jumpSamples) ? source.jumpSamples : [];
   const clearance = jumpClearance(samples, source.frameCount, source.releaseIndex, source.fps);
   const [, lastPose] = shotMotionWindow(source);
@@ -146,13 +200,24 @@ export function poseGround(pose: Pose) {
 export function posePoint(pose: Pose, frame: number, joint: number): Vector | null {
   const finger = joint >= jointCount;
   const values = finger ? pose.fingers : pose.joints;
-  const index = finger ? (frame * fingerCount + joint - jointCount) * 3 : frame * coordinatesPerFrame + joint * 3;
+  const count = finger ? poseFingerCount(pose) : jointCount;
+  const slot = finger ? joint - jointCount : joint;
+  if (slot >= count) return null;
+  const index = (frame * count + slot) * 3;
   const x = values?.[index], y = values?.[index + 1], z = values?.[index + 2];
   return x == null || y == null || z == null ? null : [x, y, z];
 }
 
+export function visiblePosePoint(pose: Pose, frame: number, joint: number): Vector | null {
+  if (joint >= jointCount) {
+    const chain = handJoints.find(([, knuckle, tip]) => joint === knuckle || joint === tip);
+    if (!chain || !posePoint(pose, frame, chain[0]) || (joint === chain[2] && !posePoint(pose, frame, chain[1]))) return null;
+  }
+  return posePoint(pose, frame, joint);
+}
+
 function anchor(pose: Pose, frame: number, joint: number, ground: number, offset: number): Vector | null {
-  const point = posePoint(pose, frame, joint);
+  const point = visiblePosePoint(pose, frame, joint);
   if (!point) return null;
   const [x, y, z] = point;
   const heightInMeters = 1.75;
@@ -199,14 +264,17 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
   );
   const color = 'color3f[] primvars:displayColor = [' + tuple(tint) + ']';
   const parts = ['def Xform "' + id + '" {'];
+  const hiddenScale = [0.0001, 0.0001, 0.0001];
   for (let joint = 0; joint < posePointCount; joint++) {
     const positions = frames.map((sample) => sample[joint] ?? null);
     if (!positions.some(Boolean)) continue;
     const finger = joint >= jointCount;
+    const sparse = finger && positions.includes(null);
     parts.push('def Sphere "' + (finger ? 'Finger_' + String(joint - jointCount) : 'Joint_' + String(joint)) + '" {',
       'double radius = ' + (finger ? '0.013' : joint === 10 ? '0.056' : '0.027'), color,
       track('double3', 'translate', positions, [offset, 0, 0]), visibility(positions),
-      'uniform token[] xformOpOrder = ["xformOp:translate"]', '}');
+      ...(sparse ? [track('float3', 'scale', positions.map((position) => position ? [1, 1, 1] : hiddenScale), [1, 1, 1])] : []),
+      'uniform token[] xformOpOrder = ["xformOp:translate"' + (sparse ? ', "xformOp:scale"' : '') + ']', '}');
   }
   for (const [from, to] of bones) {
     let previous: Rotation | undefined;
@@ -224,11 +292,12 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
       return { center: midpoint(a, b), rotation, scale: [1, length / 2, 1] };
     });
     if (!data.some(Boolean)) continue;
+    const missingScale = to >= jointCount ? hiddenScale : null;
     parts.push('def Cylinder "Bone_' + String(from) + '_' + String(to) + '" {',
       'uniform token axis = "Y"', 'double radius = ' + (to >= jointCount ? '0.007' : '0.016'), 'double height = 2', color,
       track('double3', 'translate', data.map((item) => item?.center ?? null), [offset, 0, 0]),
       track('quatf', 'orient', data.map((item) => item?.rotation ?? null), [1, 0, 0, 0]),
-      track('float3', 'scale', data.map((item) => item?.scale ?? null), [1, 0, 1]), visibility(data),
+      track('float3', 'scale', data.map((item) => item?.scale ?? missingScale), [1, 0, 1]), visibility(data),
       'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]', '}');
   }
   parts.push('}');

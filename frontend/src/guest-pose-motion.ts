@@ -1,14 +1,21 @@
-import { coordinatesPerFrame, jointCount } from './pose-3d.ts';
+import { coordinatesPerFrame, fingerCount, jointCount } from './pose-3d.ts';
 import type { Pose, PoseSample } from './pose-3d.ts';
 import type { JumpSample } from './shot-grounding.ts';
 
-export type VisionFrame = { index: number; joints: PoseSample[]; jumpSample?: JumpSample };
+export type VisionFrame = {
+  index: number;
+  joints: PoseSample[];
+  fingers?: PoseSample[];
+  fingerOffsets?: PoseSample[];
+  jumpSample?: JumpSample;
+};
 type Point = [number, number, number];
 
 const fps = 30;
 const releaseIndex = 24;
 const frameCount = releaseIndex + fps + 1;
 const maxGap = 6;
+const maxHandGap = 3;
 const templateHeight = 0.968;
 const { pelvis, rightHip, rightKnee, rightAnkle, leftHip, leftKnee, leftAnkle, thorax,
   head, leftShoulder, leftElbow, leftWrist, rightShoulder, rightElbow, rightWrist } = {
@@ -18,8 +25,16 @@ const { pelvis, rightHip, rightKnee, rightAnkle, leftHip, leftKnee, leftAnkle, t
 };
 
 const delta = (a: Point, b: Point): Point => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const mix = (a: Point, b: Point, t: number): Point => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 const distance = (a?: Point | null, b?: Point | null) => a && b ? Math.hypot(...delta(a, b)) : NaN;
 const number = (value: number): PoseSample => Number.isFinite(value) ? Math.round(value * 10000) / 10000 : null;
+const fingerWrist = (finger: number) => finger % 2 === 0 ? leftWrist : rightWrist;
+
+function visionPoint(samples: PoseSample[], joint: number): Point | null {
+  const [x, y, z] = samples.slice(joint * 3, joint * 3 + 3);
+  if (x == null || y == null || z == null || ![x, y, z].every(Number.isFinite)) return null;
+  return [x, -y, -z];
+}
 
 function angle(a?: Point | null, b?: Point | null, c?: Point | null) {
   if (!a || !b || !c) return NaN;
@@ -33,17 +48,24 @@ function angle(a?: Point | null, b?: Point | null, c?: Point | null) {
 /** Align the actual Vision detections to the same release time and body frame as NBA references. */
 export function guestPoseFromVision(frames: VisionFrame[]): Pose {
   const points = new Map<number, (Point | null)[]>();
+  const measuredHands = new Map<number, (Point | null)[]>();
   const jumpSamples = Array<JumpSample | null>(frameCount).fill(null);
-  for (const { index, joints, jumpSample } of frames) {
-    if (!Number.isInteger(index) || index < 0 || index >= frameCount || joints.length !== coordinatesPerFrame) continue;
-    const sample = Array.from({ length: jointCount }, (_, joint): Point | null => {
-      const [x, y, z] = joints.slice(joint * 3, joint * 3 + 3);
-      if (x == null || y == null || z == null || ![x, y, z].every(Number.isFinite)) return null;
-      return [x, -y, -z];
-    });
-    if (sample[pelvis]) {
-      points.set(index, sample);
-      jumpSamples[index] = jumpSample ?? null;
+  for (const { index, joints, fingers, fingerOffsets, jumpSample } of frames) {
+    if (!Number.isInteger(index) || index < 0 || index >= frameCount) continue;
+    if (fingerOffsets?.length === fingerCount * 3) {
+      measuredHands.set(index, Array.from({ length: fingerCount }, (_, finger) => visionPoint(fingerOffsets, finger)));
+    }
+    if (joints.length !== coordinatesPerFrame) continue;
+    const sample = Array.from({ length: jointCount }, (_, joint) => visionPoint(joints, joint));
+    if (!sample[pelvis]) continue;
+    points.set(index, sample);
+    jumpSamples[index] = jumpSample ?? null;
+    if (fingers?.length === fingerCount * 3) {
+      measuredHands.set(index, Array.from({ length: fingerCount }, (_, finger) => {
+        const point = visionPoint(fingers, finger);
+        const wrist = sample[fingerWrist(finger)];
+        return point && wrist ? delta(point, wrist) : null;
+      }));
     }
   }
   const indexes = [...points.keys()].sort((a, b) => a - b);
@@ -71,6 +93,11 @@ export function guestPoseFromVision(frames: VisionFrame[]): Pose {
   if (!height || width < 0.01) throw new Error('Keep the shooter’s full body in frame near release so Peek can align the two motions.');
   const scale = templateHeight / height;
   const cos = dx / width, sin = dz / width;
+  const normalize = (point?: Point | null, root?: Point | null): PoseSample[] => {
+    if (!point || !root) return [null, null, null];
+    const [x, y, z] = delta(point, root);
+    return [number((cos * x + sin * z) * scale), number(y * scale), number((-sin * x + cos * z) * scale)];
+  };
 
   const rows = Array.from({ length: frameCount }, (_, index) => {
     const exact = points.get(index);
@@ -84,9 +111,41 @@ export function guestPoseFromVision(frames: VisionFrame[]): Pose {
     const next = points.get(after)!;
     return points.get(before)!.map((a, joint): Point | null => {
       const b = next[joint];
-      return a && b ? [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t] : null;
+      return a && b ? mix(a, b, t) : null;
     });
   });
+  const firstBodyFrame = indexes[0]!;
+  const lastBodyFrame = indexes.at(-1)!;
+  const handFrames = [...measuredHands.keys()]
+    .filter((index) => index >= firstBodyFrame && index <= lastBodyFrame)
+    .sort((a, b) => a - b);
+  const blankHand = Array<null>(fingerCount).fill(null);
+  const blankCoordinates = Array<null>(fingerCount * 3).fill(null);
+  const fingers = handFrames.length ? rows.flatMap((row, index) => {
+    if (index < firstBodyFrame || index > lastBodyFrame) return blankCoordinates;
+    let offsets = measuredHands.get(index);
+    if (!offsets) {
+      const before = handFrames.findLast((frame) => frame < index);
+      const after = handFrames.find((frame) => frame > index);
+      // Only fill a short unsampled gap bounded by real observations. An observed miss stays hidden.
+      if (before !== undefined && after !== undefined && after - before <= maxHandGap) {
+        const next = measuredHands.get(after)!;
+        const t = (index - before) / (after - before);
+        offsets = measuredHands.get(before)!.map((a, finger) => {
+          const b = next[finger];
+          return a && b ? mix(a, b, t) : null;
+        });
+      }
+    }
+    return (offsets ?? blankHand).flatMap((offset, finger) => {
+      const wrist = row[fingerWrist(finger)];
+      // The samples contain the four tips first, followed by their matching knuckles.
+      const hasBase = finger >= 4 || !!offsets?.[finger + 4];
+      const point: Point | null = offset && wrist && hasBase
+        ? [wrist[0] + offset[0], wrist[1] + offset[1], wrist[2] + offset[2]] : null;
+      return normalize(point, row[pelvis]);
+    });
+  }) : undefined;
   const release = rows[releaseIndex]!;
   if (!release[pelvis] || !(release[leftWrist] || release[rightWrist])) {
     throw new Error('The shooting arm could not be tracked at release. Check the tag and choose a clearer view.');
@@ -106,12 +165,8 @@ export function guestPoseFromVision(frames: VisionFrame[]): Pose {
   return {
     fps, releaseIndex, frameCount, shootingHand: right ? 'right' : 'left',
     jumpSamples: jumpSamples.some(Boolean) ? jumpSamples : undefined,
-    joints: rows.flatMap((row) => row.flatMap((point) => {
-      const root = row[pelvis];
-      if (!point || !root) return [null, null, null];
-      const [x, y, z] = delta(point, root);
-      return [number((cos * x + sin * z) * scale), number(y * scale), number((-sin * x + cos * z) * scale)];
-    })),
+    joints: rows.flatMap((row) => row.flatMap((point) => normalize(point, row[pelvis]))),
+    fingers: fingers?.some((coordinate) => coordinate !== null) ? fingers : undefined,
     pelvisRise: rows.map((row) => row[pelvis] ? number((baseY - row[pelvis]![1]) * scale) : null),
     metrics: {
       releaseElbowDeg: number(angle(release[shoulder], release[elbow], release[wrist])),

@@ -12,7 +12,7 @@ import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
-import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, groundedShotPlayback, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
+import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePointCount, shotMotionWindow, stabilizedShotPlayback, visiblePosePoint } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -80,6 +80,7 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
   const { sessionId } = shot;
   const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
   const result = state?.result;
+  const updatingPose = state?.phase === 'queued' || state?.phase === 'detecting' || state?.phase === 'tracking';
   const automatic = shot.shotNumber === undefined;
   const refreshStarted = useRef<string>(undefined);
 
@@ -108,7 +109,7 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
         {result ? (
           <>
             {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} /> : null}
-            <PoseComparison key={result.version ?? 0} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} />
+            <PoseComparison key={result.version ?? 0} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} updatingPose={updatingPose} />
           </>
         ) : (
           <Panel>
@@ -223,12 +224,12 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
   );
 }
 
-function PoseComparison({ playerPose: fullPose, playerLabel }: {
-  playerPose: Pose; playerLabel: string;
+function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = false }: {
+  playerPose: Pose; playerLabel: string; updatingPose?: boolean;
 }) {
   const [reference, setReference] = useState(preferred);
   const [firstFrame, lastMotionFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
-  const playerPose = useMemo(() => groundedShotPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
+  const playerPose = useMemo(() => stabilizedShotPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
   const referencePose = useMemo(() => comparisonPlayback(reference.pose, firstFrame), [reference, firstFrame]);
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(playerPose.frameCount > 1);
@@ -279,7 +280,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
   }
 
   async function openAR() {
-    if (opening.current) return;
+    if (opening.current || updatingPose) return;
     opening.current = true;
     setOpeningAR(true);
     setArNotice(undefined);
@@ -321,7 +322,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
           pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
       <View style={styles.stageActions}>
-        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR} style={styles.action} />
+        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR || updatingPose} style={styles.action} />
         <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
       </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
@@ -410,7 +411,7 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
   const floor = size.height * 0.92;
   const pelvisRise = pose.pelvisRise?.[frame] ?? 0;
   const joints = Array.from({ length: posePointCount }, (_, index): Point | null => {
-    const point = posePoint(pose, frame, index);
+    const point = visiblePosePoint(pose, frame, index);
     if (!point) return null;
     const [x, y, z] = point;
     const horizontal = cos * x + sin * z;
@@ -441,7 +442,7 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
             })}
             {joints.map((point, index) => {
               if (!point) return null;
-              const radius = index >= jointCount ? 1.4 : index === 10 ? 6 : 2.5;
+              const radius = index >= jointCount ? 1.4 : index === 10 ? 6 : index === 13 || index === 16 ? 3 : 2.5;
               return <View key={index} style={{
                 position: 'absolute', left: point[0] - radius, top: point[1] - radius,
                 width: 2 * radius, height: 2 * radius, borderRadius: radius, backgroundColor: tint,

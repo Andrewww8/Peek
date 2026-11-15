@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { guestPoseFromVision, type VisionFrame } from '../src/guest-pose-motion.ts';
-import { comparisonPlayback, coordinatesPerFrame, posePoint, shotMotionWindow } from '../src/pose-3d.ts';
+import { comparisonPlayback, coordinatesPerFrame, fingerCount, jointCount, posePoint, shotMotionWindow } from '../src/pose-3d.ts';
 
 const body = [
   [0, 1, -3],
@@ -35,6 +35,32 @@ test('guest motion follows the selected recording and stays aligned to the relea
   assert.equal(playback.frameCount - 1 - playback.releaseIndex, playback.fps);
   assert.deepEqual(posePoint(playback, playback.frameCount - 1, 16), posePoint(high, last, 16));
   assert.notDeepEqual(posePoint(playback, 0, 16), posePoint(playback, 1, 16));
+});
+
+test('hand-only detections fill short gaps without covering observed misses or repeating a resting hand', () => {
+  const hands = (index: number, height?: number): VisionFrame => {
+    const fingerOffsets = Array<number | null>(fingerCount * 3).fill(null);
+    if (height !== undefined) {
+      fingerOffsets.splice(3, 3, 0, height, 0.02);
+      fingerOffsets.splice(15, 3, 0, height / 2, 0.01);
+    }
+    return { index, joints: [], fingerOffsets };
+  };
+  const frames = shot(0.5);
+  const bodyOnly = guestPoseFromVision(frames);
+  const pose = guestPoseFromVision([...frames, hands(21, 0.09), hands(23, 0.13), hands(24),
+    hands(25, 0.11), hands(30, 0.1), hands(33, 0.1)]);
+  const tip = jointCount + 1;
+  const wristRelativeY = (frame: number) => posePoint(pose, frame, tip)![1] - posePoint(pose, frame, 16)![1];
+
+  assert.deepEqual(pose.joints, bodyOnly.joints);
+  assert.equal(pose.releaseIndex, bodyOnly.releaseIndex);
+  assert.ok(wristRelativeY(21) > wristRelativeY(22));
+  assert.ok(wristRelativeY(22) > wristRelativeY(23));
+  assert.ok(posePoint(pose, 30, tip));
+  for (const frame of [20, 24, 26, 31, 33, 54]) {
+    assert.equal(posePoint(pose, frame, tip), null);
+  }
 });
 
 test('the player keeps moving across a release gap with later detections, then holds the last pose', () => {

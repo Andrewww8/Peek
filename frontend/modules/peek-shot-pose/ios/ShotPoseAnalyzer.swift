@@ -32,6 +32,48 @@ enum ShotPoseAnalyzer {
     .leftShoulder, .leftElbow, .leftWrist, .rightShoulder, .rightElbow, .rightWrist
   ]
 
+  private struct BodyJoint {
+    let position: SIMD3<Double>?
+    let image: SIMD2<Double>?
+  }
+
+  private struct BodySample {
+    let time: Double
+    let joints: [BodyJoint]
+    let height: Double
+  }
+
+  private struct Hand {
+    let wrist: SIMD2<Double>
+    let chirality: VNChirality
+    let landmarks: [SIMD2<Double>?]
+  }
+
+  // Preserve the original three slots, then add the index finger's own knuckle.
+  private static let handLandmarks: [VNHumanHandPoseObservation.JointName] = [
+    .middleTip, .indexTip, .middleMCP, .indexMCP
+  ]
+  private static let wristIndices = [13, 16]
+
+  private static func coordinates(_ point: SIMD3<Double>?) -> [Any] {
+    guard let point else { return [NSNull(), NSNull(), NSNull()] }
+    return [point.x, point.y, point.z]
+  }
+
+  private static func bodyJoints(_ body: VNHumanBodyPose3DObservation, in image: CGImage) -> [BodyJoint] {
+    jointNames.map { name in
+      let position = (try? body.cameraRelativePosition(name).columns.3).flatMap { value in
+        value.x.isFinite && value.y.isFinite && value.z.isFinite
+          ? SIMD3(Double(value.x), Double(value.y), Double(value.z)) : nil
+      }
+      let projected = (try? body.pointInImage(name).location).flatMap { value in
+        value.x.isFinite && value.y.isFinite
+          ? SIMD2(Double(value.x) * Double(image.width), Double(value.y) * Double(image.height)) : nil
+      }
+      return BodyJoint(position: position, image: projected)
+    }
+  }
+
   private static func jumpSample(
     request: VNDetectHumanBodyPoseRequest,
     handler: VNImageRequestHandler,
@@ -73,6 +115,156 @@ enum ShotPoseAnalyzer {
     return nearest.sample.map { value in value.map { $0 as Any } ?? NSNull() }
   }
 
+  private static func pixelsPerMeter(_ joints: [BodyJoint]) -> Double? {
+    let projected = joints.compactMap { joint -> (camera: SIMD2<Double>, image: SIMD2<Double>)? in
+      guard let position = joint.position, let image = joint.image else { return nil }
+      return (SIMD2(position.x, position.y), image)
+    }
+    guard projected.count >= 4 else { return nil }
+    let count = Double(projected.count)
+    let cameraCenter = projected.reduce(SIMD2<Double>.zero) { $0 + $1.camera } / count
+    let imageCenter = projected.reduce(SIMD2<Double>.zero) { $0 + $1.image } / count
+    var covariance = 0.0
+    var spread = 0.0
+    for joint in projected {
+      let offset = joint.camera - cameraCenter
+      covariance += simd_dot(offset, joint.image - imageCenter)
+      spread += simd_length_squared(offset)
+    }
+    let scale = covariance / spread
+    return scale.isFinite && scale > 0 ? scale : nil
+  }
+
+  private static func detectHands(in image: CGImage, near wrists: [SIMD2<Double>], padding: Double) -> [Hand] {
+    let xs = wrists.map(\.x), ys = wrists.map(\.y)
+    guard let left = xs.min(), let right = xs.max(), let bottom = ys.min(), let top = ys.max() else { return [] }
+    // Vision points start at the lower left. CGImage crop rectangles start at the upper left.
+    let crop = CGRect(x: left - padding, y: Double(image.height) - top - padding,
+                      width: right - left + 2 * padding, height: top - bottom + 2 * padding)
+      .integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    guard !crop.isEmpty, let cropped = image.cropping(to: crop) else { return [] }
+    let request = VNDetectHumanHandPoseRequest()
+    request.maximumHandCount = 4
+    let handler = VNImageRequestHandler(cgImage: cropped, orientation: .up, options: [:])
+    do { try handler.perform([request]) } catch { return [] }
+    return (request.results ?? []).compactMap { observation in
+      func point(_ name: VNHumanHandPoseObservation.JointName) -> SIMD2<Double>? {
+        guard let point = try? observation.recognizedPoint(name), point.confidence >= 0.25,
+              (0...1).contains(point.location.x), (0...1).contains(point.location.y) else { return nil }
+        return SIMD2(Double(crop.minX + point.location.x * crop.width),
+                     Double(CGFloat(image.height) - crop.maxY + point.location.y * crop.height))
+      }
+      guard let wrist = point(.wrist) else { return nil }
+      let landmarks = handLandmarks.map { point($0) }
+      guard landmarks.contains(where: { $0 != nil }) else { return nil }
+      return Hand(wrist: wrist, chirality: observation.chirality, landmarks: landmarks)
+    }
+  }
+
+  private static func matchHands(_ hands: [Hand], to wrists: [SIMD2<Double>?], bodyHeight: Double) -> [Hand?] {
+    // Assign detections jointly so only one side uses a hand when the wrists overlap at release.
+    let options: [Int?] = [nil] + hands.indices.map(Optional.some)
+    let maxDistance = bodyHeight * 0.10
+    func cost(_ hand: Int?, side: Int) -> Double {
+      guard let hand else { return maxDistance }
+      guard let wrist = wrists[side] else { return .infinity }
+      let distance = simd_distance(hands[hand].wrist, wrist)
+      guard distance <= maxDistance else { return .infinity }
+      let expected: VNChirality = side == 0 ? .left : .right
+      let otherSide = hands[hand].chirality != .unknown && hands[hand].chirality != expected
+      if otherSide, let alternate = wrists[1 - side],
+         simd_distance(hands[hand].wrist, alternate) <= min(maxDistance, distance + bodyHeight * 0.03) {
+        return .infinity
+      }
+      return distance + (otherSide ? bodyHeight * 0.02 : 0)
+    }
+    var result: [Hand?] = [nil, nil]
+    var best = Double.infinity
+    for left in options {
+      for right in options where left == nil || left != right {
+        let score = cost(left, side: 0) + cost(right, side: 1)
+        if score < best {
+          best = score
+          result = [left.map { hands[$0] }, right.map { hands[$0] }]
+        }
+      }
+    }
+    return result
+  }
+
+  private static func fittedHand(_ hand: Hand, wrist: SIMD3<Double>, elbow: SIMD3<Double>?,
+                                 pixelsPerMeter: Double, bodyHeight: Double) -> [SIMD3<Double>?] {
+    let forearm = wrist - (elbow ?? wrist)
+    let imageDirection = SIMD2(forearm.x, forearm.y)
+    let visibleLength = simd_length(imageDirection)
+    // The image gives the shape of the hand. Use a single gently tilted plane for all
+    // landmarks so individually guessed depths cannot stretch or cross the fingers.
+    let slope = max(-0.65, min(0.65, forearm.z / max(1e-6, visibleLength)))
+    let gradient = visibleLength > 1e-6 ? imageDirection * (slope / visibleLength) : .zero
+    var offsets = hand.landmarks.enumerated().map { index, landmark -> SIMD3<Double>? in
+      guard let landmark else { return nil }
+      let imageOffset = (landmark - hand.wrist) / pixelsPerMeter
+      let offset = SIMD3(imageOffset.x, imageOffset.y, simd_dot(imageOffset, gradient))
+      let maxRadius = (index < 2 ? 0.15 : 0.085) * bodyHeight
+      return simd_length(offset) <= maxRadius ? offset : nil
+    }
+    for finger in 0..<2 {
+      guard let tip = offsets[finger], let base = offsets[finger + 2],
+            simd_distance(tip, base) <= bodyHeight * 0.09 else {
+        offsets[finger] = nil
+        continue
+      }
+    }
+    return offsets
+  }
+
+  private static func handPoints(_ joints: [BodyJoint], bodyHeight: Double, image: CGImage, relative: Bool = false) -> [Any] {
+    let empty = Array<Any>(repeating: NSNull(), count: handLandmarks.count * 2 * 3)
+    let wrists = wristIndices.map { joints[$0].image }
+    guard let scale = pixelsPerMeter(joints), bodyHeight.isFinite, bodyHeight > 0 else { return empty }
+    let bodyPixels = bodyHeight * scale
+    let visibleWrists = wrists.compactMap { $0 }
+    var hands = detectHands(in: image, near: visibleWrists, padding: max(28, bodyPixels * 0.24))
+    var matches = matchHands(hands, to: wrists, bodyHeight: bodyPixels)
+    // A wrist-centered crop gives the hand model a closer view when the shared crop misses a hand.
+    for (side, wrist) in wrists.enumerated() where matches[side] == nil {
+      guard let wrist else { continue }
+      for hand in detectHands(in: image, near: [wrist], padding: max(22, bodyPixels * 0.17)) {
+        let equivalent = hands.firstIndex { simd_distance(hand.wrist, $0.wrist) < bodyPixels * 0.03 }
+        if let equivalent {
+          if hand.landmarks.compactMap({ $0 }).count > hands[equivalent].landmarks.compactMap({ $0 }).count {
+            hands[equivalent] = hand
+          }
+        } else {
+          hands.append(hand)
+        }
+      }
+      matches = matchHands(hands, to: wrists, bodyHeight: bodyPixels)
+    }
+
+    let positioned = wristIndices.enumerated().map { side, wristIndex -> [SIMD3<Double>?]? in
+      guard let hand = matches[side], let wrist = joints[wristIndex].position else { return nil }
+      let offsets = fittedHand(hand, wrist: wrist, elbow: joints[wristIndex - 1].position,
+                               pixelsPerMeter: scale, bodyHeight: bodyHeight)
+      return relative ? offsets : offsets.map { $0.map { wrist + $0 } }
+    }
+    return handLandmarks.indices.flatMap { landmark in
+      positioned.flatMap { coordinates($0?[landmark] ?? nil) }
+    }
+  }
+
+  private static func interpolatedBody(at time: Double, between samples: [BodySample]) -> BodySample? {
+    guard let before = samples.last(where: { $0.time < time }), let after = samples.first(where: { $0.time > time }),
+          after.time - before.time <= 0.20 else { return nil }
+    let fraction = (time - before.time) / (after.time - before.time)
+    let joints = zip(before.joints, after.joints).map { first, last in
+      let position = first.position.flatMap { a in last.position.map { a + ($0 - a) * fraction } }
+      let image = first.image.flatMap { a in last.image.map { a + ($0 - a) * fraction } }
+      return BodyJoint(position: position, image: image)
+    }
+    return BodySample(time: time, joints: joints, height: before.height + (after.height - before.height) * fraction)
+  }
+
   static func recording(uri: String) async throws -> (AVURLAsset, Double) {
     guard let url = URL(string: uri), url.isFileURL else {
       throw ShotPoseError.invalidRecording
@@ -109,6 +301,7 @@ enum ShotPoseAnalyzer {
     generator.requestedTimeToleranceAfter = .zero
 
     var frames: [[String: Any]] = []
+    var bodies: [BodySample] = []
     var lastTime: CMTime?
     let jumpRequest = VNDetectHumanBodyPoseRequest()
     let releaseIndex = 24
@@ -124,10 +317,16 @@ enum ShotPoseAnalyzer {
     if finalTime >= videoStart && finalTime > (times.last ?? -.infinity) + 0.0001 {
       times.append(finalTime)
     }
+    // Observe the hands on intervening source frames near release. The body tracker
+    // retains its every-other-frame cadence and supplies only crop and depth anchors.
+    let handTimes = stride(from: releaseIndex - 5, through: releaseIndex + 5, by: 2)
+      .map { release + Double($0 - releaseIndex) / Double(fps) }
+      .filter { $0 >= videoStart && $0 <= finalTime }
+    let total = Double(times.count + handTimes.count)
 
     for (step, seconds) in times.enumerated() {
       try Task.checkCancellation()
-      defer { progress(Double(step + 1) / Double(times.count)) }
+      defer { progress(Double(step + 1) / total) }
       let requestedTime = CMTime(seconds: seconds, preferredTimescale: 60_000)
       guard let frame = try? await generator.image(at: requestedTime),
             frame.actualTime.isNumeric,
@@ -141,23 +340,30 @@ enum ShotPoseAnalyzer {
         let handler = VNImageRequestHandler(cgImage: frame.image, orientation: .up, options: [:])
         try handler.perform([request])
         guard let observation = request.results?.max(by: { $0.confidence < $1.confidence }) else { return nil }
-        let joints = jointNames.flatMap { joint -> [Any] in
-          guard let position = try? observation.cameraRelativePosition(joint).columns.3,
-                position.x.isFinite, position.y.isFinite, position.z.isFinite else {
-            return [NSNull(), NSNull(), NSNull()]
-          }
-          return [Double(position.x), Double(position.y), Double(position.z)]
-        }
-        let pelvisInImage = (try? observation.pointInImage(.root).location).map { point in
-          SIMD2(Double(point.x) * Double(frame.image.width), Double(point.y) * Double(frame.image.height))
-        }
-        return ["index": index, "joints": joints,
-                "jumpSample": jumpSample(request: jumpRequest, handler: handler, image: frame.image, near: pelvisInImage)]
+        let joints = bodyJoints(observation, in: frame.image)
+        let height = Double(observation.bodyHeight)
+        bodies.append(BodySample(time: frame.actualTime.seconds, joints: joints, height: height))
+        return ["index": index, "joints": joints.flatMap { coordinates($0.position) },
+                "fingers": handPoints(joints, bodyHeight: height, image: frame.image),
+                "jumpSample": jumpSample(request: jumpRequest, handler: handler, image: frame.image, near: joints.first?.image)]
       }
       if let sample {
         frames.append(sample)
       }
     }
-    return frames
+
+    var observedIndices = Set(frames.compactMap { $0["index"] as? Int })
+    for (step, seconds) in handTimes.enumerated() {
+      try Task.checkCancellation()
+      defer { progress(Double(times.count + step + 1) / total) }
+      let requestedTime = CMTime(seconds: seconds, preferredTimescale: 60_000)
+      guard let frame = try? await generator.image(at: requestedTime), frame.actualTime.isNumeric,
+            let body = interpolatedBody(at: frame.actualTime.seconds, between: bodies) else { continue }
+      let index = releaseIndex + Int(((frame.actualTime.seconds - release) * Double(fps)).rounded())
+      guard (releaseIndex - 6...releaseIndex + 6).contains(index), observedIndices.insert(index).inserted else { continue }
+      let offsets = autoreleasepool { handPoints(body.joints, bodyHeight: body.height, image: frame.image, relative: true) }
+      frames.append(["index": index, "joints": [Any](), "fingerOffsets": offsets])
+    }
+    return frames.sorted { ($0["index"] as? Int ?? 0) < ($1["index"] as? Int ?? 0) }
   }
 }

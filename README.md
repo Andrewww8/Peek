@@ -22,7 +22,7 @@ Open a session in **Saved Clips** and tap **Compare your shot vs NBA** near the 
 
 The shots play together through one second after release. Peek fills gaps between tracked poses so the white skeleton continues through the recorded follow-through. If the footage or tracking ends early, Peek holds the final tracked pose for the rest of the comparison. The bundled NBA references include measured motion through half a second after release and hold their final pose for the rest of the playback. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses of tagged shots show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
 
-On-device comparisons track the body through the wrists and ankles. The white skeleton stays grounded through the dip and landing. It shows lift when the video tracks both feet rising near release and descending again. Reopening an older saved recording refreshes its tracking at the original release time.
+On-device comparisons stabilize the body motion and show wrist and fingertip geometry where the recording supports it. The white skeleton stays grounded through the dip and landing. It shows lift when the video tracks both feet rising near release and descending again. Reopening an older saved recording refreshes its tracking at the original release time.
 
 ## Connect Vercel and Supabase
 
