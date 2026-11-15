@@ -1,5 +1,5 @@
 import { buildUsdz } from '../../mobile/src/core/usdz.ts';
-import { stabilizeHandMotion } from './hand-motion.ts';
+import { estimateHandMotion, stabilizeHandMotion } from './hand-motion.ts';
 import { jumpClearance, type JumpSample } from './shot-grounding.ts';
 
 export type PoseSample = number | null;
@@ -35,13 +35,15 @@ function poseFingerCount(pose: Pose): number {
 
 export function shotMotionWindow(pose: Pose): [first: number, last: number] {
   const fingerWidth = poseFingerCount(pose) * 3;
-  const sameFrame = (a: number, b: number) => {
+  const sameFrame = (a: number, b: number, allowHandLoss = false) => {
     if ((pose.pelvisRise?.[a] ?? 0) !== (pose.pelvisRise?.[b] ?? 0)) return false;
     for (let coordinate = 0; coordinate < coordinatesPerFrame; coordinate++) {
       if (pose.joints[a * coordinatesPerFrame + coordinate] !== pose.joints[b * coordinatesPerFrame + coordinate]) return false;
     }
     for (let coordinate = 0; coordinate < fingerWidth; coordinate++) {
-      if (pose.fingers?.[a * fingerWidth + coordinate] !== pose.fingers?.[b * fingerWidth + coordinate]) return false;
+      const next = pose.fingers?.[b * fingerWidth + coordinate];
+      if (allowHandLoss && next == null) continue;
+      if (pose.fingers?.[a * fingerWidth + coordinate] !== next) return false;
     }
     return true;
   };
@@ -49,7 +51,7 @@ export function shotMotionWindow(pose: Pose): [first: number, last: number] {
   let last = pose.frameCount - 1;
   // Repeated end poses fill parts of the reference timeline for which the clip has no detections.
   while (first < pose.releaseIndex && sameFrame(first, first + 1)) first++;
-  while (last > pose.releaseIndex && sameFrame(last - 1, last)) last--;
+  while (last > pose.releaseIndex && sameFrame(last - 1, last, true)) last--;
   return [first, last];
 }
 
@@ -218,7 +220,10 @@ export function visiblePosePoint(pose: Pose, frame: number, joint: number): Vect
 }
 
 export function comparisonPlayerPlayback(pose: Pose): Pose {
-  return stabilizeHandMotion(comparisonPlayback(pose), handJoints);
+  const playback = comparisonPlayback(pose);
+  const [, lastRecordedFrame] = shotMotionWindow(playback);
+  const measured = stabilizeHandMotion(playback, handJoints);
+  return estimateHandMotion(measured, handJoints, fingerCount, Math.min(lastRecordedFrame, playback.frameCount - 1));
 }
 
 export function sampleComparisonPose(pose: Pose, frame: number) {

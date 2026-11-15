@@ -306,16 +306,47 @@ describe('coach tools', () => {
       createCoachTools({ clips: deps.clips, references: deps.references }).map((t) => [t.name, t as never]),
     );
     const run = async (name: string, args: object) => JSON.parse(String(await tools[name]!.invoke(args, { context: { userId: A, sessionId: sessionA } } as never)));
-    assert.deepEqual(await run('compare_to_reference', {}), { available: false, shotType: 'three_point', reason: 'No pro templates for this shot type yet.' });
+    const curry = await run('get_pro_profile', { player: 'Steph Curry’s' });
+    assert.deepEqual([curry.player, curry.shotType, curry.reliability.shotsAveraged], ['Stephen Curry', 'three_point', 96]);
     // A verified raw-broadcast shot does not count as a template.
     const clipId = randomUUID();
     await deps.references.insertClip({ id: clipId, title: 'pro', source: 's', rightsNote: 'r', videoPathname: null, npzPathname: null, fps: 30 });
     await deps.references.insertShots([{ id: randomUUID(), clipId, track: 1, releaseFrame: 90, shotType: 'three_point', verified: true, metrics: analysis }]);
-    assert.equal((await run('compare_to_reference', {})).available, false);
+    const list = await run('list_pro_references', {});
+    assert.deepEqual(list.pros.map((reference: { player: string }) => reference.player), ['Stephen Curry']);
     const series = await run('get_shot_timeseries', { shotNumber: 1, signal: 'elbow' });
     assert.equal(series.values.length, 31);
     assert.equal((await run('get_player_history', { metric: 'kneeFlexionMinDeg' })).sessions[0].n, 1);
     assert.equal((await run('get_shot_metrics', { shotNumber: 9 })).error, 'shot_not_found');
     await assert.rejects(tools.get_shot_metrics!.invoke({ shotNumber: 1 }, {} as never), 'no context, no data');
+  });
+
+  test('the bundled Curry profile survives an unavailable template table and compares an iPhone-only shot', async () => {
+    const deps = createLocalDeps(join(dir, randomUUID()), { jwtSecret: SECRET, inMemory: true });
+    const references = { ...deps.references, async listTemplates() { throw new Error('Reference table unavailable'); } };
+    const tools = createCoachTools({ clips: deps.clips, references });
+    const context = { userId: A, sessionId: sessionA };
+    const run = async (name: string, args: object, localContext: object = context) => {
+      const tool = tools.find((entry) => entry.name === name) as { invoke(args: object, config: object): Promise<unknown> };
+      return JSON.parse(String(await tool.invoke(args, { context: localContext })));
+    };
+    const profile = await run('get_pro_profile', { player: 'Curry' });
+    assert.deepEqual([profile.player, profile.shotType, profile.reliability.shotsAveraged], ['Stephen Curry', 'three_point', 96]);
+    const noShot = await run('compare_to_reference', { player: 'Steph' });
+    assert.equal(noShot.available, false);
+    assert.match(noShot.reason, /No analyzed shot/);
+    assert.equal(noShot.reference.player, 'Stephen Curry');
+
+    const compared = await run('compare_to_reference', { player: 'Steph Curry' }, {
+      ...context,
+      onDeviceShot: { releaseMs: 2100, shootingHand: 'right', releaseElbowDeg: 160, kneeDipDeg: null, releaseHeight: 0.15 },
+    });
+    assert.equal(compared.available, true);
+    assert.equal(compared.source, 'iphone_pose_estimate');
+    assert.equal(compared.reference.player, 'Stephen Curry');
+    assert.equal(compared.referenceMetrics.releaseElbowDeg.player, 160);
+    assert.equal(compared.referenceMetrics.releaseElbowDeg.reference, profile.metrics.releaseElbowDeg.player);
+    assert.equal(compared.referenceMetrics.kneeDipDeg, undefined);
+    assert.equal(compared.phases, undefined);
   });
 });

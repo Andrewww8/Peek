@@ -21,8 +21,8 @@ import {
   type ReleaseSeries,
 } from '../cv/release.js';
 import type { ClipRow } from '../deps.js';
+import type { TemplateRecord } from '../cv/templates.js';
 import { weightOf, type ShotTypeBaseline } from './calibration.js';
-import type { TemplateRow } from './deps.js';
 
 export interface PlayerComparable {
   hand: Hand;
@@ -103,10 +103,10 @@ export function playerComparable(rows: ClipRow[], shotNumber?: number): PlayerCo
   };
 }
 
-export const templateSeries = (t: TemplateRow) => rightHanded(decodeRelease(t.template));
+export const templateSeries = (t: TemplateRecord) => rightHanded(decodeRelease(t.template));
 
 /** Templates ranked by normalized curve RMSE (lower = more similar). */
-export function rankPros(player: PlayerComparable, templates: TemplateRow[], baseline: ShotTypeBaseline) {
+export function rankPros(player: PlayerComparable, templates: TemplateRecord[], baseline: ShotTypeBaseline) {
   return templates
     .map((t) => {
       const d = curveDistance(player.curves, t.curves, baseline.curveScales);
@@ -127,7 +127,7 @@ export function rankPros(player: PlayerComparable, templates: TemplateRow[], bas
 }
 
 /** The shots_averaged-weighted mean pro curve of a shot type. */
-export function meanProCurves(templates: TemplateRow[]): Curves {
+export function meanProCurves(templates: TemplateRecord[]): Curves {
   const w = templates.map(weightOf);
   const curve = (k: (typeof CURVE_KEYS)[number]) =>
     templates[0]!.curves[k].map((_, i) => {
@@ -159,7 +159,17 @@ export function metricZ(metrics: Partial<ReleaseMetrics>, baseline: ShotTypeBase
   return out;
 }
 
-export function compareToPros(player: PlayerComparable, templates: TemplateRow[], baseline: ShotTypeBaseline, top = 3) {
+export function referenceMetricDifferences(player: Partial<ReleaseMetrics>, reference: ReleaseMetrics) {
+  const metrics: Partial<Record<ReleaseMetricKey, { player: number; reference: number; difference: number }>> = {};
+  for (const key of RELEASE_METRIC_KEYS) {
+    const measured = player[key], pro = reference[key];
+    if (measured == null || pro == null || !Number.isFinite(measured) || !Number.isFinite(pro)) continue;
+    metrics[key] = { player: measured, reference: pro, difference: round(measured - pro, /Deg$|Ms$/.test(key) ? 1 : 3)! };
+  }
+  return metrics;
+}
+
+export function compareToPros(player: PlayerComparable, templates: TemplateRecord[], baseline: ShotTypeBaseline, top = 3) {
   const ranked = rankPros(player, templates, baseline);
   const mean = meanProCurves(templates);
   const closest = ranked.slice(0, top).map(({ template, ...rest }) => {

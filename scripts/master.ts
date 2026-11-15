@@ -244,7 +244,7 @@ const ACCEPTANCE: [string, string[]][] = [
   ['Template reliability flags reach the coach (Kennard midrange low confidence; Doncic and SGA threes uncertain distance)', ['pro_comparison']],
   ['The coach cites only numbers its tools returned', ['pro_comparison', 'pro_comparison_unavailable']],
   ['Left-handed players are mirrored against right-handed pros and unmirrored against Kennard', ['pro_comparison_left_handed']],
-  ['Without templates or analyzed shots, pro tools report unavailable and the coach still answers from stats', ['pro_comparison_unavailable']],
+  ['The bundled Curry reference works without database templates, and unanalyzed sessions get coaching from stats', ['pro_comparison_unavailable']],
 ];
 
 const acceptance = ACCEPTANCE.map(([item, scenarios]) => {

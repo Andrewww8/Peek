@@ -8,9 +8,11 @@ import { tool } from 'langchain';
 import { z } from 'zod';
 import { DURATION_TOLERANCE_MS, MAX_RECORDING_DURATION_MS, type ClipRepo, type ClipRow } from '../deps.js';
 import type { ShotAnalysis, ShotMetrics } from '../cv/metrics.js';
+import type { TemplateRecord } from '../cv/templates.js';
 import { PRO_BASELINES } from './pro-baselines.generated.js';
-import { HAND_NOTE, compareToPros, effectiveAnalysis, handUncertain, metricZ, playerComparable, rankPros, sessionShotType } from './compare.js';
-import type { ReferenceRepo, TemplateRow } from './deps.js';
+import { HAND_NOTE, compareToPros, effectiveAnalysis, handUncertain, metricZ, playerComparable, rankPros, referenceMetricDifferences, sessionShotType } from './compare.js';
+import type { ReferenceRepo } from './deps.js';
+import { findProTemplate, listCoachTemplates } from './references.js';
 
 const angleEstimate = z.number().min(0).max(180).nullable();
 export const onDeviceShotSchema = z.object({
@@ -64,7 +66,7 @@ export function toolStatus(name: string, args: Record<string, unknown>): { tool:
     case 'get_player_history':
       return { tool: 'player_history', message: 'Checking your past sessions…' };
     case 'compare_to_reference':
-      return { tool: 'pro_reference', message: 'Comparing with pro shooters…' };
+      return { tool: 'pro_reference', message: typeof args.player === 'string' ? `Comparing with ${args.player}…` : 'Comparing with pro shooters…' };
     case 'find_similar_pros':
       return { tool: 'similar_pros', message: 'Finding pros who shoot like you…' };
     case 'list_pro_references':
@@ -186,30 +188,55 @@ export function createCoachTools(deps: { clips: ClipRepo; references: ReferenceR
     { name: 'get_player_history', description: "One metric's mean per session across the player's sessions, oldest first.", schema: z.object({ metric: z.enum(METRIC_KEYS) }) },
   );
 
-  /** The session's shot type and its pro templates; tools never return templates of another shot type. */
-  const prosFor = async (runtime: unknown) => {
+  /** Prefer the synced session's shot type. Peek's on-device practice is catch-and-shoot threes. */
+  const prosFor = async (runtime: unknown, requestedShotType?: string) => {
     const rows = await session(runtime);
-    const shotType = sessionShotType(rows);
-    const templates = shotType ? await deps.references.listTemplates(shotType) : [];
-    const baseline = shotType ? PRO_BASELINES[shotType] : undefined;
+    const shotType = sessionShotType(rows) ?? (ctx(runtime).onDeviceShot ? 'three_point' : requestedShotType ?? 'three_point');
+    const templates = await listCoachTemplates(deps.references, shotType);
+    const baseline = PRO_BASELINES[shotType];
     return { rows, shotType, templates, baseline };
   };
-  const reliability = (t: Pick<TemplateRow, 'shotsAveraged' | 'lowConfidence' | 'uncertainDistance'>) => ({
+  const reliability = (t: TemplateRecord) => ({
     shotsAveraged: t.shotsAveraged,
     lowConfidence: t.lowConfidence,
     uncertainDistance: t.uncertainDistance,
   });
+  const referenceDetails = (template: TemplateRecord) => ({ player: template.player, shootingHand: template.shootingHand, ...reliability(template) });
   const NOTE = 'Pro values are data-derived averages of many shots per player (from video); pros differ in style, so the target is the pro range and the closest matches.';
   const target = z.object({ shotNumber: z.number().int().positive().optional().describe('Omit to use the average of the session\'s analyzed shots.') });
 
   const compareToReference = tool(
-    async ({ shotNumber }, runtime) => {
+    async ({ shotNumber, player: requestedPlayer }, runtime) => {
       const { rows, shotType, templates, baseline } = await prosFor(runtime);
       if (!templates.length || !baseline) return json({ available: false, shotType, reason: 'No pro templates for this shot type yet.' });
+      const reference = requestedPlayer ? findProTemplate(templates, requestedPlayer) : undefined;
+      if (requestedPlayer && !reference) return json({ error: 'pro_not_found', player: requestedPlayer, available: templates.map((t) => t.player) });
       if (shotNumber !== undefined && !rows.some((r) => r.shotNumber === shotNumber)) return json({ error: 'shot_not_found', shotNumber });
       const player = playerComparable(rows, shotNumber);
-      if (!player) return json({ available: false, shotType, reason: 'No analyzed shot with enough 3D pose to compare yet.' });
-      const cmp = compareToPros(player, templates, baseline);
+      if (!player) {
+        const estimate = shotNumber === undefined ? ctx(runtime).onDeviceShot : undefined;
+        if (estimate && reference) {
+          const referenceMetrics = referenceMetricDifferences(estimate, reference.metrics);
+          if (Object.keys(referenceMetrics).length) return json({
+            available: true,
+            shotType,
+            target: 'on_device_shot',
+            source: 'iphone_pose_estimate',
+            note: 'The player values are estimates from one iPhone clip. The pro values are averages derived from video.',
+            shootingHand: estimate.shootingHand,
+            reference: referenceDetails(reference),
+            referenceMetrics,
+          });
+        }
+        return json({
+          available: false,
+          shotType,
+          reason: 'No analyzed shot with enough 3D pose to compare yet.',
+          ...(reference ? { reference: referenceDetails(reference) } : {}),
+        });
+      }
+      const comparedTemplates = reference ? [reference] : templates;
+      const cmp = compareToPros(player, comparedTemplates, baseline);
       return json({
         available: true,
         shotType,
@@ -219,19 +246,24 @@ export function createCoachTools(deps: { clips: ClipRepo; references: ReferenceR
         shootingHand: player.hand,
         ...(player.handUncertainShots.length ? { handUncertain: true, handUncertainShots: player.handUncertainShots, handNote: HAND_NOTE } : {}),
         reliability: {
-          proTemplates: templates.length,
-          lowConfidencePros: templates.filter((t) => t.lowConfidence).map((t) => t.player),
-          uncertainDistancePros: templates.filter((t) => t.uncertainDistance).map((t) => t.player),
+          proTemplates: comparedTemplates.length,
+          lowConfidencePros: comparedTemplates.filter((t) => t.lowConfidence).map((t) => t.player),
+          uncertainDistancePros: comparedTemplates.filter((t) => t.uncertainDistance).map((t) => t.player),
           playerShots: player.shots.length,
         },
         ...cmp,
+        ...(reference ? {
+          reference: referenceDetails(reference),
+          referenceMetrics: referenceMetricDifferences(player.metrics, reference.metrics),
+          phases: { ...cmp.phases, note: `Mean (player − ${reference.player}) per phase; angles in degrees, heights in body heights.` },
+        } : {}),
       });
     },
     {
       name: 'compare_to_reference',
       description:
-        "Compares one shot (or the session's average) with the averaged pro templates of the session's shot type: metric z-scores against the pro range, per-phase curve differences (load, rise, release, follow-through), deviation in units of each pro's own consistency, and the 3 closest-matching pros. Metrics only, never video.",
-      schema: target,
+        "Compares one shot or a session average with a named pro (pass player) or the closest pros. Returns metrics and phase differences for synced 3D pose analysis, or shared metrics for one iPhone estimate when a player is named and shotNumber is omitted.",
+      schema: target.extend({ player: z.string().trim().min(1).max(80).optional().describe('A named pro, such as Stephen Curry. Omit for the closest matches.') }),
     },
   );
 
@@ -256,26 +288,25 @@ export function createCoachTools(deps: { clips: ClipRepo; references: ReferenceR
     { name: 'find_similar_pros', description: "The pros whose averaged shot shape is closest to this shot's (or the session's), handedness-aware.", schema: target },
   );
 
-  const shotTypeArg = z.object({ shotType: z.string().optional().describe("Defaults to the session's shot type; other shot types are not available.") });
+  const shotTypeArg = z.object({ shotType: z.string().optional().describe('Use the session shot type when available, otherwise defaults to three-point.') });
   const checkType = (asked: string | undefined, shotType: string | null) => (asked && asked !== shotType ? json({ error: 'shot_type_mismatch', sessionShotType: shotType }) : null);
 
   const listProReferences = tool(
     async ({ shotType: asked }, runtime) => {
-      const { shotType, templates } = await prosFor(runtime);
+      const { shotType, templates } = await prosFor(runtime, asked);
       const mismatch = checkType(asked, shotType);
       if (mismatch) return mismatch;
-      return json({ shotType, note: NOTE, pros: templates.map((t) => ({ player: t.player, shootingHand: t.shootingHand, ...reliability(t) })) });
+      return json({ shotType, note: NOTE, pros: templates.map(referenceDetails) });
     },
     { name: 'list_pro_references', description: "The pro templates available for the session's shot type, with how many shots each averages and reliability flags.", schema: shotTypeArg },
   );
 
   const getProProfile = tool(
     async ({ player, shotType: asked }, runtime) => {
-      const { shotType, templates, baseline } = await prosFor(runtime);
+      const { shotType, templates, baseline } = await prosFor(runtime, asked);
       const mismatch = checkType(asked, shotType);
       if (mismatch) return mismatch;
-      const q = player.trim().toLowerCase();
-      const t = templates.find((x) => x.player.toLowerCase() === q) ?? templates.find((x) => x.player.toLowerCase().split(' ').includes(q));
+      const t = findProTemplate(templates, player);
       if (!t) return json({ error: 'pro_not_found', player, available: templates.map((x) => x.player) });
       return json({
         player: t.player,

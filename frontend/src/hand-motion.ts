@@ -3,6 +3,7 @@ import type { Pose, PoseSample } from './pose-3d.ts';
 type Point = [number, number, number];
 type Track = (Point | null)[];
 type FingerChain = readonly [wrist: number, knuckle: number, tip: number];
+type Basis = [forward: Point, sideways: Point, normal: Point];
 
 const add = (a: Point, b: Point): Point => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const subtract = (a: Point, b: Point): Point => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -11,6 +12,13 @@ const length = (a: Point) => Math.hypot(...a);
 const distance = (a: Point, b: Point) => length(subtract(a, b));
 const mix = (a: Point, b: Point, t: number) => add(a, scale(subtract(b, a), t));
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const dot = (a: Point, b: Point) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a: Point, b: Point): Point => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const unit = (vector: Point): Point | null => {
+  const size = length(vector);
+  return size > 1e-6 ? scale(vector, 1 / size) : null;
+};
 
 function point(samples: PoseSample[], frame: number, stride: number, joint: number): Point | null {
   if (joint < 0 || joint * 3 + 2 >= stride) return null;
@@ -110,8 +118,7 @@ function fillGaps(track: Track, maximumGap: number, speed: number,
     if (prior === null || next === null || next - prior > maximumGap + 1 || !allow(frame, prior, next)) return null;
     const a = track[prior]!, b = track[next]!;
     // Do not interpolate opposing directions through a folded, nearly zero-length link.
-    const dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    return dot > 0.3 * length(a) * length(b) && distance(a, b) <= speed * (next - prior)
+    return dot(a, b) > 0.3 * length(a) * length(b) && distance(a, b) <= speed * (next - prior)
       ? mix(a, b, (frame - prior) / (next - prior)) : null;
   });
 }
@@ -209,6 +216,126 @@ export function stabilizeHandMotion(pose: Pose, chains: readonly FingerChain[]):
       if (hasKnuckle) write(fingers, frame, fingerStride, knuckle - bodyCount, targetKnuckle);
       if (hasTip) write(fingers, frame, fingerStride, tip - bodyCount,
         targetKnuckle && fingerOffset ? add(targetKnuckle, fingerOffset) : null);
+    }
+  }
+  return { ...pose, joints, fingers };
+}
+
+function perpendicular(axis: Point): Point {
+  const seed: Point = Math.abs(axis[0]) < 0.85 ? [1, 0, 0] : [0, 0, 1];
+  return unit(subtract(seed, scale(axis, dot(seed, axis))))!;
+}
+
+function blendSegments(a: Point, b: Point, fraction: number): Point {
+  if (fraction === 0) return a;
+  if (fraction === 1) return b;
+  const from = unit(a), to = unit(b);
+  if (!from || !to) return mix(a, b, fraction);
+  const cosine = clamp(dot(from, to), -1, 1);
+  let direction = unit(mix(from, to, fraction)) ?? from;
+  if (cosine <= 0.9995) {
+    // Interpolate along an arc so opposing hands do not collapse to a point.
+    const tangent = unit(subtract(to, scale(from, cosine))) ?? perpendicular(from);
+    const angle = Math.acos(cosine) * fraction;
+    direction = add(scale(from, Math.cos(angle)), scale(tangent, Math.sin(angle)));
+  }
+  return scale(direction, length(a) + (length(b) - length(a)) * fraction);
+}
+
+function estimateOffsets(track: Track, fallback: Point, transitionFrames = Infinity): Point[] {
+  const known = track.flatMap((value, frame) => value ? [frame] : []);
+  let next = 0;
+  return track.map((value, frame) => {
+    while (next < known.length && known[next]! <= frame) next++;
+    if (value) return value;
+    const before = known[next - 1], after = known[next];
+    if (before !== undefined && after !== undefined) {
+      return blendSegments(track[before]!, track[after]!, (frame - before) / (after - before));
+    }
+    const nearest = before ?? after;
+    if (nearest === undefined) return fallback;
+    const weight = Math.max(0, 1 - Math.abs(frame - nearest) / transitionFrames);
+    return blendSegments(fallback, track[nearest]!, weight * weight * (3 - 2 * weight));
+  });
+}
+
+function armBases(segments: Track): Basis[] {
+  let previous: Basis | undefined;
+  return estimateOffsets(segments.map((segment) => segment && unit(segment)), [0, 1, 0]).map((axis) => {
+    let side = perpendicular(axis);
+    if (previous) {
+      // Carry the hand's sideways axis with the arm using the shortest rotation.
+      const [oldAxis, oldSide] = previous;
+      const bend = cross(oldAxis, axis);
+      const denominator = 1 + dot(oldAxis, axis);
+      const moved = denominator > 1e-5
+        ? add(add(oldSide, cross(bend, oldSide)), scale(cross(bend, cross(bend, oldSide)), 1 / denominator))
+        : oldSide;
+      side = unit(subtract(moved, scale(axis, dot(moved, axis)))) ?? side;
+    }
+    previous = [axis, side, cross(axis, side)];
+    return previous;
+  });
+}
+
+function inArmSpace(track: Track, bases: Basis[]): Track {
+  return track.map((point, frame) => point && [dot(point, bases[frame]![0]), dot(point, bases[frame]![1]), dot(point, bases[frame]![2])]);
+}
+
+function fromArmSpace(point: Point, [axis, side, normal]: Basis): Point {
+  return add(add(scale(axis, point[0]), scale(side, point[1])), scale(normal, point[2]));
+}
+
+/** Fill missing hand landmarks for display using the moving arm and nearby reliable hand shapes. */
+export function estimateHandMotion(pose: Pose, chains: readonly FingerChain[], fingerCount: number, lastFrame: number): Pose {
+  if (!pose.frameCount) return pose;
+  const frames = Array.from({ length: lastFrame + 1 }, (_, frame) => frame);
+  const bodyStride = pose.joints.length / pose.frameCount;
+  const bodyCount = bodyStride / 3;
+  const sourceFingers = pose.fingers ?? [];
+  const sourceStride = sourceFingers.length / pose.frameCount;
+  const fingerStride = fingerCount * 3;
+  const joints = pose.joints.slice();
+  const fingers: PoseSample[] = Array(pose.frameCount * fingerStride).fill(null);
+  const transitionFrames = Math.max(2, Math.round(pose.fps * 0.3));
+  const bodyTrack = (joint: number) => frames.map((frame) => point(pose.joints, frame, bodyStride, joint));
+  const fingerTrack = (joint: number) => frames.map((frame) => point(sourceFingers, frame, sourceStride, joint - bodyCount));
+
+  for (const wrist of new Set(chains.map(([joint]) => joint))) {
+    const measuredWrists = bodyTrack(wrist);
+    const elbows = bodyTrack(wrist - 1);
+    const upperArms = localTrack(elbows, bodyTrack(wrist - 2));
+    const forearms = localTrack(measuredWrists, elbows);
+    const upperBases = armBases(upperArms);
+    const forearmLength = medianLength(forearms, 0.062, 0.24) ?? 0.135;
+    const soundForearms = forearms.map((sample) => plausibleLength(sample, forearmLength, 0.45, 1.65, 0.05, 0.25));
+    const offsets = estimateOffsets(inArmSpace(soundForearms, upperBases), [forearmLength, 0, 0], transitionFrames);
+    const canEstimateWrist = soundForearms.some(Boolean) || upperArms.some(Boolean);
+    const wrists = frames.map((frame) => {
+      const elbow = elbows[frame];
+      return measuredWrists[frame] ?? (elbow && canEstimateWrist
+        ? add(elbow, fromArmSpace(offsets[frame]!, upperBases[frame]!)) : null);
+    });
+    const handBases = armBases(localTrack(wrists, elbows));
+    for (const [digit, [, knuckle, tip]] of chains.filter(([joint]) => joint === wrist).entries()) {
+      const observedKnuckles = fingerTrack(knuckle), observedTips = fingerTrack(tip);
+      const spread = digit === 0 ? 0 : wrist < 15 ? -0.018 : 0.018;
+      const palm = estimateOffsets(inArmSpace(localTrack(observedKnuckles, measuredWrists), handBases),
+        [0.045, spread, 0.007], transitionFrames);
+      const finger = estimateOffsets(inArmSpace(localTrack(observedTips, observedKnuckles), handBases),
+        [0.033, spread * 0.2, -0.012], transitionFrames);
+      for (let frame = 0; frame < pose.frameCount; frame++) {
+        const source = Math.min(frame, lastFrame);
+        const origin = wrists[source];
+        const basis = handBases[source]!;
+        const base = origin && (observedKnuckles[source] ?? add(origin, fromArmSpace(palm[source]!, basis)));
+        const end = base && (observedTips[source] ?? add(base, fromArmSpace(finger[source]!, basis)));
+        write(fingers, frame, fingerStride, knuckle - bodyCount, base ?? null);
+        write(fingers, frame, fingerStride, tip - bodyCount, end ?? null);
+      }
+    }
+    for (let frame = 0; frame < pose.frameCount; frame++) {
+      write(joints, frame, bodyStride, wrist, wrists[Math.min(frame, lastFrame)] ?? null);
     }
   }
   return { ...pose, joints, fingers };

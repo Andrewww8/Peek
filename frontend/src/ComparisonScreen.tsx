@@ -380,6 +380,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
         <PosePanel label={reference.player} detail={averageLabel(reference)}
           pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
+      <Text style={ui.body}>Your wrist and finger positions are estimated where tracking is incomplete.</Text>
       <View style={styles.stageActions}>
         <Button label={arRequested ? 'Preparing AR…' : 'View in AR'} arrow onPress={openAR} disabled={arRequested} style={styles.action} />
         <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={arRequested} style={styles.action} />

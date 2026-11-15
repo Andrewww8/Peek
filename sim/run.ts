@@ -2730,7 +2730,7 @@ const SCENARIOS: Record<string, Scenario> = {
     }
   },
 
-  /** No templates ingested, or no analyzed shot yet: the tools say unavailable, and the coach still answers from stats. */
+  /** Use bundled Curry with no ingested templates, and answer from stats when no shot is analyzed yet. */
   async pro_comparison_unavailable(w) {
     const A = CLOUD.users.A;
     const ph = await w.fresh();
@@ -2758,16 +2758,22 @@ const SCENARIOS: Record<string, Scenario> = {
       CLOUD.coach.script = (t) =>
         t.results.length === 0
           ? { tools: [{ name: 'compare_to_reference', args: {} }, { name: 'find_similar_pros', args: {} }, { name: 'list_pro_references', args: {} }, { name: 'get_session_overview', args: {} }] }
-          : { text: `No pro comparison yet. From your tags: ${resultOf(t, 'get_session_overview')?.shots?.length} shot(s) logged.`, chunks: 3 };
+          : { text: resultOf(t, 'compare_to_reference')?.available
+            ? 'Here is your comparison with the bundled Stephen Curry reference.'
+            : `No pro comparison yet. From your tags: ${resultOf(t, 'get_session_overview')?.shots?.length} shot(s) logged.`, chunks: 3 };
       const r = await sendRejects(ph.backend.coach.send(sessionId, 'How do I compare with the pros?'));
       assert(r.ok, `${reason}: the coach failed with ${r.code}`);
       const turn = CLOUD.coach.seen.at(-1)!;
       const cmp = resultOf(turn, 'compare_to_reference');
       const sim = resultOf(turn, 'find_similar_pros');
       const list = resultOf(turn, 'list_pro_references');
-      assert(cmp?.available === false && sim?.available === false && typeof cmp.reason === 'string', `${reason}: ${json(cmp)} / ${json(sim)}`);
-      if (reason === 'no_templates') assert(Array.isArray(list?.pros) && list.pros.length === 0, `${reason}: listed ${json(list).slice(0, 120)}`);
-      else assert(list?.pros?.length === 10, `${reason}: templates should still be listed`);
+      if (reason === 'no_templates') {
+        assert(cmp?.available === true && sim?.available === true, `${reason}: ${json(cmp)} / ${json(sim)}`);
+        assert(list?.pros?.length === 1 && list.pros[0].player === 'Stephen Curry', `${reason}: listed ${json(list).slice(0, 120)}`);
+      } else {
+        assert(cmp?.available === false && sim?.available === false && typeof cmp.reason === 'string', `${reason}: ${json(cmp)} / ${json(sim)}`);
+        assert(list?.pros?.length === 10, `${reason}: templates should still be listed`);
+      }
       assertNumbersFromTools((r.v as { text: string }).text, turn, reason);
       CLOUD.hideTemplates = false;
     }

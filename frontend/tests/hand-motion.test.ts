@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { comparisonPlayerPlayback, coordinatesPerFrame, fingerCount, handJoints, jointCount, posePoint, sampleComparisonPose, type Pose } from '../src/pose-3d.ts';
+import { comparisonPlayback, comparisonPlayerPlayback, coordinatesPerFrame, fingerCount, handJoints, jointCount, posePoint, sampleComparisonPose, type Pose } from '../src/pose-3d.ts';
 import { stabilizeHandMotion } from '../src/hand-motion.ts';
 
 type Point = [number, number, number];
@@ -70,7 +70,7 @@ test('rejects isolated finger reversals and bridges only supported gaps through 
       putSample(pose, frame, 18, [x + 0.42, -0.102 - length, 0]);
     }
   }
-  const filtered = comparisonPlayerPlayback(pose);
+  const filtered = stabilizeHandMotion(comparisonPlayback(pose), handJoints);
   for (const joint of [17, 19, 21, 23]) {
     assert.equal(posePoint(filtered, 2, joint), null, 'discard the isolated reversal at the first detection');
     assert.ok(posePoint(filtered, 7, joint), 'nearby agreeing observations can bridge a one-frame gap');
@@ -85,6 +85,45 @@ test('rejects isolated finger reversals and bridges only supported gaps through 
   assert.equal(filtered.frameCount, pose.releaseIndex + pose.fps + 1);
   assert.deepEqual(filtered.metrics, pose.metrics);
   assert.ok(posePoint(pose, 2, 17), 'do not mutate the saved source pose');
+});
+
+test('estimated hands follow the arm before fingers are tracked and hold with the final frame', () => {
+  const pose = record();
+  for (let frame = 0; frame <= 20; frame++) {
+    const angle = frame * Math.PI / 40;
+    const x = Math.cos(angle), y = -Math.sin(angle);
+    const elbowX = frame * 0.008;
+    putSample(pose, frame, 11, [elbowX - 0.12 * x, -0.12 * y, 0]);
+    putSample(pose, frame, 12, [elbowX, 0, 0]);
+    if (frame < 5 || frame > 8) putSample(pose, frame, 13, [elbowX + 0.14 * x, 0.14 * y, 0]);
+    if (frame >= 14) {
+      putSample(pose, frame, 21, [elbowX + 0.19 * x, 0.19 * y, 0.006]);
+      putSample(pose, frame, 17, [elbowX + 0.225 * x, 0.225 * y, 0.004]);
+    }
+  }
+  const raw = comparisonPlayback(pose);
+  const measured = stabilizeHandMotion(raw, handJoints);
+  const display = comparisonPlayerPlayback(pose);
+  assert.equal(posePoint(pose, 0, 17), null);
+  assert.equal(posePoint(pose, 6, 13), null);
+  assert.deepEqual(posePoint(display, 16, 17), posePoint(measured, 16, 17));
+  assert.deepEqual(posePoint(display, 6, 12), posePoint(raw, 6, 12));
+  assert.equal(posePoint(display, 6, 16), null, 'require an anchor on the correct arm');
+  assert.equal(posePoint(display, 6, 18), null);
+  for (let frame = 0; frame <= 20; frame++) {
+    const forearm = Math.hypot(...offset(display, frame, 13, 12));
+    const tipLink = Math.hypot(...offset(display, frame, 17, 21));
+    assert.ok(forearm > 0.10 && forearm < 0.18);
+    assert.ok(tipLink > 0.02 && tipLink < 0.06);
+    assert.ok(Math.hypot(...offset(display, frame, 17, 19)) > 0.005, 'keep the two fingertips distinct');
+  }
+  assert.ok(offset(display, 0, 21, 13)[0] > 0.04);
+  assert.ok(offset(display, 11, 21, 13)[1] < -0.03, 'the estimated palm turns with the forearm');
+  for (let frame = 21; frame < display.frameCount; frame++) {
+    for (const joint of [13, 17, 19, 21, 23]) {
+      assert.deepEqual(posePoint(display, frame, joint), posePoint(display, 20, joint));
+    }
+  }
 });
 
 test('bounds wrist corrections and preserves the final hold', () => {

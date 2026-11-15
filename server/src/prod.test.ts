@@ -330,6 +330,7 @@ describe('environment and the Vercel entry', () => {
     assert.equal(fn.maxDuration, 300);
     assert.match(fn.includeFiles, /node_modules\/ffmpeg-static\/\*\*/);
     assert.match(fn.includeFiles, /catalog\/\*\*/);
+    assert.match(fn.includeFiles, /reference-data\/average-shots\/Stephen_Curry_\*\.npz/);
     assert.match(fn.includeFiles, /@langchain\/langgraph-sdk\/dist\/node_modules\/\*\*/); // vendored ESM markers (fix-vendored-esm.mjs)
     assert.deepEqual(cfg.rewrites, [{ source: '/(.*)', destination: '/api' }]);
   });

@@ -211,7 +211,10 @@ describe('ingest and coach tools', () => {
     const tools: Record<string, { invoke: (a: object, c: unknown) => Promise<unknown> }> = Object.fromEntries(createCoachTools({ clips: deps.clips, references: deps.references }).map((t) => [t.name, t as never]));
     const run = async (name: string, args: object = {}) => JSON.parse(String(await tools[name]!.invoke(args, { context: { userId: A, sessionId: S } } as never)));
 
-    assert.deepEqual(await run('compare_to_reference'), { available: false, shotType: 'midrange', reason: 'No pro templates for this shot type yet.' });
+    const bundled = await run('compare_to_reference', { player: 'Steph Curry', shotNumber: 1 });
+    assert.equal(bundled.available, true);
+    assert.deepEqual([bundled.shotType, bundled.reference.player, bundled.reference.shotsAveraged], ['midrange', 'Stephen Curry', 13]);
+    assert.equal(bundled.referenceMetrics.releaseElbowDeg.reference, pro.metrics.releaseElbowDeg);
     await ingestTemplates(deps.references);
     const list = await run('list_pro_references');
     assert.equal(list.shotType, 'midrange');
@@ -230,6 +233,10 @@ describe('ingest and coach tools', () => {
     assert.ok(cmp.closestPros[0].spreadDeviation.byPhase.load !== null);
     assert.deepEqual(cmp.reliability.lowConfidencePros, ['Luke Kennard']);
     assert.equal((await run('compare_to_reference')).target, 'session');
+    const named = await run('compare_to_reference', { player: 'Ray Allen' });
+    assert.equal(named.reference.player, 'Ray Allen');
+    assert.equal(named.closestPros[0].player, 'Ray Allen');
+    assert.match(named.phases.note, /Ray Allen/);
 
     const similar = await run('find_similar_pros');
     assert.equal(similar.closest[0].player, 'Stephen Curry');

@@ -62,7 +62,7 @@ test('stabilizes whole-body motion while retaining planted feet, jump timing, an
   }
 });
 
-test('keeps on-device hands sparse and attached while the body fills gaps and holds its last frame', () => {
+test('fills the user hand for playback while preserving sparse source and reference geometry', () => {
   const source = player(32);
   source.fingers = Array<PoseSample>(source.frameCount * fingerCount * 3).fill(null);
   function point(frame: number, joint: number, value: [number, number, number]) {
@@ -93,18 +93,18 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
   assert.equal(tip[0], stable[0]);
   assert.ok(Math.abs(tip[1] - stable[1] + 0.1) < 1e-9);
 
-  const next = visiblePosePoint(comparisonPlayback(display), 32 - 3, 17);
-  assert.equal(next, null, 'AR resampling must not resurrect a stale hand');
   const usd = new TextDecoder().decode(comparisonUsdz(display, display));
   assert.match(usd, /timeCodesPerSecond = 60/);
-  const primTrack = (definition: string) => usd.split('def ' + definition)[1]?.split(/\ndef (?:Sphere|Cylinder|Xform) /)[0] ?? '';
-  const samples = (definition: string, op: string) => {
-    const values = primTrack(definition).split(`xformOp:${op}.timeSamples = {\n`)[1]?.split('}')[0];
+  const [user, reference] = usd.split('def Xform "NBAReference"');
+  assert.ok(user && reference);
+  const primTrack = (actor: string, definition: string) => actor.split('def ' + definition)[1]?.split(/\ndef (?:Sphere|Cylinder|Xform) /)[0] ?? '';
+  const samples = (actor: string, definition: string, op: string) => {
+    const values = primTrack(actor, definition).split(`xformOp:${op}.timeSamples = {\n`)[1]?.split('}')[0];
     assert.ok(values, `${definition} has ${op} samples`);
     return new Map(Array.from(values.matchAll(/^([\d.]+): (\([^\n]+\))/gm), ([, time, value]) => [Number(time), value]));
   };
   for (const definition of ['Sphere "Finger_0"', 'Cylinder "Bone_21_17"']) {
-    const track = primTrack(definition);
+    const track = primTrack(reference, definition);
     // Quick Look versions that ignore the visibility track still see a near-zero scale.
     assert.match(track, /float3 xformOp:scale.timeSamples = \{[^}]*116: \(0\.00010, 0\.00010, 0\.00010\)/);
   }
@@ -112,7 +112,7 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
     ['Sphere "Finger_0"', (15 - 3) * 4, (26 - 3) * 4], ['Cylinder "Bone_21_17"', (15 - 3) * 4, (26 - 3) * 4],
     ['Sphere "Joint_13"', (15 - 3) * 4, (20 - 3) * 4], ['Cylinder "Bone_12_13"', (15 - 3) * 4, (20 - 3) * 4],
   ] as const) {
-    const scale = samples(definition, 'scale');
+    const scale = samples(reference, definition, 'scale');
     const hidden = '(0.00010, 0.00010, 0.00010)';
     assert.ok(scale.get(before) && scale.get(after));
     assert.notEqual(scale.get(before), hidden);
@@ -120,12 +120,18 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
     assert.equal(scale.get(before + 1), hidden);
     assert.equal(scale.get(after - 1), hidden);
     for (const op of definition.startsWith('Cylinder') ? ['translate', 'orient'] : ['translate']) {
-      const pose = samples(definition, op);
+      const pose = samples(reference, definition, op);
       assert.equal(pose.get(before + 1), pose.get(before));
       assert.equal(pose.get(after - 1), pose.get(after));
     }
   }
-  const coordinate = (definition: string, time: number) => samples(definition, 'translate').get(time)?.slice(1, -1).split(',').map(Number);
+  for (const definition of ['Sphere "Joint_13"', 'Sphere "Finger_0"', 'Cylinder "Bone_21_17"']) {
+    const track = samples(user, definition, 'translate');
+    assert.ok(track.get(0) && track.get((17 - 3) * 4), 'the comparison fills the lead-in and tracking gaps');
+    assert.equal(track.get(116), track.get(112), 'the estimated hand holds with the final body pose');
+    assert.doesNotMatch(primTrack(user, definition), /invisible/);
+  }
+  const coordinate = (definition: string, time: number) => samples(user, definition, 'translate').get(time)?.slice(1, -1).split(',').map(Number);
   const tick = (30 - 3) * 4 + 2;
   const arTip = coordinate('Sphere "Finger_0"', tick), knuckle = coordinate('Sphere "Finger_4"', tick);
   const center = coordinate('Cylinder "Bone_21_17"', tick);
@@ -146,5 +152,7 @@ test('retains measured legacy fingers and exports only valid hand connections in
   assert.equal(visiblePosePoint(pose, release, 19), null);
   const usd = new TextDecoder().decode(comparisonUsdz(pose, pose));
   assert.match(usd, /Bone_21_17/);
-  assert.doesNotMatch(usd, /Bone_21_19|Finger_2/);
+  const reference = usd.split('def Xform "NBAReference"')[1];
+  assert.ok(reference);
+  assert.doesNotMatch(reference, /Bone_21_19|Finger_2/);
 });
