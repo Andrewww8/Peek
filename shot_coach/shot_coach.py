@@ -1011,7 +1011,12 @@ function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.
 // Rigid skeleton: every bone keeps one length and one thickness for the whole clip, joints are chained from the pelvis outwards,
 // and a bone can only swing, never spin about its own length. Hands keep their palms turned towards each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick; feet stay flat, pointing where the shin faces.
 function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
- const H=S.H;for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H));
+ const H=S.H;
+ // one fixed turn of the whole body so that at lift-off (fastest rise of the hips before the release) the shoulder line is level and square to the shot
+ let lift=Math.max(S.v0,Math.min(REL,S.v1)),best=-1e9;for(let i=Math.max(S.v0+1,12);i<=Math.min(REL,S.v1-1);i++){const v=S.rise[i+1]-S.rise[i-1];if(v>best){best=v;lift=i}}
+ const sl=S.pose[lift],sh=V(-(sl[14][0]-sl[11][0]),-(sl[14][2]-sl[11][2]),-(sl[14][1]-sl[11][1])).normalize(),Q0=new THREE.Quaternion().setFromUnitVectors(sh,V(1,0,0));S.lift=lift;
+ const W=(q,i)=>{const v=V(-q[0]*H,-q[2]*H,-q[1]*H).applyQuaternion(Q0);v.z+=S.rise[i]*H;return v};
+ for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>W(q,i));
  const med=f=>{const a=[];for(let i=S.v0;i<=S.v1;i++)a.push(f(all[i]));a.sort((x,y)=>x-y);return a[a.length>>1]},d=(a,b)=>med(J=>J[a].distanceTo(J[b]));
  const Lth=(d(1,2)+d(4,5))/2,Lsh=(d(2,3)+d(5,6))/2,Lua=(d(14,15)+d(11,12))/2,Lfa=(d(15,16)+d(12,13))/2,Ltr=d(0,8);
  const g=(Lth+Lsh)/0.927,st=Math.max(0.92*g,Math.min(1.2*g,(Ltr-TR.sacrum*g)/0.361)),k=(a,b)=>Math.max(0.85,Math.min(1.2,a/b/g))*g;
@@ -1020,7 +1025,7 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
  const quat=(x,y,z)=>new THREE.Quaternion().setFromRotationMatrix(M4.makeBasis(x,y,z)),perp=(h,z,alt)=>{const x=h.clone().addScaledVector(z,-h.dot(z));if(x.lengthSq()<1e-4)x.copy(alt).addScaledVector(z,-alt.dot(z));return x.normalize()};
  const bone=(down,hint,alt)=>{const z=down.clone().negate(),x=perp(hint,z,alt),y=V().crossVectors(z,x);return{x,y,z,q:quat(x,y,z)}};
  // wrist flick of the shooting (right) hand: how far the fingertip is bent forward-and-down from the forearm line (+) or cocked back (-), smoothed over time
- const flick=[];for(let i=S.v0;i<=S.v1;i++){const J=all[i],e=S.ext[i];flick[i]=null;if(!e)continue;const q=e[1],tip=V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H);
+ const flick=[];for(let i=S.v0;i<=S.v1;i++){const J=all[i],e=S.ext[i];flick[i]=null;if(!e)continue;const tip=W(e[1],i);
   const f=V().subVectors(J[16],J[15]).normalize(),dd=tip.sub(J[16]).normalize(),fw=V().crossVectors(V().subVectors(J[8],J[0]).normalize(),V().subVectors(J[1],J[4]).normalize()).normalize();
   const n=perp(fw.add(V(0,0,-0.5)),f,V(0,0,-1));flick[i]=Math.max(-1.3,Math.min(1.3,Math.atan2(dd.dot(n),dd.dot(f))))}
  for(let i=S.v0,last=0;i<=S.v1;i++){if(flick[i]===null)flick[i]=last;last=flick[i]}
