@@ -62,7 +62,7 @@ All in `outputs/`:
   - `similar` shows you against the closest player; `difference` shows you against the player you chose.
   - One group per skeleton (`You` and the player's name), 15 bone meshes each, with a position and rotation key per frame: 46 keys at 30 fps, release at 1.0 s.
   - Metres, y up, the shooter facing +z, floor at y = 0. You are scaled to the player's height.
-  - The bones keep fixed lengths, the body is stood upright with the shoulders squared to the shot at lift-off, and the feet stay planted until lift-off.
+  - The bones keep fixed lengths, the body is turned so the shoulders are square to the shot at lift-off (up stays the camera's up), and the feet stay planted until lift-off.
   - Arm depth is re-solved for your skeleton before it is built, because one camera measures it poorly: each arm bone keeps one length, a raised upper arm is kept in front of the chest, and up to the release the forearms are placed so the hands stay together on the ball.
   - Each skeleton shoots with its real hand, so a left-hander against a right-hander will not line up arm for arm.
 - `<video name>.mp4`: only with `--clip`.

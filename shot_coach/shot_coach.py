@@ -970,8 +970,7 @@ def rig_skeleton(pose, ext, rise, hand, height):
     """Joint positions -> one position + rotation per bone and frame, for a skeleton `height` metres tall. World: x right, y forward, z up, floor at z = 0.
 
     Every bone keeps one length and thickness for the whole clip and the joints are chained from the pelvis outwards, so a bone can only swing,
-    never stretch or spin about its own length. The whole body gets one fixed turn: upright (over the last frames on the ground the weight between
-    hips and chest sits above the feet, which removes the camera's tilt) and square (at lift-off, the fastest rise of the hips before the release,
+    never stretch or spin about its own length. The whole body gets one fixed turn about the vertical: square (at lift-off, the fastest rise of the hips before the release,
     the shoulder line faces the shot head on). Feet stay planted until lift-off; after it the measured rise of the hips drives the jump.
     Palms face each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick."""
     P, E, rise = np.asarray(pose, float), np.asarray(ext, float), np.nan_to_num(np.asarray(rise, float))
@@ -998,8 +997,7 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
     lift, best = max(v0, min(30, v1)), -1e9
     for i in range(max(v0 + 1, 12), min(30, v1 - 1) + 1):
         if rise[i + 1] - rise[i - 1] > best: best, lift = rise[i + 1] - rise[i - 1], i
-    bal = nrm(sum(0.6 * cv(P[i, 0]) + 0.4 * cv(P[i, 8]) - 0.5 * cv(P[i, 3]) - 0.5 * cv(P[i, 6]) for i in range(max(v0, lift - 6), lift + 1)))
-    ax = np.cross(bal, Z); R0 = Rotation.from_rotvec(nrm(ax) * np.arctan2(np.linalg.norm(ax), bal @ Z)).as_matrix() if np.linalg.norm(ax) > 1e-9 else np.eye(3)
+    R0 = np.eye(3)                                                        # up stays the camera's up: the picture is the one thing measured directly
     sh = R0 @ cv(P[lift, 14] - P[lift, 11]); R0 = Rotation.from_rotvec(Z * -np.arctan2(sh[1], sh[0])).as_matrix() @ R0
 
     def W(q, i):
