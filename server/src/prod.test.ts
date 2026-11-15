@@ -349,6 +349,16 @@ describe('environment and the Vercel entry', () => {
 describe('coach and CV env', () => {
   const base = { VERCEL: '1', CATALOG_PATH: '', MEDIA_DIR: '', SUPABASE_URL: 'https://proj.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'k', BLOB_READ_WRITE_TOKEN: 'vercel_blob_rw_Abc123_x' };
 
+  test('guest quota defaults to unlimited and can be restored through the environment', async () => {
+    const { depsFromEnv } = await import('./env.js');
+    for (const env of [base, { LOCAL_DATA_DIR: join(dir, 'guest-mode') }]) {
+      assert.equal(depsFromEnv(env).guestDailyLimit, null);
+      assert.equal(depsFromEnv({ ...env, PEEK_GUEST_DAILY_LIMIT: 'unlimited' }).guestDailyLimit, null);
+      assert.equal(depsFromEnv({ ...env, PEEK_GUEST_DAILY_LIMIT: '5' }).guestDailyLimit, 5);
+      assert.throws(() => depsFromEnv({ ...env, PEEK_GUEST_DAILY_LIMIT: '55' }), /PEEK_GUEST_DAILY_LIMIT must be 5 or unlimited/);
+    }
+  });
+
   test('without ANTHROPIC_API_KEY /health stays ok and the coach answers 503 not_configured', async () => {
     const { missingCoachEnv } = await import('./prod/coach.js');
     assert.deepEqual(missingCoachEnv({}), ['ANTHROPIC_API_KEY', 'POSTGRES_URL']);

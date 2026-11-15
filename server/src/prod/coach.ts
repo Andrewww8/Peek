@@ -61,7 +61,8 @@ export function createSupabaseUsageRepo(db: SupabaseClient): CoachUsageRepo {
       return Number(row?.messages ?? 0);
     },
     async consume(userId, day, limit) {
-      const rows = check(await db.rpc('coach_consume', { p_user: userId, p_day: day, p_limit: limit }), 'coach_consume') as { allowed: boolean; messages: number }[];
+      // The existing RPC requires a PostgreSQL integer. Unlimited mode counts up to the column's storage capacity.
+      const rows = check(await db.rpc('coach_consume', { p_user: userId, p_day: day, p_limit: limit ?? 2_147_483_647 }), 'coach_consume') as { allowed: boolean; messages: number }[];
       const r = rows?.[0];
       return { allowed: !!r?.allowed, count: Number(r?.messages ?? 0) };
     },

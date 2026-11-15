@@ -40,7 +40,9 @@ test('a guest syncs private shots, compares their motion, and chats within the d
       ? 'Keep your wrist relaxed.' : 'Hold your finish.',
   });
   let today = '2026-11-15';
-  const deps = createLocalDeps(temp, { jwtSecret: secret, inMemory: true, coachModel: () => model, today: () => today });
+  const deps = createLocalDeps(temp, {
+    jwtSecret: secret, inMemory: true, coachModel: () => model, today: () => today, guestDailyLimit: GUEST_DAILY_LIMIT,
+  });
   const app = await buildApp({
     catalogPath: 'server/catalog/demos.json',
     mediaDir: 'server/media',

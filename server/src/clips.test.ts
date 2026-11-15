@@ -296,6 +296,20 @@ describe('POST /v1/recordings/:uploadId/clips', () => {
     assert.equal((await stat(clipFile)).mtimeMs, before);
   });
 
+  test('guests can cut more than five clips and still upload another recording by default', async () => {
+    const user = randomUUID();
+    const guest = await signLocalToken(SECRET, user, 3600, true);
+    const sessionId = randomUUID();
+    const up = await upload(guest, sessionId, six);
+    const sixShots = Array.from({ length: 6 }, (_, index) => ({ shotNumber: index + 1, releaseMs: 3000 + index * 200, outcome: 'unmarked' }));
+    const res = await cut(guest, up.uploadId, { sessionId, shotType: 'three_point', shots: sixShots });
+    assert.equal(res.statusCode, 200, res.payload);
+    assert.deepEqual(res.json().clips.map((clip: { shotNumber: number; sizeBytes?: number }) => [clip.shotNumber, (clip.sizeBytes ?? 0) > 0]),
+      sixShots.map(({ shotNumber }) => [shotNumber, true]));
+    assert.equal(deps.usage.rows().filter(({ userId }) => userId === user).reduce((count, row) => count + row.messages, 0), 6);
+    await startUpload(guest, randomUUID(), six);
+  });
+
   test('shootingHand "R"/"L" on the clips POST is stored on every clip of the session', async () => {
     const sessionId = randomUUID();
     const up = await upload(tokenA, sessionId, six);

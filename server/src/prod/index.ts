@@ -8,7 +8,7 @@ import { createVercelBlobStore } from './vercelBlob.js';
 import { createProductionCoach, createSupabaseReferenceRepo, createSupabaseUsageRepo, missingCoachEnv } from './coach.js';
 import { createPostgresGuestRateLimiter, createSupabaseGuestAccounts } from './guest-session.js';
 import { createPostgresPool } from './postgres.js';
-import type { ReferenceRepo } from '../coach/deps.js';
+import { guestDailyLimitFromEnv, type ReferenceRepo } from '../coach/deps.js';
 
 /** Names of the variables production needs that are missing from `env`. */
 export function missingProductionEnv(env: NodeJS.ProcessEnv): string[] {
@@ -23,6 +23,7 @@ export function missingProductionEnv(env: NodeJS.ProcessEnv): string[] {
 export function createProductionDeps(env: NodeJS.ProcessEnv): Deps & { references: ReferenceRepo } {
   const missing = missingProductionEnv(env);
   if (missing.length) throw new Error(`missing environment variables: ${missing.join(', ')}`);
+  const guestDailyLimit = guestDailyLimitFromEnv(env.PEEK_GUEST_DAILY_LIMIT);
   const db = createSupabaseClient(env.SUPABASE_URL!, env.SUPABASE_SERVICE_ROLE_KEY!);
   const references = createSupabaseReferenceRepo(db);
   const accountAuth = createSupabaseVerifier(env.SUPABASE_URL!, env.SUPABASE_JWT_SECRET);
@@ -40,6 +41,7 @@ export function createProductionDeps(env: NodeJS.ProcessEnv): Deps & { reference
     trimmer: createFfmpegTrimmer(ffmpegPath(env)),
     references,
     usage: createSupabaseUsageRepo(db),
+    guestDailyLimit,
     // Optional: without them only the CV ingest route / the coach answer 503 not_configured; /health stays ok.
     cvToken: env.CV_SERVICE_TOKEN || undefined,
     coach: missingCoachEnv(env).length ? undefined : createProductionCoach(env, db, references),

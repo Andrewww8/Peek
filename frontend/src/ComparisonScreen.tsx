@@ -196,7 +196,7 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
             {notice ? <Notice>{notice}</Notice> : null}
             {canAnalyze ? (
               <>
-                <Text style={ui.body}>Send this recording for shot analysis. Guest mode has a daily limit.</Text>
+                <Text style={ui.body}>Send this recording for shot analysis.</Text>
                 <Button label={connecting ? 'Connecting…' : 'Analyze as guest'} onPress={() => void analyze()} disabled={connecting} />
               </>
             ) : <Text style={ui.body}>Sign in to open a completed analysis.</Text>}

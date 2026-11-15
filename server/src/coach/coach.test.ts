@@ -201,6 +201,26 @@ describe('coach chat over SSE', () => {
     await app.close();
   });
 
+  test('unlimited guests can send more than five Coach messages while registered limits still apply', async () => {
+    const coach = fakeModel();
+    for (let i = 0; i < 7; i++) coach.respond(new AIMessage('Keep your wrist relaxed.'));
+    const { app, deps } = await coachApp({ coach, dailyLimit: 1 });
+    try {
+      const guest = await signLocalToken(SECRET, B, 3600, true);
+      for (let i = 0; i < 6; i++) {
+        const res = await send(app, `Guest question ${i + 1}`, guest, sessionB);
+        assert.equal(res.statusCode, 200, res.payload);
+        assert.equal(parseSse(res.payload).events.at(-1)?.data.text, 'Keep your wrist relaxed.');
+      }
+      assert.equal(deps.usage.rows().filter(({ userId }) => userId === B).reduce((count, row) => count + row.messages, 0), 6);
+      assert.equal((await send(app, 'Registered question')).statusCode, 200);
+      const limited = await send(app, 'Registered follow-up');
+      assert.deepEqual([limited.statusCode, limited.json().error], [429, 'coach_daily_limit']);
+    } finally {
+      await app.close();
+    }
+  });
+
   test('Coach sees validated on-device estimates when synced form data is unavailable', async () => {
     const coach = fakeModel();
     for (let i = 0; i < 3; i++) coach.respond(toolCall('get_session_overview', {})).respond(new AIMessage('ok'));

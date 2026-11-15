@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { GUEST_DAILY_LIMIT, GUEST_LIMIT_MESSAGE } from './coach/deps.js';
+import { GUEST_LIMIT_MESSAGE } from './coach/deps.js';
 import { coachRoutes } from './coach/routes.js';
 import { recompute, type ShotAnalysis } from './cv/metrics.js';
 import { playbackPoseView, poseView } from './cv/pose-view.js';
@@ -108,7 +108,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     }
   });
   // The onRequest hook has already answered 503 when deps are missing.
-  const { blob, clips, trimmer, usage } = deps ?? ({} as Deps);
+  const { blob, clips, trimmer, usage, guestDailyLimit = null } = deps ?? ({} as Deps);
   const origin = (req: FastifyRequest) => `${req.protocol}://${req.host}`;
   const guestDay = () => (deps?.coach?.today?.() ?? new Date().toISOString().slice(0, 10));
 
@@ -133,7 +133,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     }
     if (req.isGuest) {
       if (!usage) throw new ApiError(503, 'not_configured', 'Guest analysis is unavailable.');
-      if (await usage.count(req.userId, guestDay()) >= GUEST_DAILY_LIMIT) {
+      if (guestDailyLimit !== null && await usage.count(req.userId, guestDay()) >= guestDailyLimit) {
         throw new ApiError(429, 'guest_daily_limit', GUEST_LIMIT_MESSAGE);
       }
     }
@@ -211,7 +211,8 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
           });
         }
         for (const s of toCut.filter((s) => !failed.has(s.shotNumber))) {
-          if (req.isGuest && !(await usage!.consume(userId, guestDay(), GUEST_DAILY_LIMIT)).allowed) {
+          if (req.isGuest && !(await usage!.consume(userId, guestDay(), guestDailyLimit)).allowed) {
+            if (guestDailyLimit === null) throw new ApiError(503, 'usage_unavailable', 'Guest analysis is unavailable right now.');
             failed.set(s.shotNumber, { shotNumber: s.shotNumber, error: 'guest_daily_limit', message: GUEST_LIMIT_MESSAGE, durationMs });
             continue;
           }
@@ -287,7 +288,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     return reply.code(204).send();
   });
 
-  coachRoutes(app, { coach: deps?.coach, clips, sessionParam });
+  coachRoutes(app, { coach: deps?.coach, clips, guestDailyLimit, sessionParam });
 
   app.get<{ Params: { sessionId: string; shotNumber: string }; Querystring: { followThrough?: string } }>('/v1/sessions/:sessionId/shots/:shotNumber/pose', async (req, reply) => {
     const sessionId = sessionParam(req.params.sessionId);

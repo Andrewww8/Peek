@@ -10,6 +10,15 @@ export const GUEST_LIMIT_MESSAGE = `You’ve reached today’s guest limit of ${
 export const COACH_RECURSION_LIMIT = 40;
 export const COACH_MAX_MESSAGE_CHARS = 2000;
 
+export type GuestDailyLimit = typeof GUEST_DAILY_LIMIT | null;
+
+export function guestDailyLimitFromEnv(value: string | undefined): GuestDailyLimit {
+  const configured = value?.trim();
+  if (!configured || configured === 'unlimited') return null;
+  if (configured === String(GUEST_DAILY_LIMIT)) return GUEST_DAILY_LIMIT;
+  throw new Error(`PEEK_GUEST_DAILY_LIMIT must be ${GUEST_DAILY_LIMIT} or unlimited`);
+}
+
 export interface TurnUsage {
   model: string;
   inputTokens: number;
@@ -20,8 +29,8 @@ export interface TurnUsage {
 
 export interface CoachUsageRepo {
   count(userId: string, day: string): Promise<number>;
-  /** Atomically counts one request for (user, day) unless `limit` is already reached. */
-  consume(userId: string, day: string, limit: number): Promise<{ allowed: boolean; count: number }>;
+  /** Atomically counts one request for (user, day). A null limit allows unlimited requests. */
+  consume(userId: string, day: string, limit: number | null): Promise<{ allowed: boolean; count: number }>;
   /** Adds one turn's token usage to (user, day). */
   record(userId: string, day: string, usage: TurnUsage): Promise<void>;
 }

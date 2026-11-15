@@ -25,6 +25,7 @@ export type ShotAnalysisState = {
 const cache = new SQLiteStorage('peek-guest-analysis');
 // Old results may contain a padded second after release rather than a fresh track of the footage.
 const analysisVersion = 2;
+const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
 const states = new Map<string, ShotAnalysisState>();
@@ -92,7 +93,7 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
     const day = new Date().toISOString().slice(0, 10);
     const [lastDay, lastCount] = (cache.getItemSync(usageKey) ?? '').split(':');
     const used = lastDay === day ? Number(lastCount) || 0 : 0;
-    if (isGuest && !saved && used >= dailyLimit) {
+    if (enforceGuestLimit && isGuest && !saved && used >= dailyLimit) {
       throw new Error('You’ve reached the limit of five new guest analyses on this iPhone today. Try again after midnight UTC.');
     }
 
@@ -117,6 +118,7 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       const result = { pose: guestPoseFromVision(frames), releaseMs, version: analysisVersion };
       const state: ShotAnalysisState = { phase: 'complete', progress: 1, result, startedAt, finishedAt: Date.now() };
       const writes: [string, string][] = [[key, JSON.stringify(state)]];
+      // Keep counting during unlimited mode so a rollback uses the same daily history.
       if (isGuest && !saved) writes.push([usageKey, day + ':' + (used + 1)]);
       await cache.multiSet(writes);
       update(key, state);

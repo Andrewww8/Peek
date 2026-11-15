@@ -39,7 +39,7 @@ export function createLocalUsageRepo(file?: string): CoachUsageRepo & { rows(): 
     },
     async consume(userId, day, limit) {
       const r = row(userId, day);
-      if (r.messages >= limit) return { allowed: false, count: r.messages };
+      if (limit !== null && r.messages >= limit) return { allowed: false, count: r.messages };
       r.messages++;
       store.save();
       return { allowed: true, count: r.messages };

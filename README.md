@@ -36,7 +36,16 @@ The Expo variables are bundled into the app. Supabase secret keys, service-role 
 
 For password recovery, add `perspective://reset-password` to Supabase's additional redirect URLs. Open the reset email on the same iPhone that requested it. [Supabase native deep linking](https://supabase.com/docs/guides/auth/native-mobile-deep-linking)
 
-Guest comparisons run directly on the iPhone for up to five new shot analyses per UTC day. Reopening a saved analysis and changing the NBA player are unlimited. Guests can start Coach from the app, and Coach can use measurements from an attached clip’s iPhone analysis. Peek stores a device guest session in Keychain and issues an API-only access token through `POST /v1/guest-session`. This route uses `POSTGRES_URL` and the server’s Supabase service key. The cloud guest allowance is five requests per UTC day across Coach messages and new cloud shot analyses. To preserve guest identities when rotating the Supabase service-role key, set `PEEK_GUEST_SECRET` to the current derivation key before rotation and keep it stable across deployments.
+Guests can analyze shots on the iPhone, use cloud analysis, and chat with Coach without a daily usage cap by default. Coach can use measurements from an attached clip’s on-device analysis. Peek stores a device guest session in Keychain and issues an API-only access token through `POST /v1/guest-session`. This route uses `POSTGRES_URL` and the server’s Supabase service key. To preserve guest identities when rotating the Supabase service-role key, set `PEEK_GUEST_SECRET` to the current derivation key before rotation and keep it stable across deployments.
+
+### Switch guest usage modes
+
+| Mode | Vercel environment | `frontend/.env.local` |
+| --- | --- | --- |
+| Unlimited | Leave `PEEK_GUEST_DAILY_LIMIT` unset or set it to `unlimited`. | Leave `EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT` unset or set it to `unlimited`. |
+| Five per UTC day | Set `PEEK_GUEST_DAILY_LIMIT=5`. | Set `EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT=5`. |
+
+After changing modes, redeploy the Vercel API and rebuild and install the iPhone app. The cloud setting shares five uses across Coach messages and new cloud shot analyses. The iPhone setting allows five new on-device analyses separately. Existing comparisons and chats remain available in both modes, and usage already counted that UTC day carries over. The guest session endpoint also has its own request limits for issuing access tokens.
 
 Rebuild the iOS app after changing build-time values. If upgrading an existing local native project, run `npx expo prebuild --platform ios` from `frontend` to update its native modules and permissions.
 

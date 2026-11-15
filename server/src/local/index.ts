@@ -13,7 +13,7 @@ import { SUPABASE_AUDIENCE, createJwtVerifier } from '../jwt.js';
 import { createLocalBlobStore, type LocalBlobStore } from './blobStore.js';
 import { createLocalClipRepo } from './clipRepo.js';
 import { MemorySaver } from '@langchain/langgraph';
-import { COACH_DAILY_LIMIT, COACH_MODEL, COACH_RECURSION_LIMIT, type CoachDeps } from '../coach/deps.js';
+import { COACH_DAILY_LIMIT, COACH_MODEL, COACH_RECURSION_LIMIT, type CoachDeps, type GuestDailyLimit } from '../coach/deps.js';
 import { createLocalReferenceRepo, createLocalUsageRepo } from './coachRepos.js';
 
 export const LOCAL_ISSUER = 'perspective-local';
@@ -34,6 +34,7 @@ export interface LocalDepsOptions {
    */
   coachModel?: CoachDeps['createModel'];
   coachDailyLimit?: number;
+  guestDailyLimit?: GuestDailyLimit;
   coachRecursionLimit?: number;
   coachKeepAliveMs?: number;
   /** Fixed "today" for the daily cap (tests). */
@@ -71,6 +72,7 @@ export function createLocalDeps(dir: string, opts: LocalDepsOptions): LocalDeps 
     references,
     usage,
     coach,
+    guestDailyLimit: opts.guestDailyLimit,
     cvToken: opts.cvToken ?? LOCAL_CV_TOKEN,
     blob,
     clips: createLocalClipRepo(opts.inMemory ? undefined : join(dir, 'shot_clips.json')),

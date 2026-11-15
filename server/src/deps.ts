@@ -128,6 +128,8 @@ export interface Deps {
   coach?: import('./coach/deps.js').CoachDeps;
   /** Durable daily usage for guest shot analyses, even when Coach is unavailable. */
   usage?: import('./coach/deps.js').CoachUsageRepo;
+  /** Shared guest quota for analyses and Coach messages. Defaults to unlimited. */
+  guestDailyLimit?: import('./coach/deps.js').GuestDailyLimit;
   /** Extra routes a dependency needs (the local blob store's presigned PUT/GET endpoint). */
   routes?: (app: import('fastify').FastifyInstance) => Promise<void>;
 }

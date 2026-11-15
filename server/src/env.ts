@@ -8,6 +8,7 @@ import { buildApp } from './app.js';
 import { createLocalDeps } from './local/index.js';
 import { createProductionDeps } from './prod/index.js';
 import { anthropicModelFactory } from './coach/agent.js';
+import { guestDailyLimitFromEnv } from './coach/deps.js';
 
 export const SERVER_ROOT = join(import.meta.dirname, '..');
 export const DEFAULT_LOCAL_JWT_SECRET = 'perspective-local-dev-secret';
@@ -22,6 +23,7 @@ export function localDepsFromEnv(env: NodeJS.ProcessEnv) {
     jwtSecret: env.LOCAL_JWT_SECRET || DEFAULT_LOCAL_JWT_SECRET,
     cvToken: env.CV_SERVICE_TOKEN || undefined,
     coachModel: env.ANTHROPIC_API_KEY ? anthropicModelFactory(env.ANTHROPIC_API_KEY) : undefined,
+    guestDailyLimit: guestDailyLimitFromEnv(env.PEEK_GUEST_DAILY_LIMIT),
   });
 }
 

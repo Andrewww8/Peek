@@ -15,7 +15,7 @@ import { AIMessage, HumanMessage, isAIMessage, isHumanMessage, type BaseMessage 
 import { ApiError } from '../clips.js';
 import type { ClipRepo } from '../deps.js';
 import { createCoachAgent, skillFiles, type CoachAgent } from './agent.js';
-import { COACH_MAX_MESSAGE_CHARS, GUEST_DAILY_LIMIT, GUEST_LIMIT_MESSAGE, type CoachDeps, type TurnUsage } from './deps.js';
+import { COACH_MAX_MESSAGE_CHARS, GUEST_LIMIT_MESSAGE, type CoachDeps, type GuestDailyLimit, type TurnUsage } from './deps.js';
 import { onDeviceShotSchema, toolStatus } from './tools.js';
 
 const threadId = (userId: string, sessionId: string) => `${userId}:${sessionId}`;
@@ -34,8 +34,8 @@ const createdAtOf = (m: BaseMessage) => {
   return typeof v === 'string' ? v : null;
 };
 
-export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; clips: ClipRepo; sessionParam: (v: unknown) => string }) {
-  const { coach, clips, sessionParam } = opts;
+export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; clips: ClipRepo; guestDailyLimit: GuestDailyLimit; sessionParam: (v: unknown) => string }) {
+  const { coach, clips, guestDailyLimit, sessionParam } = opts;
   let agent: CoachAgent | null = null;
   const getAgent = () => (agent ??= createCoachAgent(coach!, clips));
   const need = () => {
@@ -55,9 +55,13 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
     if (!localShot.success) throw new ApiError(400, 'invalid_request', 'onDeviceShot must contain a valid release and shot measurements');
     const userId = req.userId;
     const day = (c.today ?? utcDay)();
-    const limit = req.isGuest ? Math.min(c.dailyLimit, GUEST_DAILY_LIMIT) : c.dailyLimit;
+    let limit: number | null = c.dailyLimit;
+    if (req.isGuest) {
+      limit = guestDailyLimit === null ? null : Math.min(c.dailyLimit, guestDailyLimit);
+    }
     const quota = await c.usage.consume(userId, day, limit);
     if (!quota.allowed) {
+      if (limit === null) throw new ApiError(503, 'usage_unavailable', 'Guest Coach is unavailable right now.');
       if (req.isGuest) throw new ApiError(429, 'guest_daily_limit', GUEST_LIMIT_MESSAGE);
       throw new ApiError(429, 'coach_daily_limit', `the coach answers up to ${limit} messages a day`);
     }
