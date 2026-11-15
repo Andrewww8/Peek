@@ -986,7 +986,12 @@ def rig_skeleton(pose, ext, rise, hand, height):
 
     def calm(x, w):                                                       # light everywhere, heavier at the ends where filters and averages are least reliable
         a = glide(x, 1.2); b = glide(x, 3.0); w = w.reshape((-1,) + (1,) * (x.ndim - 1)); return a * (1 - w) + b * w
-    P[v0:v1 + 1] = calm(P[v0:v1 + 1], edge); rise[v0:v1 + 1] = calm(rise[v0:v1 + 1], edge)
+    def despike(x):                                                       # no point moves in one frame much further than it ever normally does in this clip
+        x = x.copy(); step = np.linalg.norm(np.diff(x, axis=0), axis=-1); cap = 1.5 * np.percentile(step, 90, axis=0) + 1e-4
+        for i in range(1, len(x)):
+            dlt = x[i] - x[i - 1]; n = np.linalg.norm(dlt, axis=-1); k = np.minimum(1.0, cap / np.maximum(n, 1e-12)); x[i] = x[i - 1] + dlt * k[..., None]
+        return x
+    P[v0:v1 + 1] = calm(despike(P[v0:v1 + 1]), edge); rise[v0:v1 + 1] = calm(rise[v0:v1 + 1], edge)
     if eok.sum() > 4: E[eok] = calm(E[eok], edge[eok[v0:v1 + 1]] if eok[v0:v1 + 1].sum() == eok.sum() else np.zeros(int(eok.sum())))
     out = _rig_solve(P, E, eok, rise, hand, 1.8, v0, v1)
     return _rig_solve(P, E, eok, rise, hand, 1.8 * height / out["stand"], v0, v1)
