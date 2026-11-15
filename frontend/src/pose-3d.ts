@@ -22,6 +22,37 @@ export const bones = [
   [13, 21], [16, 22], [21, 17], [22, 18], [21, 19], [22, 20],
 ] as const;
 
+export function shotMotionWindow(pose: Pose): [first: number, last: number] {
+  const sameFrame = (a: number, b: number) => {
+    if ((pose.pelvisRise?.[a] ?? 0) !== (pose.pelvisRise?.[b] ?? 0)) return false;
+    for (let coordinate = 0; coordinate < coordinatesPerFrame; coordinate++) {
+      if (pose.joints[a * coordinatesPerFrame + coordinate] !== pose.joints[b * coordinatesPerFrame + coordinate]) return false;
+    }
+    for (let coordinate = 0; coordinate < fingerCount * 3; coordinate++) {
+      if (pose.fingers?.[a * fingerCount * 3 + coordinate] !== pose.fingers?.[b * fingerCount * 3 + coordinate]) return false;
+    }
+    return true;
+  };
+  let first = 0;
+  let last = pose.frameCount - 1;
+  // Repeated end poses fill parts of the reference timeline for which the clip has no detections.
+  while (first < pose.releaseIndex && sameFrame(first, first + 1)) first++;
+  while (last > pose.releaseIndex && sameFrame(last - 1, last)) last--;
+  return [first, last];
+}
+
+export function slicePose(pose: Pose, first: number, last: number): Pose {
+  if (first === 0 && last === pose.frameCount - 1) return pose;
+  return {
+    ...pose,
+    frameCount: last - first + 1,
+    releaseIndex: pose.releaseIndex - first,
+    joints: pose.joints.slice(first * coordinatesPerFrame, (last + 1) * coordinatesPerFrame),
+    fingers: pose.fingers?.slice(first * fingerCount * 3, (last + 1) * fingerCount * 3),
+    pelvisRise: pose.pelvisRise?.slice(first, last + 1) ?? null,
+  };
+}
+
 type Vector = [number, number, number];
 type Rotation = [number, number, number, number];
 

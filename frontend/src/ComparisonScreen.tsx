@@ -11,7 +11,7 @@ import { accessToken } from './auth';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { analyzeGuestShot, hasOnDeviceAnalysis, readGuestPose } from './guest-pose';
-import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount } from './pose-3d';
+import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow, slicePose } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime, sessionTime } from './practice';
 import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Sheet, Title, ui } from './ui';
@@ -258,12 +258,15 @@ export function ComparisonExample({ backLabel, onBack, onChooseShot }: Navigatio
   );
 }
 
-function PoseComparison({ playerPose, playerLabel, sample }: {
+function PoseComparison({ playerPose: fullPose, playerLabel, sample }: {
   playerPose: Pose; playerLabel: string; sample?: Reference;
 }) {
   const [reference, setReference] = useState(preferred);
+  const [firstFrame, lastFrame] = useMemo(() => sample ? [0, fullPose.frameCount - 1] : shotMotionWindow(fullPose), [fullPose, sample]);
+  const playerPose = useMemo(() => slicePose(fullPose, firstFrame, lastFrame), [fullPose, firstFrame, lastFrame]);
+  const referencePose = useMemo(() => slicePose(reference.pose, firstFrame, lastFrame), [reference, firstFrame, lastFrame]);
   const [frame, setFrame] = useState(0);
-  const [playing, setPlaying] = useState(false);
+  const [playing, setPlaying] = useState(!sample && playerPose.frameCount > 1);
   const [angle, setAngle] = useState(0.55);
   const [openingAR, setOpeningAR] = useState(false);
   const [arNotice, setArNotice] = useState<string>();
@@ -322,7 +325,7 @@ function PoseComparison({ playerPose, playerLabel, sample }: {
       const atlas = await Asset.fromModule(nameAtlasImage).downloadAsync();
       if (!atlas.localUri) throw new Error('The label artwork could not be opened.');
       const png = await new File(atlas.localUri).bytes();
-      const bytes = comparisonUsdz(playerPose, reference.pose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
+      const bytes = comparisonUsdz(playerPose, referencePose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
       const cache = new Directory(Paths.cache, 'peek-ar');
       cache.create({ idempotent: true, intermediates: true });
       asset = new File(cache, 'Peek Comparison ' + randomUUID() + '.usdz');
@@ -353,14 +356,16 @@ function PoseComparison({ playerPose, playerLabel, sample }: {
         <PosePanel label={playerLabel} detail={sample ? averageLabel(sample) : handLabel(playerPose)}
           pose={playerPose} frame={frame} angle={angle} tint={colors.white} />
         <PosePanel label={reference.player} detail={averageLabel(reference)}
-          pose={reference.pose} frame={frame} angle={angle} tint="#ffca0a" />
+          pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
       <View style={styles.stageActions}>
         <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR} style={styles.action} />
         <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
       </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
-      <Panel style={styles.playback}>
+      {playerPose.frameCount === 1 ? (
+        <Notice>Only a still pose was tracked near this tag. Tag the ball release in a clip with the shooter in view to see motion.</Notice>
+      ) : <Panel style={styles.playback}>
         <View style={ui.row}>
           <Chip label={playing ? 'Pause' : 'Play at 0.5×'} onPress={() => setPlaying((value) => !value)} />
           <Text accessibilityLiveRegion={playing ? 'none' : 'polite'} style={ui.label}>
@@ -376,7 +381,7 @@ function PoseComparison({ playerPose, playerLabel, sample }: {
           <Chip label="Side view" selected={Math.abs(angle - Math.PI / 2) < 0.03} onPress={() => changeAngle(Math.PI / 2)} />
           <Text style={ui.body}>Drag to rotate</Text>
         </View>
-      </Panel>
+      </Panel>}
       <Panel>
         <Text accessibilityRole="header" style={ui.title}>Shooting form</Text>
         <View style={styles.metricsRow}>

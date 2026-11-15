@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { guestPoseFromVision, type VisionFrame } from '../src/guest-pose-motion.ts';
-import { posePoint } from '../src/pose-3d.ts';
+import { posePoint, shotMotionWindow, slicePose } from '../src/pose-3d.ts';
 
 const body = [
   [0, 1, -3],
@@ -28,6 +28,11 @@ test('guest motion follows the selected recording and stays aligned to the relea
   assert.notDeepEqual(posePoint(high, 24, 16), posePoint(high, 28, 16));
   assert.deepEqual(posePoint(high, 24, 13), posePoint(low, 24, 13));
   assert.equal(high.shootingHand, 'right');
+  const [first, last] = shotMotionWindow(high);
+  assert.deepEqual([first, last], [18, 30]);
+  const playback = slicePose(high, first, last);
+  assert.equal(playback.releaseIndex, 6);
+  assert.notDeepEqual(posePoint(playback, 0, 16), posePoint(playback, 1, 16));
 });
 
 test('guest analysis rejects footage without a pose instead of providing sample motion', () => {
