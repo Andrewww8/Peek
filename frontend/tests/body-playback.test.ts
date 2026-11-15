@@ -68,15 +68,17 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
   function point(frame: number, joint: number, value: [number, number, number]) {
     source.fingers!.splice((frame * fingerCount + joint - jointCount) * 3, 3, ...value);
   }
-  for (const frame of [12, 13, 15, 31]) {
+  for (const frame of [12, 13, 15, 26, 27, 30, 31]) {
     const wrist = posePoint(source, frame, 13)!;
     point(frame, 21, [wrist[0], wrist[1] - 0.05, wrist[2]]);
     point(frame, 17, [wrist[0], wrist[1] - 0.10, wrist[2]]);
     point(frame, 19, [wrist[0] + 0.01, wrist[1] - 0.10, wrist[2]]);
   }
   source.joints.fill(null, 14 * coordinatesPerFrame, 15 * coordinatesPerFrame);
-  const missingWrist = 16 * coordinatesPerFrame + 13 * 3;
-  source.joints.fill(null, missingWrist, missingWrist + 3);
+  for (let frame = 16; frame < 20; frame++) {
+    const missingWrist = frame * coordinatesPerFrame + 13 * 3;
+    source.joints.fill(null, missingWrist, missingWrist + 3);
+  }
   const playback = comparisonPlayback(source, 3);
   const display = stabilizedShotPlayback(source, 3);
   assert.ok(posePoint(display, 14 - 3, 13), 'the body can bridge its measurement gap');
@@ -94,40 +96,41 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
   const next = visiblePosePoint(comparisonPlayback(display), 32 - 3, 17);
   assert.equal(next, null, 'AR resampling must not resurrect a stale hand');
   const usd = new TextDecoder().decode(comparisonUsdz(display, display));
+  assert.match(usd, /timeCodesPerSecond = 60/);
   const primTrack = (definition: string) => usd.split('def ' + definition)[1]?.split(/\ndef (?:Sphere|Cylinder|Xform) /)[0] ?? '';
+  const samples = (definition: string, op: string) => {
+    const values = primTrack(definition).split(`xformOp:${op}.timeSamples = {\n`)[1]?.split('}')[0];
+    assert.ok(values, `${definition} has ${op} samples`);
+    return new Map(Array.from(values.matchAll(/^([\d.]+): (\([^\n]+\))/gm), ([, time, value]) => [Number(time), value]));
+  };
   for (const definition of ['Sphere "Finger_0"', 'Cylinder "Bone_21_17"']) {
     const track = primTrack(definition);
     // Quick Look versions that ignore the visibility track still see a near-zero scale.
-    assert.match(track, /float3 xformOp:scale.timeSamples = \{[^}]*29: \(0\.00010, 0\.00010, 0\.00010\)/);
+    assert.match(track, /float3 xformOp:scale.timeSamples = \{[^}]*116: \(0\.00010, 0\.00010, 0\.00010\)/);
   }
-  for (const [definition, gap] of [
-    ['Sphere "Finger_0"', 11], ['Cylinder "Bone_21_17"', 11],
-    ['Sphere "Joint_13"', 13], ['Cylinder "Bone_12_13"', 13],
+  for (const [definition, before, after] of [
+    ['Sphere "Finger_0"', (15 - 3) * 4, (26 - 3) * 4], ['Cylinder "Bone_21_17"', (15 - 3) * 4, (26 - 3) * 4],
+    ['Sphere "Joint_13"', (15 - 3) * 4, (20 - 3) * 4], ['Cylinder "Bone_12_13"', (15 - 3) * 4, (20 - 3) * 4],
   ] as const) {
-    const track = primTrack(definition);
-    const samples = (op: string) => {
-      const values = track.split(`xformOp:${op}.timeSamples = {\n`)[1]?.split('}')[0];
-      assert.ok(values, `${definition} has ${op} samples`);
-      return new Map(Array.from(values.matchAll(/^([\d.]+): (\([^\n]+\))/gm), ([, time, value]) => [Number(time), value]));
-    };
-    const scale = samples('scale');
+    const scale = samples(definition, 'scale');
     const hidden = '(0.00010, 0.00010, 0.00010)';
-    assert.ok(scale.get(gap - 1));
-    assert.ok(scale.get(gap + 1));
-    assert.notEqual(scale.get(gap - 1), hidden);
-    assert.equal(scale.get(gap - 0.1), scale.get(gap - 1));
-    assert.equal(scale.get(gap - 0.05), hidden);
-    assert.equal(scale.get(gap), hidden);
-    assert.equal(scale.get(gap + 0.95), hidden);
-    assert.notEqual(scale.get(gap + 1), hidden);
+    assert.ok(scale.get(before) && scale.get(after));
+    assert.notEqual(scale.get(before), hidden);
+    assert.notEqual(scale.get(after), hidden);
+    assert.equal(scale.get(before + 1), hidden);
+    assert.equal(scale.get(after - 1), hidden);
     for (const op of definition.startsWith('Cylinder') ? ['translate', 'orient'] : ['translate']) {
-      const pose = samples(op);
-      assert.equal(pose.get(gap - 0.1), pose.get(gap - 1));
-      assert.equal(pose.get(gap - 0.05), pose.get(gap - 1));
-      assert.equal(pose.get(gap), pose.get(gap - 1));
-      assert.equal(pose.get(gap + 0.95), pose.get(gap + 1));
+      const pose = samples(definition, op);
+      assert.equal(pose.get(before + 1), pose.get(before));
+      assert.equal(pose.get(after - 1), pose.get(after));
     }
   }
+  const coordinate = (definition: string, time: number) => samples(definition, 'translate').get(time)?.slice(1, -1).split(',').map(Number);
+  const tick = (30 - 3) * 4 + 2;
+  const arTip = coordinate('Sphere "Finger_0"', tick), knuckle = coordinate('Sphere "Finger_4"', tick);
+  const center = coordinate('Cylinder "Bone_21_17"', tick);
+  assert.ok(arTip && knuckle && center);
+  assert.ok(center.every((value, axis) => Math.abs(value - (arTip[axis]! + knuckle[axis]!) / 2) < 2e-5));
 });
 
 test('retains measured legacy fingers and exports only valid hand connections in AR', () => {

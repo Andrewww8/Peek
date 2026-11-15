@@ -1,4 +1,5 @@
 import { buildUsdz } from '../../mobile/src/core/usdz.ts';
+import { stabilizeARHands } from './ar-hand-motion.ts';
 import { jumpClearance, type JumpSample } from './shot-grounding.ts';
 
 export type PoseSample = number | null;
@@ -250,15 +251,17 @@ function keyedTrack(type: string, op: string, keys: readonly (readonly [number, 
     + '\n' + type + ' xformOp:' + op + '.timeSamples = {\n' + samples + '\n}';
 }
 
-function track(type: string, op: string, frames: readonly (readonly number[] | null)[], fallback: readonly number[]) {
+const arSubframes = 4;
+
+function track(type: string, op: string, frames: readonly (readonly number[] | null)[], fallback: readonly number[], stride: number) {
   const initial = frames.find((value) => value !== null) ?? fallback;
-  return keyedTrack(type, op, frames.map((value, index) => [index, value ?? initial]), initial);
+  return keyedTrack(type, op, frames.map((value, index) => [index * stride, value ?? initial]), initial);
 }
 
-function visibility(frames: readonly (unknown | null)[]) {
+function visibility(frames: readonly (unknown | null)[], stride: number) {
   if (!frames.includes(null)) return '';
   return 'token visibility.timeSamples = {\n' + frames.map((value, frame) =>
-    String(frame) + ': "' + (value === null ? 'invisible' : 'inherited') + '"').join(',\n') + '\n}';
+    String(frame * stride) + ': "' + (value === null ? 'invisible' : 'inherited') + '"').join(',\n') + '\n}';
 }
 
 type HandTransform = { center: Vector; scale: Vector; rotation?: Rotation };
@@ -269,16 +272,14 @@ function sparseHandTracks(frames: readonly (HandTransform | null)[], rotate: boo
   const hidden = (pose: HandTransform): HandTransform => ({ ...pose, scale: [0.0001, 0.0001, 0.0001] });
   const keys: [number, HandTransform][] = [];
   for (const [time, frame] of frames.entries()) {
-    const previous = frames[time - 1];
     if (frame) {
-      if (time > 0 && !previous) keys.push([time - 0.05, hidden(frame)]);
       last = frame;
       keys.push([time, frame]);
     } else {
-      // USD interpolates transforms between keys. Shrink at the last observed
-      // location and move to the next observation only while too small to see.
-      if (previous) keys.push([time - 0.1, previous], [time - 0.05, hidden(previous)]);
-      keys.push([time, hidden(last)]);
+      // Move during an invisible interval. The first hidden sample stays at the
+      // old location and the last hidden sample uses the upcoming location.
+      const next = frames[time + 1];
+      keys.push([time, hidden(next && !frames[time - 1] ? next : last)]);
     }
   }
   const initial = keys[0]![1];
@@ -287,8 +288,25 @@ function sparseHandTracks(frames: readonly (HandTransform | null)[], rotate: boo
     keyedTrack('double3', 'translate', keys.map(([time, value]) => [time, value.center]), initial.center),
     ...(rotate ? [keyedTrack('quatf', 'orient', keys.map(([time, value]) => [time, rotation(value)]), rotation(initial))] : []),
     keyedTrack('float3', 'scale', keys.map(([time, value]) => [time, value.scale]), initial.scale),
-    visibility(frames),
+    visibility(frames, 1),
   ];
+}
+
+function refineHandFrames(frames: (Vector | null)[][]): (Vector | null)[][] {
+  // Derive dots and links from the same positions at each Quick Look playback tick.
+  return Array.from({ length: (frames.length - 1) * arSubframes + 1 }, (_, tick) => {
+    const frame = Math.floor(tick / arSubframes);
+    const pose = frames[frame]!;
+    const fraction = (tick % arSubframes) / arSubframes;
+    if (!fraction) return pose;
+    const next = frames[frame + 1]!;
+    return pose.map((point, joint): Vector | null => {
+      const end = next[joint];
+      if (!point || !end) return null;
+      return [point[0] + (end[0] - point[0]) * fraction,
+        point[1] + (end[1] - point[1]) * fraction, point[2] + (end[2] - point[2]) * fraction];
+    });
+  });
 }
 
 function actor(id: string, pose: Pose, offset: number, tint: Vector) {
@@ -296,24 +314,29 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
   const frames = Array.from({ length: pose.frameCount }, (_, frame) =>
     Array.from({ length: posePointCount }, (_, joint) => anchor(pose, frame, joint, ground, offset)),
   );
+  const handFrames = refineHandFrames(frames);
   const color = 'color3f[] primvars:displayColor = [' + tuple(tint) + ']';
   const parts = ['def Xform "' + id + '" {'];
   for (let joint = 0; joint < posePointCount; joint++) {
-    const positions = frames.map((sample) => sample[joint] ?? null);
-    if (!positions.some(Boolean)) continue;
     const finger = joint >= jointCount;
-    const sparse = (finger || joint === 13 || joint === 16) && positions.includes(null);
+    const animatedHand = finger || joint === 13 || joint === 16;
+    const stride = animatedHand ? 1 : arSubframes;
+    const positions = (animatedHand ? handFrames : frames).map((sample) => sample[joint] ?? null);
+    if (!positions.some(Boolean)) continue;
+    const sparse = animatedHand && positions.includes(null);
     const radius = finger ? joint < jointCount + 4 ? 0.011 : 0.007 : joint === 10 ? 0.056 : joint === 13 || joint === 16 ? 0.023 : 0.027;
     parts.push('def Sphere "' + (finger ? 'Finger_' + String(joint - jointCount) : 'Joint_' + String(joint)) + '" {',
       'double radius = ' + radius, color,
       ...(sparse
         ? sparseHandTracks(positions.map((center) => center ? { center, scale: [1, 1, 1] } : null), false)
-        : [track('double3', 'translate', positions, [offset, 0, 0]), visibility(positions)]),
+        : [track('double3', 'translate', positions, [offset, 0, 0], stride), visibility(positions, stride)]),
       'uniform token[] xformOpOrder = ["xformOp:translate"' + (sparse ? ', "xformOp:scale"' : '') + ']', '}');
   }
   for (const [from, to] of bones) {
+    const animatedHand = to >= jointCount || to === 13 || to === 16;
+    const stride = animatedHand ? 1 : arSubframes;
     let previous: Rotation | undefined;
-    const data = frames.map((sample): HandTransform | null => {
+    const data = (animatedHand ? handFrames : frames).map((sample): HandTransform | null => {
       const a = sample[from], b = sample[to];
       if (!a || !b) return null;
       const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
@@ -327,13 +350,13 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
       return { center: midpoint(a, b), rotation, scale: [1, length / 2, 1] };
     });
     if (!data.some(Boolean)) continue;
-    const sparse = (to >= jointCount || to === 13 || to === 16) && data.includes(null);
+    const sparse = animatedHand && data.includes(null);
     parts.push('def Cylinder "Bone_' + String(from) + '_' + String(to) + '" {',
       'uniform token axis = "Y"', 'double radius = ' + (to >= jointCount ? '0.0055' : '0.016'), 'double height = 2', color,
       ...(sparse ? sparseHandTracks(data, true) : [
-        track('double3', 'translate', data.map((item) => item?.center ?? null), [offset, 0, 0]),
-        track('quatf', 'orient', data.map((item) => item?.rotation ?? null), [1, 0, 0, 0]),
-        track('float3', 'scale', data.map((item) => item?.scale ?? null), [1, 0, 1]), visibility(data),
+        track('double3', 'translate', data.map((item) => item?.center ?? null), [offset, 0, 0], stride),
+        track('quatf', 'orient', data.map((item) => item?.rotation ?? null), [1, 0, 0, 0], stride),
+        track('float3', 'scale', data.map((item) => item?.scale ?? null), [1, 0, 1], stride), visibility(data, stride),
       ]),
       'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]', '}');
   }
@@ -407,15 +430,15 @@ export function comparisonUsdz(player: Pose, reference: Pose, labels?: Compariso
   if (player.fps !== reference.fps || player.releaseIndex !== reference.releaseIndex) {
     throw new Error('The two shots must use the same release timeline.');
   }
-  const playerPlayback = comparisonPlayback(player);
+  const playerPlayback = stabilizeARHands(comparisonPlayback(player), handJoints);
   const referencePlayback = comparisonPlayback(reference);
-  const fps = String(player.fps / 2);
+  const fps = String(player.fps * arSubframes / 2);
   const white: Vector = [1, 1, 1];
   const yellow: Vector = [1, 0.79, 0.04];
   const text = [
     '#usda 1.0', '(',
     'defaultPrim = "PeekComparison"', 'metersPerUnit = 1', 'upAxis = "Y"',
-    'startTimeCode = 0', 'endTimeCode = ' + String(playerPlayback.frameCount - 1),
+    'startTimeCode = 0', 'endTimeCode = ' + String((playerPlayback.frameCount - 1) * arSubframes),
     'timeCodesPerSecond = ' + fps, 'framesPerSecond = ' + fps, ')',
     'def Xform "PeekComparison" ( kind = "component" ) {',
     actor('Player', playerPlayback, -0.63, white),

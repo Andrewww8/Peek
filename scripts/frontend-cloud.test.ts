@@ -215,7 +215,8 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   const labels = { atlas, png, player: 'Player One', reference: curry.player };
   const ar = unzipSync(comparisonUsdz(playerPose, curry.pose, labels));
   const scene = new TextDecoder().decode(ar['PeekComparison.usda']);
-  assert.match(scene, /endTimeCode = 54/);
+  assert.match(scene, /endTimeCode = 216/);
+  assert.match(scene, /timeCodesPerSecond = 60/);
   assert.match(scene, /def Xform "Player"[\s\S]+primvars:displayColor = \[\(1\.00000, 1\.00000, 1\.00000\)\]/);
   assert.match(scene, /def Xform "NBAReference"[\s\S]+primvars:displayColor = \[\(1\.00000, 0\.79000, 0\.04000\)\]/);
   assert.match(scene, /xformOp:orient\.timeSamples/);
