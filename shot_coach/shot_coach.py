@@ -25,15 +25,13 @@ OUTPUTS (all in outputs/)
         units: body heights, pelvis-relative, x right, y down, z away from the camera
   <video>_similar_<type>.txt / .json        the printed report and the same result as data
   <video>_difference_<type>_<player>.txt / .json / .csv     report, data, and the full table of measures
-  ..._similar_<type>.html / ..._difference_<type>_<player>.html     3D viewer: your skeleton (grey) over the player's average shot (orange);
-                                            similar = the closest player, difference = the player you chose
-  the same name with .glb                   the same two skeletons as an animated 3D file (glTF binary, 46 keys at 30 fps, release at 1.0 s)
+  ..._similar_<type>.glb / ..._difference_<type>_<player>.glb       animated 3D file: your skeleton (grey) over the player's average shot (orange),
+                                            46 keys at 30 fps, release at 1.0 s; similar = the closest player, difference = the player you chose
   <video>.mp4                               only with --clip
 
 REQUIREMENTS (all next to this script)
   nba_reference.json          the NBA players' measures, measure names, descriptions, cues and average shots
-  assets/skeleton.glb         the skeleton model drawn by the 3D viewer (the viewer page loads three.js from a CDN, so it needs internet)
-  assets/skeleton_plain.glb   the same model uncompressed, used to write the .glb files
+  assets/skeleton.glb         the skeleton model used to write the .glb files
   third_party/PoseMamba/      the PoseMamba model code (Apache-2.0)
   sscan.c                     selective-scan kernel; compiled to libsscan.dylib on first run (needs the Xcode command line tools)
   weights/PoseMamba_L.bin     3D lifting model weights; downloaded on first run (114 MB, from Hugging Face)
@@ -47,7 +45,6 @@ PIPELINE (video input, about 5 s after the first run)
   fingertips/toes -> release point (fingertip peak) -> quality score -> 34 measures -> comparison
 """
 import argparse
-import base64
 import contextlib
 import csv
 import ctypes
@@ -79,7 +76,7 @@ PRE, POST, NT = 1.0, 0.5, 46                       # shot window: seconds before
 EXT_THREADS = 3                                        # fingertip/toe frames processed at once
 FRAME_BUDGET = 1.6e9                               # bytes of decoded frames kept in memory (longer videos are re-read instead)
 PLAYER_HEIGHT_CM = {"Stephen Curry": 188, "Damian Lillard": 188, "Kyrie Irving": 188, "Ray Allen": 196, "Anthony Edwards": 193, "Luke Kennard": 196,
-                    "Luka Doncic": 198, "Donte DiVincenzo": 193, "LaMelo Ball": 201, "Shai Gilgeous-Alexander": 198}      # listed heights; the 3D viewer draws both skeletons at the player's height
+                    "Luka Doncic": 198, "Donte DiVincenzo": 193, "LaMelo Ball": 201, "Shai Gilgeous-Alexander": 198}      # listed heights; the .glb draws both skeletons at the player's height
 ALIAS = {"sga": "Shai Gilgeous-Alexander", "steph": "Stephen Curry", "ant": "Anthony Edwards", "dame": "Damian Lillard", "luka": "Luka Doncic", "melo": "LaMelo Ball"}
 from concurrent.futures import ThreadPoolExecutor
 
@@ -963,7 +960,7 @@ def lift(video, out_dir, hand=None, clip=False):
                  f"camera {camera}{' (corrected)' if comp else ''}, {nsw} swapped frames fixed, shooter {hgt:.0f} px tall, {len(rels)} shot(s) found")
 
 
-# ===================================================================== skeleton rig (shared by the 3D viewer page and the .glb file)
+# ===================================================================== skeleton rig for the .glb file
 RIG_SEGMENTS = ["pelvis", "torso", "head", "l_uarm", "r_uarm", "l_larm", "r_larm", "l_hand", "r_hand", "l_thigh", "r_thigh", "l_shank", "r_shank", "l_foot", "r_foot"]
 # where the bones of the skeleton model join, in the model's own units (metres): hip and shoulder sockets, top of the sacrum, neck, sole of the foot
 RIG = dict(hipX=0.085, shX=0.17, shY=0.0, shZ=-0.04, sacrum=0.07, neck=0.147, sole=0.075, torso=0.361, head=0.102, uarm=0.313, larm=0.254, thigh=0.438, shank=0.488)
@@ -1086,7 +1083,7 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
 
 def write_glb(path, skeletons, fps=30.0):
     """Animated 3D file: each (name, rig, rgba) in `skeletons` becomes a group of 15 bone meshes with one position + rotation key per frame. glTF is y-up, so the root turns z-up into y-up."""
-    with open(os.path.join(ROOT, "assets", "skeleton_plain.glb"), "rb") as fh:
+    with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
         raw = fh.read()
     jl = struct.unpack_from("<I", raw, 12)[0]; src = json.loads(raw[20:20 + jl]); binc = raw[20 + jl + 8:]
     DT = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}; NC = dict(SCALAR=1, VEC2=2, VEC3=3, VEC4=4)
@@ -1133,75 +1130,7 @@ def write_glb(path, skeletons, fps=30.0):
         fh.write(struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(js) + 8 + len(blob)) + struct.pack("<I4s", len(js), b"JSON") + js + struct.pack("<I4s", len(blob), b"BIN\x00") + bytes(blob))
 
 
-# ===================================================================== 3D viewer (your skeleton over the player's average shot)
-VIEWER_HTML = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>__TITLE__</title>
-<style>
-html,body{height:100%;margin:0;background:#1a1a1a;overflow:hidden;font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff}
-#wrap{position:absolute;inset:0 0 56px 0;background:#000}
-canvas{width:100%;height:100%;display:block;touch-action:none}
-#legend{position:absolute;right:10px;bottom:10px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;pointer-events:none}
-#legend span{display:flex;align-items:center;gap:6px;color:rgba(255,255,255,.6)}
-#legend i{width:9px;height:9px;border-radius:50%;flex:none}
-#msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);pointer-events:none}
-#bar{position:absolute;left:0;right:0;bottom:0;height:56px;background:#1D1D1D;display:flex;align-items:center;gap:14px;padding:0 16px;box-sizing:border-box}
-#play{width:32px;height:32px;border-radius:50%;border:0;background:#fff;color:#1D1D1D;font-size:13px;cursor:pointer;flex:none}
-#track{position:relative;flex:1;height:32px;cursor:pointer;touch-action:none}
-#track .line{position:absolute;left:0;right:0;top:50%;height:8px;margin-top:-4px;border-radius:4px;background:#1f2937}
-#track .rel{position:absolute;top:0;bottom:0;border-left:1px dashed #f97066}
-#track .knob{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.5)}
-#time{width:58px;text-align:right;font-variant-numeric:tabular-nums;color:rgba(255,255,255,.7);flex:none}
-#speed{background:#1D1D1D;color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:6px 8px;font:inherit;flex:none}
-</style>
-<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/"}}</script>
-</head><body>
-<div id="wrap"><canvas id="cv"></canvas><div id="msg">Loading…</div><div id="legend"></div></div>
-<div id="bar"><button id="play" aria-label="Play or pause">❚❚</button><div id="track"><div class="line"></div><div class="rel"></div><div class="knob"></div></div>
- <span id="time"></span><select id="speed" aria-label="Speed"><option value="0.25">0.25x</option><option value="0.5" selected>0.5x</option><option value="1">1x</option></select></div>
-<script type="module">
-import * as THREE from 'three';
-import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
-import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
-import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-const D=__DATA__,NT=46,REL=30,$=id=>document.getElementById(id);
-const canvas=$('cv'),scene=new THREE.Scene();scene.background=new THREE.Color(0x1a1a1a);
-scene.add(new THREE.AmbientLight(0xffffff,0.6));const dl=new THREE.DirectionalLight(0xffffff,0.8);dl.position.set(5,10,5);scene.add(dl);
-const camera=new THREE.PerspectiveCamera(75,1,0.1,1000);camera.up.set(0,0,1);camera.position.set(1.4,2.3,1.5);camera.lookAt(0,0,1.2);
-const controls=new OrbitControls(camera,canvas);controls.enableDamping=true;controls.dampingFactor=0.4;controls.rotateSpeed=1;controls.zoomSpeed=1.5;controls.minDistance=1;controls.maxDistance=8;controls.enablePan=false;controls.target.set(0,0,1.2);
-const renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});renderer.setPixelRatio(devicePixelRatio);
-function size(){const w=canvas.clientWidth,h=canvas.clientHeight;if(w&&h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix()}}size();addEventListener('resize',size);
-const grid=new THREE.GridHelper(20,40,0x424242,0x424242);grid.rotation.x=Math.PI/2;scene.add(grid);
-// ---- skeleton model: one bone mesh per body segment, origin at its upper joint, running down its own -z; x = right, y = forward
-const b64=atob(D.glb),buf=new Uint8Array(b64.length);for(let i=0;i<b64.length;i++)buf[i]=b64.charCodeAt(i);
-const draco=new DRACOLoader();draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');const loader=new GLTFLoader();loader.setDRACOLoader(draco);
-const SEG=['pelvis','torso','head','l_uarm','r_uarm','l_larm','r_larm','l_hand','r_hand','l_thigh','r_thigh','l_shank','r_shank','l_foot','r_foot'];
-function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.name)src[c.name]=c;S.mesh={};S.group=new THREE.Group();const R=S.rig;S.p={};S.q={};S.s={};
- for(const n of SEG){if(!src[n]||!R.pos[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m);
-  S.p[n]=R.pos[n].map(v=>new THREE.Vector3(v[0],v[1],v[2]));S.q[n]=R.rot[n].map(v=>new THREE.Quaternion(v[0],v[1],v[2],v[3]));S.s[n]=new THREE.Vector3(R.scale[n][0],R.scale[n][1],R.scale[n][2])}scene.add(S.group)}
-// The bone positions and rotations for every frame come ready-made from shot_coach.py (rig_skeleton); the page only blends between frames.
-const P_=new THREE.Vector3(),Q_=new THREE.Quaternion();
-function pose(S,tt){const c=Math.max(0,Math.min(NT-1,tt)),a=Math.floor(c),b=Math.min(a+1,NT-1),f=c-a;
- for(const n in S.mesh){const m=S.mesh[n];P_.lerpVectors(S.p[n][a],S.p[n][b],f);Q_.slerpQuaternions(S.q[n][a],S.q[n][b],f);m.matrix.compose(P_,Q_,S.s[n]);m.matrixWorldNeedsUpdate=true}}
-let t=0,playing=true,last=0,ready=false;
-loader.parse(buf.buffer,'',gltf=>{build(gltf,D.you,new THREE.MeshLambertMaterial({color:0xcccccc}));build(gltf,D.player,new THREE.MeshLambertMaterial({color:0xffaa00,transparent:true,opacity:0.8}));draco.dispose();ready=true;$('msg').remove()},
- e=>{$('msg').textContent='Could not load the skeleton model.'});
-$('legend').innerHTML='<span><i style="background:#cccccc"></i><b></b></span><span><i style="background:#ffaa00"></i><b></b></span>';
-const lb=$('legend').querySelectorAll('b');lb[0].textContent=D.you.label;lb[1].textContent=D.player.label;lb.forEach(b=>b.style.fontWeight='400');
-const track=$('track'),knob=track.querySelector('.knob');track.querySelector('.rel').style.left=(REL/(NT-1)*100)+'%';
-function setPlay(p){playing=p;$('play').textContent=p?'❚❚':'▶'}
-$('play').onclick=()=>setPlay(!playing);
-let drag=false;const seek=e=>{const r=track.getBoundingClientRect();t=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*(NT-1)};
-track.addEventListener('pointerdown',e=>{drag=true;track.setPointerCapture(e.pointerId);setPlay(false);seek(e)});track.addEventListener('pointermove',e=>{if(drag&&(e.buttons&1))seek(e);else drag=false});for(const n of['pointerup','pointercancel','lostpointercapture'])track.addEventListener(n,()=>drag=false);
-addEventListener('keydown',e=>{if(e.target.tagName==='SELECT')return;if(e.code==='Space'){e.preventDefault();setPlay(!playing)}
- if(e.code==='ArrowRight'){setPlay(false);t=Math.min(NT-1,Math.round(t)+1)}if(e.code==='ArrowLeft'){setPlay(false);t=Math.max(0,Math.round(t)-1)}});
-function tick(ts){const dt=Math.min((ts-last)/1000,0.1);last=ts;if(playing&&ready){t+=dt*30*parseFloat($('speed').value);if(t>NT-1)t=0}
- if(ready){pose(D.you,t);pose(D.player,t)}knob.style.left=(t/(NT-1)*100)+'%';const s=(t-REL)/30;$('time').textContent=(s>=0?'+':'−')+Math.abs(s).toFixed(2)+' s';
- controls.update();renderer.render(scene,camera);requestAnimationFrame(tick)}
-window.__viewer={get t(){return t},set t(v){t=v},setPlay,camera,controls,D};requestAnimationFrame(ts=>{last=ts;tick(ts)});
-</script></body></html>
-'''
-
-
+# ===================================================================== 3D file (your skeleton over the player's average shot)
 def canon_rot(p):
     """Rotation about the vertical axis that puts the right->left body line along +x (so shots filmed from any side line up)."""
     lat = np.nanmedian((p[:, 4] - p[:, 1]) + (p[:, 11] - p[:, 14]), axis=0)
@@ -1209,8 +1138,8 @@ def canon_rot(p):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
-def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
-    """3D viewer page: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
+def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
+    """Animated .glb: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
     avg = ref.get("averages", {}).get(player, {}).get(stype)
     if avg is None or not os.path.exists(os.path.join(ROOT, "assets", "skeleton.glb")): return False
     p, ext, rise = p.astype(float).copy(), ext.astype(float).copy(), rise.astype(float).copy()
@@ -1225,17 +1154,10 @@ def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
         p, ext, rise = shift(p), shift(ext), shift(rise)
     rise = np.nan_to_num(rise)
     Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
-    kind = "three" if stype == "three" else "mid-range"; h = PLAYER_HEIGHT_CM.get(player, 193) / 100       # both skeletons are drawn at the player's height
+    h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
     nan = lambda x: np.array([[[np.nan] * 3] * len(x[0] if x[0] is not None else x[-1]) if f is None else f for f in x], float)
     you = rig_skeleton(p, ext, rise, hand, h); pro = rig_skeleton(nan(avg["pose"]), nan(avg["ext"]), avg["rise"], avg.get("hand", "R"), h)
-    pack = lambda r: dict(pos={k: np.round(v, 4).tolist() for k, v in r["pos"].items()}, rot={k: np.round(v, 5).tolist() for k, v in r["rot"].items()}, scale=r["scale"])
-    with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
-        glb = base64.b64encode(fh.read()).decode()
-    data = dict(you=dict(label="You, " + shot["name"], rig=pack(you)), player=dict(label=f"{player}, average {kind} shot", rig=pack(pro)), glb=glb)
-    with open(path, "w") as fh:
-        fh.write(VIEWER_HTML.replace("__TITLE__", f"You vs {player}").replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
-    if os.path.exists(os.path.join(ROOT, "assets", "skeleton_plain.glb")):
-        write_glb(os.path.splitext(path)[0] + ".glb", [("You", you, (0.8, 0.8, 0.8, 1.0)), (player, pro, (1.0, 0.667, 0.0, 0.8))])
+    write_glb(path, [("You", you, (0.8, 0.8, 0.8, 1.0)), (player, pro, (1.0, 0.667, 0.0, 0.8))])
     return True
 
 
@@ -1379,8 +1301,8 @@ def main():
             w = csv.DictWriter(fh, fieldnames=list(res["measures"][0])); w.writeheader(); w.writerows(res["measures"])
         saved.append(base + ".csv")
     who = res["player"] if a.mode == "difference" else res["closest"]
-    if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot):
-        saved += [base + ".html"] + ([base + ".glb"] if os.path.exists(base + ".glb") else []); print(f"\n3D viewer, you vs {who}:  {base}.html")
+    if write_3d(base + ".glb", p, ext, rise, r, str(d["hand"]), ref, who, stype):
+        saved.append(base + ".glb"); print(f"\n3D file, you vs {who}:  {base}.glb")
     print("Saved in " + out_dir + ": " + ", ".join(os.path.basename(x) for x in saved))
 
 if __name__ == "__main__":

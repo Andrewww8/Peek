@@ -58,13 +58,12 @@ All in `outputs/`:
   - `similar` ranks the players and lists the three most alike and three most different measures.
 - `<video name>_difference_<type>_<player>.txt`, `.json` and `.csv`: the report, the same result as data, and the full table of measures.
   - `difference` lists the top 3 you already match, the bottom 3 furthest apart, and other differences, each with a short cue.
-- The same name with `.html`: the 3D viewer. Your skeleton (grey) is overlaid on the player's average shot (orange), with you scaled to the player's height, both facing the same way and lined up at the release.
+- The same name with `.glb`: an animated 3D file of your skeleton (grey) overlaid on the player's average shot (orange, 80% opaque). It opens in any glTF viewer, Blender, three.js or model-viewer.
   - `similar` shows you against the closest player; `difference` shows you against the player you chose.
-  - Drag to rotate, scroll to zoom, space to play or pause, arrow keys to step a frame. The dashed line on the bar is the release.
-  - Each skeleton shoots with its real hand, so a left-hander against a right-hander will not line up arm for arm.
-- The same name with `.glb`: the same two skeletons as an animated 3D file (glTF binary, about 3 MB). It opens in any glTF viewer, Blender, three.js or model-viewer.
   - One group per skeleton (`You` and the player's name), 15 bone meshes each, with a position and rotation key per frame: 46 keys at 30 fps, release at 1.0 s.
-  - Metres, y up, the shooter facing +z, floor at y = 0. Your skeleton is grey; the player's is orange and 80% opaque.
+  - Metres, y up, the shooter facing +z, floor at y = 0. You are scaled to the player's height.
+  - The bones keep fixed lengths, the body is stood upright with the shoulders squared to the shot at lift-off, and the feet stay planted until lift-off.
+  - Each skeleton shoots with its real hand, so a left-hander against a right-hander will not line up arm for arm.
 - `<video name>.mp4`: only with `--clip`.
 
 The report is also printed.
@@ -74,8 +73,7 @@ The report is also printed.
 These sit next to the script:
 
 - `nba_reference.json` (835 KB): the NBA players' values for the 34 measures, plus names, descriptions, cues and each player's average shot.
-- `assets/skeleton.glb`: the skeleton model the 3D viewer draws.
-- `assets/skeleton_plain.glb`: the same model uncompressed, used to write the `.glb` files.
+- `assets/skeleton.glb`: the skeleton model used to write the `.glb` files.
 - `third_party/PoseMamba/`: the PoseMamba model code (Apache-2.0).
 - `sscan.c`: the scan kernel; compiled to `libsscan.dylib` on first run (needs the Xcode command line tools).
 - `weights/PoseMamba_L.bin`: downloaded on first run from Hugging Face and checked against a fixed checksum.
@@ -84,7 +82,7 @@ The environment:
 
 - macOS on Apple silicon.
 - Python 3.11 with the packages in `requirements.txt` (numpy, scipy, opencv-python, torch, einops, timm, fvcore, onnxruntime, rtmlib).
-- An internet connection on the first run, and when opening a viewer page (it loads three.js from a CDN).
+- An internet connection on the first run only.
 
 ## How it works
 
