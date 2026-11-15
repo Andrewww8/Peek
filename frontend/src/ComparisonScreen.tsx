@@ -3,20 +3,23 @@ import { Asset } from 'expo-asset';
 import { randomUUID } from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState, PanResponder, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { accountFetch, apiUrl } from './api';
 import { accessToken } from './auth';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
-import { analyzeGuestShot, hasOnDeviceAnalysis, readGuestPose } from './guest-pose';
+import { getShotAnalysisState, hasOnDeviceAnalysis, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
 import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow, slicePose } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
+import { clipTime } from './practice';
+import { ShotAnalysisProgress } from './ShotAnalysisProgress';
 import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Sheet, Title, ui } from './ui';
 
 type Reference = { player: string; shotsAveraged: number; pose: Pose };
-export type ComparisonShot = { sessionId: string; shotNumber: number };
+export type ComparisonShot = { sessionId: string; shotNumber?: number };
+type TaggedComparisonShot = Required<ComparisonShot>;
 type Navigation = { backLabel: string; onBack: () => void };
 
 const references: Reference[] = require('../assets/peek-nba-poses.json');
@@ -24,7 +27,7 @@ const nameAtlas: NameAtlas = require('../assets/peek-ar-name-atlas.json');
 const nameAtlasImage: number = require('../assets/peek-ar-name-atlas.png');
 const preferred = references.find(({ player }) => player === 'Stephen Curry') ?? references[0]!;
 
-async function loadShotPose(shot: ComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
+async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
   const { sessionId, shotNumber } = shot;
   const request = accountFetch(apiUrl, (renew) => accessToken(userId, renew));
   const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose', {
@@ -57,64 +60,59 @@ type ComparisonProps = Navigation & {
 };
 
 export function ComparisonScreen(props: ComparisonProps) {
+  const { shot: { sessionId, shotNumber }, store } = props;
+  const video = localVideoUri(store.getSession(sessionId)?.videoPath ?? null) ?? undefined;
+  if (shotNumber === undefined) return <OnDeviceComparisonScreen {...props} video={video} />;
   if (props.isGuest && hasOnDeviceAnalysis()) {
-    const { shot, store } = props;
-    const release = store.listShots(shot.sessionId).find(({ shotNumber }) => shotNumber === shot.shotNumber);
-    const video = localVideoUri(store.getSession(shot.sessionId)?.videoPath ?? null);
-    const key = release && `pose:${shot.sessionId}:${shot.shotNumber}:${release.releaseMs}`;
-    const saved = key ? readGuestPose(key) : undefined;
-    if (saved || video || !props.userId) {
-      return <OnDeviceComparisonScreen {...props} saved={saved}
-        recording={release && video && key ? { key, video, releaseMs: release.releaseMs } : undefined} />;
+    const tag = store.listShots(sessionId).find((item) => item.shotNumber === shotNumber);
+    if (tag && (video || getShotAnalysisState(sessionId, tag)?.result || !props.userId)) {
+      return <OnDeviceComparisonScreen {...props} tag={tag} video={video} />;
     }
   }
-  return <CloudComparisonScreen {...props} />;
+  return <CloudComparisonScreen {...props} shot={{ sessionId, shotNumber }} />;
 }
 
-function OnDeviceComparisonScreen({ shot, saved, recording, backLabel, onBack, onChooseShot }: ComparisonProps & {
-  saved?: Pose;
-  recording?: { key: string; video: string; releaseMs: number };
+function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backLabel, onBack, onChooseShot }: ComparisonProps & {
+  video?: string;
+  tag?: ShotAnalysisTag;
 }) {
-  const [result, setResult] = useState(saved);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [notice, setNotice] = useState<string>();
+  const { sessionId } = shot;
+  const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
+  const result = state?.result;
+  const automatic = shot.shotNumber === undefined;
 
-  async function analyze() {
-    if (!recording || analyzing) return;
-    setAnalyzing(true);
-    setNotice(undefined);
-    try {
-      setResult(await analyzeGuestShot(recording.key, recording.video, recording.releaseMs));
-    } catch (error) {
-      setNotice(message(error, 'This shot could not be analyzed.'));
-    } finally {
-      setAnalyzing(false);
+  useEffect(() => {
+    if (automatic && video && !state) {
+      void startShotAnalysis(sessionId, video, undefined, isGuest).catch(() => undefined);
     }
+  }, [automatic, video, state, sessionId, isGuest]);
+
+  function analyze() {
+    if (video) void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
   }
+  const releaseTime = result ? ` · Release ${automatic ? '≈ ' : ''}${clipTime(result.releaseMs, true)}` : '';
 
   return (
     <>
       <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
       <Page>
-        <Title title="Your shot vs NBA" subtitle={`Shot ${shot.shotNumber} · Catch-and-shoot three`} />
-        {result ? <PoseComparison playerPose={result} playerLabel="Your shot" /> : (
+        <Title title="Your shot vs NBA" subtitle={`${automatic ? 'Catch-and-shoot three' : 'Shot ' + shot.shotNumber}${releaseTime}`} />
+        {result ? <PoseComparison playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} /> : (
           <Panel>
-            {notice ? <Notice>{notice}</Notice> : null}
-            {analyzing ? <Loading text="Analyzing your shot on this iPhone…" /> : recording ? (
-              <>
-                <Text style={ui.body}>Create a 3D comparison from this recording. Guests can analyze five new shots a day.</Text>
-                <Button label="Analyze as guest" onPress={() => void analyze()} />
-              </>
+            <ShotAnalysisProgress sessionId={sessionId} tag={tag} />
+            {video ? (
+              !state || state.phase === 'failed' ? <Button label={state ? 'Try again' : automatic ? 'Find the release' : 'Analyze as guest'}
+                onPress={analyze} /> : null
             ) : <Notice>This shot needs its original recording or a saved analysis.</Notice>}
           </Panel>
         )}
-        <Button label="Choose another shot" kind="secondary" arrow onPress={onChooseShot} />
+        <Button label="Back to session" kind="secondary" arrow onPress={onChooseShot} />
       </Page>
     </>
   );
 }
 
-function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync }: ComparisonProps) {
+function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync }: ComparisonProps & { shot: TaggedComparisonShot }) {
   const [loaded, setLoaded] = useState<{ userId: string; pose: Pose }>();
   const [notice, setNotice] = useState<string>();
   const [loading, setLoading] = useState('Opening your shot…');

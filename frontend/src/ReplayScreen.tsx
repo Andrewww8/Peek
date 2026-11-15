@@ -3,14 +3,16 @@ import { useEvent } from 'expo';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { PracticeStore } from './database';
 import { localVideoUri, recordingFiles } from './device-storage';
+import { getShotAnalysisState, hasAutomaticAnalysis, startShotAnalysis } from './guest-pose';
 import { clipTime, DRILL_NAME, sessionTime, shotStats } from './practice';
 import type { Session, Shot, ShotOutcome } from './practice';
 import { removeRecording } from './recordings';
 import { ShotAnalysisPanel } from './ShotAnalysisPanel';
+import { ShotAnalysisProgress } from './ShotAnalysisProgress';
 import {
   Button, colors, fonts, gradients, Icon, IconButton, Loading, message, Notice, Page, Panel,
   ScreenHeader, Sheet, StatsGrid, Title, ui,
@@ -31,11 +33,10 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
   backLabel: string;
   onBack: () => void;
   onAskCoach: (session: Session) => void;
-  onCompare: (shotNumber: number) => void;
+  onCompare: (shotNumber?: number) => void;
 }) {
   const [session, setSession] = useState(initialSession);
   const [shots, setShots] = useState(() => store.listShots(session.id));
-  const [choosingShot, setChoosingShot] = useState(false);
   const [edit, setEdit] = useState<Shot>();
   const [removing, setRemoving] = useState(false);
   const [editorError, setEditorError] = useState<string>();
@@ -43,7 +44,24 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
   const video = localVideoUri(session.videoPath);
   const stats = shotStats(shots);
   const cloudShotCount = cloudUserId ? store.sessionCloudShots(cloudUserId, session.id).length : 0;
-  const onlyShot = shots.length === 1 ? shots[0] : undefined;
+
+  function compareAutomatically() {
+    setNotice(undefined);
+    if (getShotAnalysisState(session.id)?.phase === 'complete') {
+      onCompare();
+      return;
+    }
+    if (!video) {
+      setNotice('Open a session with its recording to find the shot release.');
+      return;
+    }
+    if (!hasAutomaticAnalysis()) {
+      setNotice('Automatic comparison requires the latest Peek build on iOS 17 or later.');
+      return;
+    }
+    void startShotAnalysis(session.id, video, undefined, !playerUserId).catch(() => undefined);
+    onCompare();
+  }
 
   function tag(releaseMs: number, outcome: ShotOutcome, existing?: Shot) {
     setEditorError(undefined);
@@ -80,8 +98,9 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
       <ScreenHeader backLabel={backLabel} detail="ON THIS IPHONE" onBack={onBack} />
       <Page style={styles.page}>
         <Title title="Session details" subtitle={DRILL_NAME} />
-        <Button label={onlyShot ? `Compare shot ${onlyShot.shotNumber} vs NBA` : 'Compare your shot vs NBA'} arrow
-          onPress={() => onlyShot ? onCompare(onlyShot.shotNumber) : setChoosingShot(true)} />
+        <Button label="Compare your shot vs NBA" arrow onPress={compareAutomatically} />
+        <ShotAnalysisProgress sessionId={session.id} />
+        {notice ? <Notice>{notice}</Notice> : null}
         {video ? (
           <ReplayPlayer uri={video} durationMs={session.durationMs} stats={stats} shots={shots} onTag={tag} />
         ) : (
@@ -90,7 +109,6 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
             <Text style={ui.mono}>Video removed</Text>
           </MediaFrame>
         )}
-        {notice ? <Notice>{notice}</Notice> : null}
         <Panel>
           <View style={ui.row}>
             <Text style={styles.panelLabel}>SHOOTING STATS</Text>
@@ -141,31 +159,6 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
             userId={cloudUserId} shotCount={cloudShotCount} onCompare={onCompare} />
         ) : null}
       </Page>
-      <Sheet visible={choosingShot} onClose={() => setChoosingShot(false)}>
-        {shots.length ? (
-          <>
-            <Title title="Choose a shot" size={26} />
-            <ScrollView style={styles.shotPicker} contentContainerStyle={styles.shotPickerList}>
-              {shots.map(({ shotNumber, releaseMs }) => (
-                <Button key={shotNumber} label={`Shot ${shotNumber} · ${clipTime(releaseMs, true)}`} kind="secondary" arrow
-                  onPress={() => {
-                    setChoosingShot(false);
-                    onCompare(shotNumber);
-                  }} />
-              ))}
-            </ScrollView>
-            <Button label="Cancel" kind="secondary" onPress={() => setChoosingShot(false)} />
-          </>
-        ) : (
-          <>
-            <Title title="Tag a shot first" size={26} />
-            <Text style={ui.body}>{video
-              ? 'Pause when the ball leaves your hand. Tap Made, Missed, or Unmarked to tag the shot.'
-              : 'Open a saved recording to tag a shot and compare it.'}</Text>
-            <Button label={video ? 'Back to video' : 'Back to session'} onPress={() => setChoosingShot(false)} />
-          </>
-        )}
-      </Sheet>
       <Sheet visible={removing} onClose={() => setRemoving(false)}>
         <Title title="Remove video?" size={33} />
         <Text style={ui.body}>This frees space on your iPhone. Your shot stats will stay in Saved Clips.</Text>
@@ -363,8 +356,6 @@ const styles = StyleSheet.create({
   coachText: { color: colors.text, fontFamily: fonts.serifBold, fontSize: 14, lineHeight: 17, maxWidth: 210 },
   shotRow: { ...ui.row, minHeight: 52, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8 },
   shotEnd: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  shotPicker: { maxHeight: 310 },
-  shotPickerList: { gap: 8 },
   dimmed: { opacity: 0.65 },
   sheetActions: { flexDirection: 'row', gap: 10, marginTop: 5 },
   equal: { flex: 1 },

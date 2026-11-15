@@ -18,7 +18,9 @@ For a rehearsal that relaunches offline with the JavaScript bundle embedded, ins
 
 Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
 
-Open a session in **Saved Clips** and tap **Compare your shot vs NBA** near the top of **Session details**. When there are several tags, choose the shot you want. For a session without tags, mark the release of a shot in its video. Tap **Analyze as guest** to estimate the shot’s 3D body pose from the saved video directly on an iPhone running iOS 17 or later. Tap **Analyze this shot** if you’re signed in and the recording still needs cloud analysis. The shots play together when the comparison opens. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
+Open a session in **Saved Clips** and tap **Compare your shot vs NBA** near the top of **Session details**. On iOS 17 or later, Peek estimates one release from the recorded shooting motion and tracks the 3D body pose on the iPhone. The comparison works without a release tag or a made or missed outcome. New recordings and imports start analysis after saving. The progress bar shows the current phase, percentage, elapsed time, and final duration. To compare a specific tagged attempt, open it under **Tagged shots**.
+
+The shots play together when the comparison opens. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses of tagged shots show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
 
 ## Connect Vercel and Supabase
 
@@ -85,7 +87,7 @@ npm run test:integration
 ## Rehearse on the demo iPhone
 
 1. Install a signed Release build and continue as a guest on a physical iPhone.
-2. Record a clip and tag each shot at the release. Open that session from **Saved Clips**, tap **Compare your shot vs NBA**, choose a shot, and tap **Analyze as guest**.
+2. Record a clip and tap **Stop and save**. Open its **Session details** and watch the analysis progress below **Compare your shot vs NBA**. Open the comparison when it finishes, without tagging an outcome or release.
 3. Watch the white skeleton and the NBA skeleton play side by side. Change the reference player and tap **View in AR** to open both named skeletons in Quick Look. Quit Peek, disable Wi-Fi and cellular data, and reopen the saved comparison.
 4. For the cloud portion, sign in with a confirmed test account, record and tag a shot, and leave the app open to sync. Check **Shot analysis** in Replay, then open the session from **Coach** and ask about follow-through. Use a second test account to verify that clips and chat history are isolated.
 

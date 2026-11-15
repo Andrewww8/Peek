@@ -16,6 +16,7 @@ import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { ThinkingDots } from './PeekMotion';
 import { clipTime, sessionTime, type Session } from './practice';
+import { ShotAnalysisProgress } from './ShotAnalysisProgress';
 import { Brand, Chip, colors, fonts, gradients, Icon, IconButton, message, Notice, TopBar, ui } from './ui';
 
 const prompts = [
@@ -266,6 +267,7 @@ export function CoachScreen({
             <View style={styles.threadClip}>
               <ClipCover duration={session.durationMs} removed={videoRemoved} label="Open practice clip"
                 onPress={() => onReview(session)} />
+              {visible ? <ShotAnalysisProgress sessionId={session.id} style={styles.threadAnalysis} /> : null}
             </View>
           ) : null}
           {needsClip && !messages.length && !pending && !session ? (
@@ -334,16 +336,19 @@ export function CoachScreen({
         ) : null}
         <View style={[styles.composer, attached && styles.composerWithClip]}>
           {attached && session ? (
-            <View style={styles.attachPreview}>
-              <ClipCover compact duration={session.durationMs} removed={videoRemoved}
-                label="Review attached clip" onPress={() => onReview(session)} />
-              <IconButton icon="remove" label="Remove attachment" style={styles.remove} disabled={connecting} onPress={() => {
-                setNotice(undefined);
-                setQueued(undefined);
-                setSubmitted('');
-                setAwaitingTag(false);
-                onRemoveClip();
-              }} />
+            <View style={styles.attachmentRow}>
+              <View style={styles.attachPreview}>
+                <ClipCover compact duration={session.durationMs} removed={videoRemoved}
+                  label="Review attached clip" onPress={() => onReview(session)} />
+                <IconButton icon="remove" label="Remove attachment" style={styles.remove} disabled={connecting} onPress={() => {
+                  setNotice(undefined);
+                  setQueued(undefined);
+                  setSubmitted('');
+                  setAwaitingTag(false);
+                  onRemoveClip();
+                }} />
+              </View>
+              {visible ? <ShotAnalysisProgress sessionId={session.id} style={styles.inlineAnalysis} /> : null}
             </View>
           ) : null}
           <View style={styles.inputRow}>
@@ -458,6 +463,7 @@ const styles = StyleSheet.create({
   messages: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12, gap: 12 },
   threadDate: { ...ui.mono, fontSize: 10, alignSelf: 'center', marginBottom: 4 },
   threadClip: { width: '60%', alignSelf: 'flex-end', marginBottom: -6 },
+  threadAnalysis: { marginTop: 6 },
   userBubble: { maxWidth: '76%', alignSelf: 'flex-end', paddingVertical: 10, paddingHorizontal: 14, borderRadius: 19, backgroundColor: colors.input },
   reply: { gap: 9, paddingTop: 3 },
   byline: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -466,7 +472,9 @@ const styles = StyleSheet.create({
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
   feedback: { gap: 6, alignItems: 'flex-start' },
   status: { ...ui.label, marginBottom: 2 },
+  attachmentRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   attachPreview: { alignSelf: 'flex-start', width: 78 },
+  inlineAnalysis: { flex: 1, marginRight: 8 },
   clipPressable: { aspectRatio: 1.62, overflow: 'hidden', borderRadius: 16 },
   clipCompact: { aspectRatio: 1, borderRadius: 13 },
   clipCard: { flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },

@@ -13,6 +13,7 @@ import { clipTime, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES } from './practice';
 import type { Session } from './practice';
 import { RECORDING_FREE_BYTES, saveRecording } from './recordings';
 import type { RecordingDraft } from './recordings';
+import { RecordingSaveProgress } from './ShotAnalysisProgress';
 import { Button, colors, gradients, IconButton, Loading, message, Notice, ui } from './ui';
 
 type Phase = 'idle' | 'starting' | 'recording' | 'stopping' | 'saving' | 'saveFailed';
@@ -228,7 +229,7 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
         {phase === 'starting' ? <Shutter label="Starting recording" onPress={requestRecording} disabled recording /> : null}
         {phase === 'recording' ? <Shutter label="Stop and save" onPress={stop} recording /> : null}
         {phase === 'stopping' ? <Loading text="Finishing recording…" /> : null}
-        {phase === 'saving' ? <Loading text="Saving to this iPhone…" /> : null}
+        {phase === 'saving' ? <RecordingSaveProgress /> : null}
         {phase === 'saveFailed' ? <Button label="Retry save" onPress={savePending} /> : null}
       </View>
     </View>

@@ -92,10 +92,11 @@ export function SavedClips({ store, onMenu, onRecord, onReplay }: {
   );
 }
 
-export function ClipPicker({ store, userId, onSelect, onCancel }: {
+export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
   store: PracticeStore;
   userId: string | null;
   onSelect: (session: Session) => void;
+  onImported: (session: Session) => void;
   onCancel: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -131,7 +132,7 @@ export function ClipPicker({ store, userId, onSelect, onCancel }: {
       if (draft.durationMs > RECORD_LIMIT_SECONDS * 1000) throw new Error('Choose a video up to 30 seconds long.');
       saving = true;
       const saved = saveRecording(draft, recordingFiles, store, userId);
-      onSelect(saved);
+      onImported(saved);
     } catch (error) {
       setNotice(message(error, 'The video could not be imported.'));
     } finally {

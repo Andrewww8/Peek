@@ -25,7 +25,8 @@ import { CoachScreen } from './CoachScreen';
 import { ComparisonScreen } from './ComparisonScreen';
 import type { ComparisonShot } from './ComparisonScreen';
 import type { PracticeStore } from './database';
-import { loadPractice } from './device-storage';
+import { loadPractice, localVideoUri } from './device-storage';
+import { hasAutomaticAnalysis, startShotAnalysis } from './guest-pose';
 import { ClipPicker, SavedClips } from './LibraryScreen';
 import { Splash } from './PeekMotion';
 import type { Session } from './practice';
@@ -255,6 +256,12 @@ function PracticeApp({ store }: { store: PracticeStore }) {
     go(coachRoute);
   }
 
+  function analyzeSavedRecording(clip: Session) {
+    if (!hasAutomaticAnalysis()) return;
+    const video = localVideoUri(clip.videoPath);
+    if (video) void startShotAnalysis(clip.id, video, undefined, !playerSession).catch(() => undefined);
+  }
+
   function newChat() {
     setSelection(undefined);
     setQuestion('');
@@ -310,12 +317,17 @@ function PracticeApp({ store }: { store: PracticeStore }) {
     case 'record':
       content = <RecordScreen store={store} cloudUserId={playerUserId} onBack={back}
         onSaved={(clip) => {
+          analyzeSavedRecording(clip);
           if (currentRoute.from === 'coach') selectClip(clip);
           else setStack((routes) => [...routes.slice(0, -1), { screen: 'replay', sessionId: clip.id, backLabel: 'Saved clips' }]);
         }} />;
       break;
     case 'picker':
-      content = <ClipPicker store={store} userId={playerUserId} onSelect={selectClip} onCancel={back} />;
+      content = <ClipPicker store={store} userId={playerUserId} onSelect={selectClip} onCancel={back}
+        onImported={(clip) => {
+          analyzeSavedRecording(clip);
+          selectClip(clip);
+        }} />;
       break;
     case 'replay': {
       const clip = store.getSession(currentRoute.sessionId);
@@ -330,7 +342,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       break;
     }
     case 'compare':
-      content = <ComparisonScreen key={`${currentRoute.shot.sessionId}:${currentRoute.shot.shotNumber}`}
+      content = <ComparisonScreen key={`${currentRoute.shot.sessionId}:${currentRoute.shot.shotNumber ?? 'automatic'}`}
         backLabel={currentRoute.backLabel} onBack={back} shot={currentRoute.shot} store={store} userId={cloudUserId} isGuest={!playerSession}
         playerName={playerSession ? accountName(playerSession.user) : undefined} guestLimit={guestLimit}
         onChooseShot={back} onSignIn={() => openAuth('sign-in')} onGuestConnect={startGuestSession} onSync={scheduleClipSync} />;

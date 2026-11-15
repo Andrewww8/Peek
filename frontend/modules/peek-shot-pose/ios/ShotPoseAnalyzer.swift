@@ -6,6 +6,7 @@ enum ShotPoseError: LocalizedError {
   case unsupportedSystem
   case invalidRecording
   case invalidRelease
+  case releaseNotFound
 
   var errorDescription: String? {
     switch self {
@@ -15,6 +16,8 @@ enum ShotPoseError: LocalizedError {
       return "The original recording could not be opened."
     case .invalidRelease:
       return "Mark the release within the recording and try again."
+    case .releaseNotFound:
+      return "Peek couldn’t find a clear shot release. Mark the release for this clip or try a recording with the shooter in view."
     }
   }
 }
@@ -28,20 +31,26 @@ enum ShotPoseAnalyzer {
     .leftShoulder, .leftElbow, .leftWrist, .rightShoulder, .rightElbow, .rightWrist
   ]
 
-  static func frames(uri: String, releaseMs: Double) async throws -> [[String: Any]] {
+  static func recording(uri: String) async throws -> (AVURLAsset, Double) {
     guard let url = URL(string: uri), url.isFileURL else {
       throw ShotPoseError.invalidRecording
     }
+    let asset = AVURLAsset(url: url)
+    let duration = try? await asset.load(.duration).seconds
+    guard let duration, duration.isFinite, duration > 0 else {
+      throw ShotPoseError.invalidRecording
+    }
+    return (asset, duration)
+  }
+
+  static func frames(uri: String, releaseMs: Double, progress: (Double) -> Void = { _ in }) async throws -> [[String: Any]] {
     guard releaseMs.isFinite, releaseMs >= 0 else {
       throw ShotPoseError.invalidRelease
     }
 
-    let asset = AVURLAsset(url: url)
-    guard let length = try? await asset.load(.duration), length.seconds.isFinite, length.seconds > 0 else {
-      throw ShotPoseError.invalidRecording
-    }
+    let (asset, duration) = try await recording(uri: uri)
     let release = releaseMs / 1000
-    guard release <= length.seconds + 0.001 else {
+    guard release <= duration + 0.001 else {
       throw ShotPoseError.invalidRelease
     }
 
@@ -58,8 +67,9 @@ enum ShotPoseAnalyzer {
     var lastTime: CMTime?
     for index in stride(from: 0, through: 36, by: 2) {
       try Task.checkCancellation()
+      defer { progress(Double(index / 2 + 1) / 19) }
       let seconds = release + Double(index - 24) / 30
-      guard seconds >= 0, seconds < length.seconds else { continue }
+      guard seconds >= 0, seconds < duration else { continue }
       let requestedTime = CMTime(seconds: seconds, preferredTimescale: 600)
       guard let frame = try? await generator.image(at: requestedTime),
             frame.actualTime.isNumeric,
