@@ -1006,7 +1006,7 @@ function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.
  for(const n of SEG){if(!src[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m)}scene.add(S.group);
  S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);solve(S)}
 // Rigid skeleton: every bone keeps one length and one thickness for the whole clip, joints are chained from the pelvis outwards,
-// and a bone can only swing, never spin about its own length. Hands run straight on from the forearm with the palms turned towards each other; feet stay flat, pointing where the shin faces.
+// and a bone can only swing, never spin about its own length. Hands keep their palms turned towards each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick; feet stay flat, pointing where the shin faces.
 function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
  for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H));
  const med=f=>{const a=[];for(let i=S.v0;i<=S.v1;i++)a.push(f(all[i]));a.sort((x,y)=>x-y);return a[a.length>>1]},d=(a,b)=>med(J=>J[a].distanceTo(J[b]));
@@ -1016,6 +1016,12 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
  const LEN={uarm:0.313*S.scale.uarm.z,larm:0.254*S.scale.larm.z,thigh:Lth,shank:Lsh},M4=new THREE.Matrix4();
  const quat=(x,y,z)=>new THREE.Quaternion().setFromRotationMatrix(M4.makeBasis(x,y,z)),perp=(h,z,alt)=>{const x=h.clone().addScaledVector(z,-h.dot(z));if(x.lengthSq()<1e-4)x.copy(alt).addScaledVector(z,-alt.dot(z));return x.normalize()};
  const bone=(down,hint,alt)=>{const z=down.clone().negate(),x=perp(hint,z,alt),y=V().crossVectors(z,x);return{x,y,z,q:quat(x,y,z)}};
+ // wrist flick of the shooting (right) hand: how far the fingertip is bent forward-and-down from the forearm line (+) or cocked back (-), smoothed over time
+ const flick=[];for(let i=S.v0;i<=S.v1;i++){const J=all[i],e=S.ext[i];flick[i]=null;if(!e)continue;const q=e[1],tip=V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H);
+  const f=V().subVectors(J[16],J[15]).normalize(),dd=tip.sub(J[16]).normalize(),fw=V().crossVectors(V().subVectors(J[8],J[0]).normalize(),V().subVectors(J[1],J[4]).normalize()).normalize();
+  const n=perp(fw.add(V(0,0,-0.5)),f,V(0,0,-1));flick[i]=Math.max(-1.3,Math.min(1.3,Math.atan2(dd.dot(n),dd.dot(f))))}
+ for(let i=S.v0,last=0;i<=S.v1;i++){if(flick[i]===null)flick[i]=last;last=flick[i]}
+ const sm=flick.slice();for(let i=S.v0;i<=S.v1;i++){let a=0,w=0;for(let k=-2;k<=2;k++){const j=i+k;if(j>=S.v0&&j<=S.v1){const ww=3-Math.abs(k);a+=flick[j]*ww;w+=ww}}sm[i]=a/w}
  const prev={};S.fr=[];
  for(let i=S.v0;i<=S.v1;i++){const J=all[i],F={},dir=(a,b)=>V().subVectors(J[b],J[a]).normalize();
   const up=dir(0,8),px=perp(V().subVectors(J[1],J[4]),up,V(1,0,0)),py=V().crossVectors(up,px),O=J[0].clone();F.pelvis={p:O,q:quat(px,py,up)};
@@ -1023,7 +1029,8 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
   F.torso={p:T0,q:tq};F.head={p:T0.clone().addScaledVector(tz,TR.neck*g).addScaledVector(ty,TR.headFwd*g),q:tq};
   for(const[s,sg,sh,el,wr]of[['r',1,14,15,16],['l',-1,11,12,13]]){const P=T0.clone().addScaledVector(tx,sg*TR.shX*st).addScaledVector(tz,TR.shZ*st).addScaledVector(ty,TR.shY*st);
    const u=bone(dir(sh,el),prev[s+'u']||tx,ty);prev[s+'u']=u.x;F[s+'_uarm']={p:P,q:u.q};const E=P.clone().addScaledVector(u.z,-LEN.uarm);
-   const l=bone(dir(el,wr),prev[s+'l']||u.x,u.y);prev[s+'l']=l.x;F[s+'_larm']={p:E,q:l.q};F[s+'_hand']={p:E.clone().addScaledVector(l.z,-LEN.larm),z:l.z,x:l.x}}
+   const l=bone(dir(el,wr),prev[s+'l']||u.x,u.y);prev[s+'l']=l.x;F[s+'_larm']={p:E,q:l.q};let hz=l.z;if(s==='r'){const f=l.z.clone().negate(),n=perp(ty.clone().add(V(0,0,-0.5)),f,V(0,0,-1));hz=f.multiplyScalar(Math.cos(sm[i])).addScaledVector(n,Math.sin(sm[i])).normalize().negate()}
+   F[s+'_hand']={p:E.clone().addScaledVector(l.z,-LEN.larm),z:hz,x:l.x}}
   for(const[s,o]of[['r','l'],['l','r']]){const h=F[s+'_hand'],m=V().subVectors(F[o+'_hand'].p,h.p);m.addScaledVector(h.z,-m.dot(h.z));   // palms face each other
    const y=m.length()>0.06?m.normalize():(prev[s+'h']?perp(prev[s+'h'],h.z,h.x):h.x.clone().multiplyScalar(s==='r'?-1:1));prev[s+'h']=y;h.q=quat(V().crossVectors(y,h.z),y,h.z)}
   for(const[s,sg,hp,kn,an]of[['r',1,1,2,3],['l',-1,4,5,6]]){const P=O.clone().addScaledVector(px,sg*TR.hipX*g);
