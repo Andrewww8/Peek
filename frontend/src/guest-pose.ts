@@ -24,7 +24,8 @@ export type ShotAnalysisState = {
 
 const cache = new SQLiteStorage('peek-guest-analysis');
 const bodyOnlyAnalysisVersion = 2;
-const analysisVersion = 3;
+const handAnalysisVersion = 3;
+const analysisVersion = 4;
 const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
@@ -115,9 +116,11 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       const releaseMs = saved?.releaseMs ?? tag?.releaseMs ?? await native.detectRelease(uri, requestId);
       update(key, { phase: 'tracking', progress: scanShare, startedAt, result: saved });
       const { frames } = await native.analyze(uri, releaseMs, requestId);
-      // Older native builds omit hand data. Keep these cached poses eligible for refresh after an app update.
+      // Older native builds omit image-space takeoff evidence. Keep their results eligible for refresh.
       const supportsHands = frames.some(({ fingers }) => fingers?.length === fingerCount * 3);
-      const result = { pose: guestPoseFromVision(frames), releaseMs, version: supportsHands ? analysisVersion : bodyOnlyAnalysisVersion };
+      const supportsJumpTracking = frames.some(({ jumpSample }) => jumpSample?.length === 4);
+      const version = supportsJumpTracking ? analysisVersion : supportsHands ? handAnalysisVersion : bodyOnlyAnalysisVersion;
+      const result = { pose: guestPoseFromVision(frames), releaseMs, version };
       const state: ShotAnalysisState = { phase: 'complete', progress: 1, result, startedAt, finishedAt: Date.now() };
       const writes: [string, string][] = [[key, JSON.stringify(state)]];
       // Keep counting during unlimited mode so a rollback uses the same daily history.

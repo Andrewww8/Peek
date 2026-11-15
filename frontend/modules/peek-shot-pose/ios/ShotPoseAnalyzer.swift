@@ -68,6 +68,47 @@ enum ShotPoseAnalyzer {
     }
   }
 
+  private static func jumpSample(
+    request: VNDetectHumanBodyPoseRequest,
+    handler: VNImageRequestHandler,
+    image: CGImage,
+    near projectedRoot: SIMD2<Double>?
+  ) -> [Any] {
+    let missing = Array<Any>(repeating: NSNull(), count: 4)
+    // Use source-image landmarks rather than projections of the 3D pose to measure foot lift.
+    guard let projectedRoot, (try? handler.perform([request])) != nil else { return missing }
+    let aspect = Double(image.width) / Double(image.height)
+    let target = projectedRoot / Double(image.height)
+    let candidates = (request.results ?? []).compactMap { observation -> (distance: Double, sample: [Double?])? in
+      guard let points = try? observation.recognizedPoints(.all) else { return nil }
+      func point(_ joint: VNHumanBodyPoseObservation.JointName) -> SIMD2<Double>? {
+        guard let point = points[joint], point.confidence >= 0.3,
+              (0...1).contains(point.x), (0...1).contains(point.y) else { return nil }
+        return SIMD2(Double(point.x) * aspect, Double(point.y))
+      }
+      func center(
+        _ left: VNHumanBodyPoseObservation.JointName,
+        _ right: VNHumanBodyPoseObservation.JointName,
+        fallback: VNHumanBodyPoseObservation.JointName
+      ) -> SIMD2<Double>? {
+        if let a = point(left), let b = point(right) { return (a + b) / 2 }
+        return point(fallback)
+      }
+      guard let pelvis = center(.leftHip, .rightHip, fallback: .root),
+            let shoulders = center(.leftShoulder, .rightShoulder, fallback: .neck) else { return nil }
+      let torsoLength = simd_distance(pelvis, shoulders)
+      let distance = simd_distance(target, pelvis)
+      guard torsoLength >= 0.04, distance <= torsoLength * 0.75 else { return nil }
+
+      let rightAnkle = point(.rightAnkle)
+      let leftAnkle = point(.leftAnkle)
+      // The ankle and pelvis heights increase upward. Torso length uses image-height units.
+      return (distance, [rightAnkle?.y, leftAnkle?.y, pelvis.y, torsoLength])
+    }
+    guard let nearest = candidates.min(by: { $0.distance < $1.distance }) else { return missing }
+    return nearest.sample.map { value in value.map { $0 as Any } ?? NSNull() }
+  }
+
   private static func pixelsPerMeter(_ joints: [BodyJoint]) -> Double? {
     let projected = joints.compactMap { joint -> (camera: SIMD2<Double>, image: SIMD2<Double>)? in
       guard let position = joint.position, let image = joint.image else { return nil }
@@ -220,6 +261,7 @@ enum ShotPoseAnalyzer {
 
     var frames: [[String: Any]] = []
     var lastTime: CMTime?
+    let jumpRequest = VNDetectHumanBodyPoseRequest()
     let releaseIndex = 24
     let fps = 30
     let lastIndex = releaseIndex + fps
@@ -253,7 +295,8 @@ enum ShotPoseAnalyzer {
         guard let observation = request.results?.max(by: { $0.confidence < $1.confidence }) else { return nil }
         let joints = bodyJoints(observation, in: frame.image)
         return ["index": index, "joints": joints.flatMap { coordinates($0.position) },
-                "fingers": handPoints(joints, bodyHeight: Double(observation.bodyHeight), image: frame.image)]
+                "fingers": handPoints(joints, bodyHeight: Double(observation.bodyHeight), image: frame.image),
+                "jumpSample": jumpSample(request: jumpRequest, handler: handler, image: frame.image, near: joints.first?.image)]
       }
       if let sample {
         frames.append(sample)

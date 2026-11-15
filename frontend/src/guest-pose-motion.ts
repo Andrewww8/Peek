@@ -1,7 +1,8 @@
 import { coordinatesPerFrame, fingerCount, jointCount } from './pose-3d.ts';
 import type { Pose, PoseSample } from './pose-3d.ts';
+import type { JumpSample } from './shot-grounding.ts';
 
-export type VisionFrame = { index: number; joints: PoseSample[]; fingers?: PoseSample[] };
+export type VisionFrame = { index: number; joints: PoseSample[]; fingers?: PoseSample[]; jumpSample?: JumpSample };
 type Point = [number, number, number];
 type HandSample = { index: number; offset: Point };
 
@@ -51,11 +52,13 @@ function angle(a?: Point | null, b?: Point | null, c?: Point | null) {
 export function guestPoseFromVision(frames: VisionFrame[]): Pose {
   const points = new Map<number, (Point | null)[]>();
   const hands = new Map<number, (Point | null)[]>();
-  for (const { index, joints, fingers } of frames) {
+  const jumpSamples = Array<JumpSample | null>(frameCount).fill(null);
+  for (const { index, joints, fingers, jumpSample } of frames) {
     if (!Number.isInteger(index) || index < 0 || index >= frameCount || joints.length !== coordinatesPerFrame) continue;
     const sample = Array.from({ length: jointCount }, (_, joint) => visionPoint(joints, joint));
     if (!sample[pelvis]) continue;
     points.set(index, sample);
+    jumpSamples[index] = jumpSample ?? null;
     hands.delete(index);
     if (fingers?.length !== fingerCount * 3) continue;
     hands.set(index, Array.from({ length: fingerCount }, (_, finger) => {
@@ -146,6 +149,7 @@ export function guestPoseFromVision(frames: VisionFrame[]): Pose {
     fps, releaseIndex, frameCount, shootingHand: right ? 'right' : 'left',
     joints: rows.flatMap((row) => row.flatMap((point) => normalize(point, row[pelvis]))),
     fingers,
+    jumpSamples: jumpSamples.some(Boolean) ? jumpSamples : undefined,
     pelvisRise: rows.map((row) => row[pelvis] ? number((baseY - row[pelvis]![1]) * scale) : null),
     metrics: {
       releaseElbowDeg: number(angle(release[shoulder], release[elbow], release[wrist])),

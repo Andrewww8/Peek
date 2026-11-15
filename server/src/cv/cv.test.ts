@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { zipSync } from 'fflate';
 import { detectCandidates } from './detector.js';
-import { AnalysisError, analyzeClipNpz, analyzeSeries, computeMetrics, pickShooter, poseArraysFromNpz, recompute } from './metrics.js';
+import { AnalysisError, analyzeClipNpz, analyzeSeries, clipComparison, computeMetrics, pickShooter, poseArraysFromNpz, recompute } from './metrics.js';
 import { NpzError, parseNpy, readNpz } from './npz.js';
-import { decodePose, encodePose, quantize, J } from './pose.js';
+import { decodePose, encodePose, quantize, J, NJ } from './pose.js';
+import { playbackPoseView, poseView } from './pose-view.js';
 import { SHOT, encodeNpy, joints3d, syntheticShot, to2d, writeNpz } from './test-pose.js';
 
 const SAMPLE = '/Users/danielvargas/Documents/Perspective Project/_EuBHf42Zs8.npz';
@@ -13,6 +14,27 @@ const haveSample = existsSync(SAMPLE);
 const W = { taggedReleaseFrame: SHOT.release, windowStart: 0, windowEnd: SHOT.frames - 1, cuts: [] as number[] };
 const near = (actual: number | null, expected: number, tol: number, what: string) =>
   assert.ok(actual !== null && Math.abs(actual - expected) <= tol, `${what}: ${actual}, expected ${expected} ± ${tol}`);
+
+test('extended playback exposes release-aligned foot measurements only where the source tracked them', () => {
+  const source = syntheticShot({ frames: SHOT.release + 8 });
+  const row = SHOT.release * NJ;
+  source.kpts2d[(row + J.r_ankle) * 2 + 1] = 560;
+  source.conf[row + J.l_ankle] = 0.1;
+  const comparison = clipComparison(source, SHOT.release, 'right');
+  assert.ok(comparison);
+  const pose = playbackPoseView(comparison.series, comparison.metrics, encodePose(source), SHOT.release);
+  assert.ok('jumpSamples' in pose);
+  assert.equal(pose.jumpSamples.length, pose.frameCount);
+  const measured = pose.jumpSamples[pose.releaseIndex + 2];
+  assert.ok(measured);
+  assert.equal(measured.length, 4);
+  assert.deepEqual(measured.slice(0, 2), [-560, null]);
+  assert.ok(measured[2]! > -600);
+  assert.equal(measured[3], 150);
+  assert.deepEqual(pose.jumpSamples[pose.releaseIndex + 1]?.slice(0, 2), [-600, -600]);
+  assert.equal(pose.jumpSamples.at(-1), null);
+  assert.equal('jumpSamples' in poseView(comparison.series, comparison.metrics), false);
+});
 
 describe('npz reader', () => {
   test('reads the sample CV output: all 14 arrays with their shapes and dtypes', { skip: !haveSample && 'sample npz not present' }, () => {

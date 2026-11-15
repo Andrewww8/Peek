@@ -22,7 +22,9 @@ Open a session in **Saved Clips** and tap **Compare your shot vs NBA** near the 
 
 The shots play together through one second after release. Peek fills gaps between tracked poses so the white skeleton continues through the recorded follow-through. If the footage or tracking ends early, Peek holds the final tracked pose for the rest of the comparison. The bundled NBA references include measured motion through half a second after release and hold their final pose for the rest of the playback. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference.
 
-The iPhone and cloud analyses track both wrists, index fingertips, middle fingertips, and middle knuckles when they are visible. The comparison and AR preview share those landmarks and their estimated depth. When you reopen an older comparison, Peek updates the hand tracking from the saved recording using the same release time.
+The iPhone and cloud analyses track both wrists, index fingertips, middle fingertips, and middle knuckles when they are visible. The comparison and AR preview share those landmarks and their estimated depth.
+
+The white skeleton stays on the court through the dip and landing. It shows lift when the video tracks both feet rising near release and descending again. Reopening a saved recording updates this tracking without changing its release time.
 
 ## Connect Vercel and Supabase
 

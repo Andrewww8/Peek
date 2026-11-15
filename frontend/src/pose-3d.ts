@@ -1,4 +1,5 @@
 import { buildUsdz } from '../../mobile/src/core/usdz.ts';
+import { jumpClearance, type JumpSample } from './shot-grounding.ts';
 
 export type PoseSample = number | null;
 export type Pose = {
@@ -8,6 +9,7 @@ export type Pose = {
   shootingHand: 'right' | 'left';
   joints: PoseSample[];
   fingers?: PoseSample[] | null;
+  jumpSamples?: (JumpSample | null)[];
   pelvisRise: PoseSample[] | null;
   metrics: { releaseElbowDeg: PoseSample; kneeDipDeg: PoseSample; releaseHeight: PoseSample };
 };
@@ -78,8 +80,45 @@ export function comparisonPlayback(pose: Pose, first = 0): Pose {
     releaseIndex: pose.releaseIndex - first,
     joints: samples(pose.joints, coordinatesPerFrame),
     fingers: pose.fingers && samples(pose.fingers, fingerCount * 3, pose.fps / 5),
+    jumpSamples: Array.isArray(pose.jumpSamples) ? pose.jumpSamples.slice(first, first + frameCount) : undefined,
     pelvisRise: pose.pelvisRise && samples(pose.pelvisRise, 1),
   };
+}
+
+export function groundedShotPlayback(source: Pose, first: number): Pose {
+  const pose = comparisonPlayback(source, first);
+  const samples = Array.isArray(source.jumpSamples) ? source.jumpSamples : [];
+  const clearance = jumpClearance(samples, source.frameCount, source.releaseIndex, source.fps);
+  const [, lastPose] = shotMotionWindow(source);
+  const lastTrackedFoot = samples.reduce((last, sample, frame) =>
+    Number.isFinite(sample?.[0]) && Number.isFinite(sample?.[1]) ? frame : last, -1);
+  const last = Math.max(lastPose, lastTrackedFoot);
+  const ankles = Array.from({ length: pose.frameCount }, (_, frame) => {
+    const right = posePoint(pose, frame, 3)?.[1], left = posePoint(pose, frame, 6)?.[1];
+    return right === undefined ? left : left === undefined ? right : Math.max(right, left);
+  });
+  if (ankles.every((ankle) => ankle === undefined)) return pose;
+
+  // Move the whole skeleton to the supporting ankle. This keeps knee and hand motion intact.
+  const floor = 0.55;
+  let previous = -1;
+  let next = ankles.findIndex((ankle) => ankle !== undefined);
+  const pelvisRise = ankles.map((ankle, frame) => {
+    let support = ankle;
+    if (ankle !== undefined) {
+      previous = frame;
+      next = ankles.findIndex((value, index) => index > frame && value !== undefined);
+    } else if (previous === -1) {
+      support = ankles[next]!;
+    } else if (next === -1) {
+      support = ankles[previous]!;
+    } else {
+      const before = ankles[previous]!, after = ankles[next]!;
+      support = before + (after - before) * (frame - previous) / (next - previous);
+    }
+    return support! - floor + (clearance[Math.min(first + frame, last)] ?? 0);
+  });
+  return { ...pose, pelvisRise };
 }
 
 type Vector = [number, number, number];

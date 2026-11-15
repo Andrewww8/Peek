@@ -12,7 +12,7 @@ import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
-import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, hasTrackedFingers, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
+import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, groundedShotPlayback, hasTrackedFingers, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -85,7 +85,7 @@ function OnDeviceComparisonScreen({ shot, tag, video, fallbackPose, isGuest, pla
   const pose = useFallback ? fallbackPose : result?.pose;
   const automatic = shot.shotNumber === undefined;
   const canStart = automatic || !!fallbackPose;
-  const updatingHands = state?.phase === 'queued' || state?.phase === 'detecting' || state?.phase === 'tracking';
+  const updatingPose = state?.phase === 'queued' || state?.phase === 'detecting' || state?.phase === 'tracking';
   const refreshStarted = useRef<string>(undefined);
 
   useEffect(() => {
@@ -112,8 +112,8 @@ function OnDeviceComparisonScreen({ shot, tag, video, fallbackPose, isGuest, pla
         <Title title="Your shot vs NBA" subtitle={`${automatic ? 'Catch-and-shoot three' : 'Shot ' + shot.shotNumber}${releaseTime}`} />
         {pose ? (
           <>
-            {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} trackingLabel="Tracking wrists and fingers…" /> : null}
-            <PoseComparison key={useFallback ? 'cloud' : result?.version ?? 0} playerPose={pose} playerLabel={playerName ?? 'Your shot'} updatingHands={updatingHands} />
+            {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} trackingLabel="Updating shot tracking…" /> : null}
+            <PoseComparison key={useFallback ? 'cloud' : result?.version ?? 0} playerPose={pose} playerLabel={playerName ?? 'Your shot'} updatingPose={updatingPose} />
           </>
         ) : (
           <Panel>
@@ -235,12 +235,12 @@ function CloudComparisonScreen(props: ComparisonProps & { shot: TaggedComparison
   );
 }
 
-function PoseComparison({ playerPose: fullPose, playerLabel, updatingHands = false }: {
-  playerPose: Pose; playerLabel: string; updatingHands?: boolean;
+function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = false }: {
+  playerPose: Pose; playerLabel: string; updatingPose?: boolean;
 }) {
   const [reference, setReference] = useState(preferred);
   const [firstFrame, lastMotionFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
-  const playerPose = useMemo(() => comparisonPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
+  const playerPose = useMemo(() => groundedShotPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
   const referencePose = useMemo(() => comparisonPlayback(reference.pose, firstFrame), [reference, firstFrame]);
   const hasHandDetail = useMemo(() => hasTrackedFingers(playerPose), [playerPose]);
   const [frame, setFrame] = useState(0);
@@ -292,7 +292,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingHands = fal
   }
 
   async function openAR() {
-    if (opening.current || updatingHands) return;
+    if (opening.current || updatingPose) return;
     opening.current = true;
     setOpeningAR(true);
     setArNotice(undefined);
@@ -334,11 +334,11 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingHands = fal
           pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
       <View style={styles.stageActions}>
-        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR || updatingHands} style={styles.action} />
+        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR || updatingPose} style={styles.action} />
         <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
       </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
-      {!updatingHands && !hasHandDetail ? <Text style={ui.body}>Hand details are unavailable for this shot.</Text> : null}
+      {!updatingPose && !hasHandDetail ? <Text style={ui.body}>Hand details are unavailable for this shot.</Text> : null}
       {firstFrame === lastMotionFrame ? (
         <Notice>Only a still pose was tracked near this tag. Tag the ball release in a clip with the shooter in view to see motion.</Notice>
       ) : null}
