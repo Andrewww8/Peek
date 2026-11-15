@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from 'expo';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import { guestPoseFromVision, type VisionFrame } from './guest-pose-motion';
-import { coordinatesPerFrame, fingerCount, type Pose } from './pose-3d';
+import { coordinatesPerFrame, legacyFingerCount, type Pose } from './pose-3d';
 
 type NativeProgress = { requestId: string; operation: 'detectRelease' | 'analyze'; progress: number };
 const native = requireOptionalNativeModule<{
@@ -26,7 +26,7 @@ const cache = new SQLiteStorage('peek-guest-analysis');
 const bodyOnlyAnalysisVersion = 2;
 const handAnalysisVersion = 3;
 const groundedAnalysisVersion = 4;
-const analysisVersion = 5;
+const analysisVersion = 6;
 const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
@@ -118,7 +118,7 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       update(key, { phase: 'tracking', progress: scanShare, startedAt, result: saved });
       const { frames, trackingVersion } = await native.analyze(uri, releaseMs, requestId);
       // Earlier native builds predate the tracking version in the response.
-      const supportsHands = frames.some(({ fingers }) => fingers?.length === fingerCount * 3);
+      const supportsHands = frames.some(({ fingers }) => fingers?.length === legacyFingerCount * 3);
       const supportsJumpTracking = frames.some(({ jumpSample }) => jumpSample?.length === 4);
       const legacyVersion = supportsJumpTracking ? groundedAnalysisVersion : supportsHands ? handAnalysisVersion : bodyOnlyAnalysisVersion;
       const version = trackingVersion ?? legacyVersion;

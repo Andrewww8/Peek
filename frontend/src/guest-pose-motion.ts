@@ -1,4 +1,4 @@
-import { coordinatesPerFrame, fingerCount, jointCount } from './pose-3d.ts';
+import { coordinatesPerFrame, fingerCount, jointCount, legacyFingerCount } from './pose-3d.ts';
 import type { Pose, PoseSample } from './pose-3d.ts';
 import type { JumpSample } from './shot-grounding.ts';
 
@@ -60,7 +60,7 @@ export function guestPoseFromVision(frames: VisionFrame[]): Pose {
     points.set(index, sample);
     jumpSamples[index] = jumpSample ?? null;
     hands.delete(index);
-    if (fingers?.length !== fingerCount * 3) continue;
+    if (fingers?.length !== fingerCount * 3 && fingers?.length !== legacyFingerCount * 3) continue;
     hands.set(index, Array.from({ length: fingerCount }, (_, finger) => {
       const point = visionPoint(fingers, finger);
       const wrist = sample[fingerWrist(finger)];

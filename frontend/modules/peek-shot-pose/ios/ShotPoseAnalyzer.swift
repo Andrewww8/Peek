@@ -43,9 +43,9 @@ enum ShotPoseAnalyzer {
     let landmarks: [SIMD2<Double>?]
   }
 
-  // The same landmark order and body-relative lengths as Shot Coach's extremities_3d.
-  private static let handLandmarks: [(VNHumanHandPoseObservation.JointName, Double)] = [
-    (.middleTip, 0.108), (.indexTip, 0.1), (.middleMCP, 0.055)
+  // Preserve the original three slots, then add the index finger's own knuckle.
+  private static let handLandmarks: [VNHumanHandPoseObservation.JointName] = [
+    .middleTip, .indexTip, .middleMCP, .indexMCP
   ]
   private static let wristIndices = [13, 16]
 
@@ -149,7 +149,7 @@ enum ShotPoseAnalyzer {
                      Double(CGFloat(image.height) - crop.maxY + point.location.y * crop.height))
       }
       guard let wrist = point(.wrist) else { return nil }
-      let landmarks = handLandmarks.map { point($0.0) }
+      let landmarks = handLandmarks.map { point($0) }
       guard landmarks.contains(where: { $0 != nil }) else { return nil }
       return Hand(wrist: wrist, chirality: observation.chirality, landmarks: landmarks)
     }
@@ -158,7 +158,7 @@ enum ShotPoseAnalyzer {
   private static func matchHands(_ hands: [Hand], to wrists: [SIMD2<Double>?], bodyHeight: Double) -> [Hand?] {
     // Assign detections jointly so only one side uses a hand when the wrists overlap at release.
     let options: [Int?] = [nil] + hands.indices.map(Optional.some)
-    let maxDistance = bodyHeight * 0.15
+    let maxDistance = bodyHeight * 0.10
     func cost(_ hand: Int?, side: Int) -> Double {
       guard let hand else { return maxDistance }
       guard let wrist = wrists[side] else { return .infinity }
@@ -166,7 +166,11 @@ enum ShotPoseAnalyzer {
       guard distance <= maxDistance else { return .infinity }
       let expected: VNChirality = side == 0 ? .left : .right
       let otherSide = hands[hand].chirality != .unknown && hands[hand].chirality != expected
-      return distance + (otherSide ? bodyHeight * 0.04 : 0)
+      if otherSide, let alternate = wrists[1 - side],
+         simd_distance(hands[hand].wrist, alternate) <= min(maxDistance, distance + bodyHeight * 0.03) {
+        return .infinity
+      }
+      return distance + (otherSide ? bodyHeight * 0.02 : 0)
     }
     var result: [Hand?] = [nil, nil]
     var best = Double.infinity
@@ -180,6 +184,32 @@ enum ShotPoseAnalyzer {
       }
     }
     return result
+  }
+
+  private static func fittedHand(_ hand: Hand, wrist: SIMD3<Double>, elbow: SIMD3<Double>?,
+                                 pixelsPerMeter: Double, bodyHeight: Double) -> [SIMD3<Double>?] {
+    let forearm = wrist - (elbow ?? wrist)
+    let imageDirection = SIMD2(forearm.x, forearm.y)
+    let visibleLength = simd_length(imageDirection)
+    // The image gives the shape of the hand. Use a single gently tilted plane for all
+    // landmarks so individually guessed depths cannot stretch or cross the fingers.
+    let slope = max(-0.65, min(0.65, forearm.z / max(1e-6, visibleLength)))
+    let gradient = visibleLength > 1e-6 ? imageDirection * (slope / visibleLength) : .zero
+    var offsets = hand.landmarks.enumerated().map { index, landmark -> SIMD3<Double>? in
+      guard let landmark else { return nil }
+      let imageOffset = (landmark - hand.wrist) / pixelsPerMeter
+      let offset = SIMD3(imageOffset.x, imageOffset.y, simd_dot(imageOffset, gradient))
+      let maxRadius = (index < 2 ? 0.15 : 0.085) * bodyHeight
+      return simd_length(offset) <= maxRadius ? offset : nil
+    }
+    for finger in 0..<2 {
+      guard let tip = offsets[finger], let base = offsets[finger + 2],
+            simd_distance(tip, base) <= bodyHeight * 0.09 else {
+        offsets[finger] = nil
+        continue
+      }
+    }
+    return offsets.map { offset in offset.map { wrist + $0 } }
   }
 
   private static func handPoints(_ joints: [BodyJoint], bodyHeight: Double, image: CGImage) -> [Any] {
@@ -206,21 +236,13 @@ enum ShotPoseAnalyzer {
       matches = matchHands(hands, to: wrists, bodyHeight: bodyPixels)
     }
 
-    return handLandmarks.enumerated().flatMap { landmark, definition in
-      wristIndices.enumerated().flatMap { side, wristIndex in
-        guard let hand = matches[side], let measured = hand.landmarks[landmark],
-              let wrist = joints[wristIndex].position else { return coordinates(nil) }
-        let offset = (measured - hand.wrist) / scale
-        let length = definition.1 * bodyHeight
-        let planeLength = simd_length(offset)
-        guard planeLength <= length * 1.5 else { return coordinates(nil) }
-        // Use less inferred depth when the forearm is nearly parallel to the image plane.
-        // Small changes in its direction should not move a fingertip across the wrist.
-        let forearm = wrist - (joints[wristIndex - 1].position ?? wrist)
-        let depthWeight = max(-1, min(1, forearm.z / max(1e-6, simd_length(forearm) * 0.35)))
-        let depth = sqrt(max(0, length * length - planeLength * planeLength))
-        return coordinates(wrist + SIMD3(offset.x, offset.y, depth * depthWeight))
-      }
+    let positioned = wristIndices.enumerated().map { side, wristIndex -> [SIMD3<Double>?]? in
+      guard let hand = matches[side], let wrist = joints[wristIndex].position else { return nil }
+      return fittedHand(hand, wrist: wrist, elbow: joints[wristIndex - 1].position,
+                        pixelsPerMeter: scale, bodyHeight: bodyHeight)
+    }
+    return handLandmarks.indices.flatMap { landmark in
+      positioned.flatMap { coordinates($0?[landmark] ?? nil) }
     }
   }
 
