@@ -2487,9 +2487,22 @@ const SCENARIOS: Record<string, Scenario> = {
     assert(json(ov.shots.map((x) => x.outcome)) === json(['made', 'missed']), `overview shows ${json(ov.shots.map((x) => x.outcome))}, the caller's shots are made, missed`);
     const m = results.find((r) => r.name === 'get_shot_metrics')?.content as { outcome: string };
     assert(m.outcome === 'made', `shot 1 came back ${m.outcome}: that is the other player's shot`);
+    // Coach also answers chats with no synced clips (a new chat, a guest's on-device shot), so a send
+    // naming B's session id opens a thread in A's own namespace. It must never reach B's shots or history.
+    const bHistory = json(await pb.backend.coach.history(b.s.id));
+    CLOUD.coach.script = (t) =>
+      t.results.length === 0
+        ? { tools: [{ name: 'get_session_overview', args: { userId: B, sessionId: b.s.id } }] }
+        : { text: 'I do not see synced shots here yet.' };
     const direct = await sendRejects(pa.backend.coach.send(b.s.id, 'hi'));
-    assert(direct.code === 'not_found', `A chatting about B's session: ${direct.code}`);
-    assert((await pa.backend.coach.history(b.s.id)).length === 0, "A can read a history for B's session");
+    assert(direct.ok || direct.code === 'not_found', `A chatting about B's session id: ${direct.code}`);
+    if (direct.ok) {
+      const seenB = CLOUD.coach.seen.at(-1)!.results;
+      const overview = seenB.find((r) => r.name === 'get_session_overview')?.content as { shots: unknown[] };
+      assert(overview.shots.length === 0, `A's tools saw B's shots: ${json(seenB).slice(0, 300)}`);
+    }
+    assert(json(await pb.backend.coach.history(b.s.id)) === bHistory, "A's chat changed B's history");
+    assert((await pa.backend.coach.history(b.s.id)).every((m) => !json(m).includes(B)), "A can read B's data in a history");
   },
 
   /** signed_out, not_synced, offline, daily_limit (cap 3), not_configured, ready; local stats work in every state. */
