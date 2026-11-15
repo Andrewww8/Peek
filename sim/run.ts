@@ -3149,3 +3149,9 @@ async function main() {
 }
 
 await main();
+// A killed phone's in-flight request never settles (that is how a kill is simulated), so its
+// request timer (up to 120 s) would keep Node alive long after the report is written. The
+// exit code is set; flush the output and exit now.
+await new Promise<void>((resolve) => process.stdout.write('', () => resolve()));
+await new Promise<void>((resolve) => process.stderr.write('', () => resolve()));
+process.exit();
