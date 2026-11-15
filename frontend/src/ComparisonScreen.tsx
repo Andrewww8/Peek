@@ -34,7 +34,8 @@ async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing:
   const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose?followThrough=1', {
     signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]),
   });
-  const body = await response.json() as { pose?: Pose; shotType?: string; message?: string };
+  // A gateway error (e.g. a Vercel timeout) has a plain-text body; show our message, not a JSON parse error.
+  const body = await response.json().catch(() => ({})) as { pose?: Pose; shotType?: string; message?: string };
   if (response.status === 404 && syncing) return 'Syncing your shot…';
   if (response.status === 409) return 'Waiting for shot analysis…';
   if (!response.ok) throw new Error(body.message || 'Could not load the 3D pose.');
