@@ -73,7 +73,6 @@ export function CoachScreen({
   const cloud = userId && session ? store.sessionCloudShots(userId, session.id) : [];
   const syncing = cloud.some(({ state }) => state === 'pending');
   const ready = cloud.some(({ state }) => state === 'synced' || state === 'dirty');
-  const unavailable = !ready && !syncing && cloud.some(({ state }) => state === 'unavailable');
   const tagged = !!session && (!!cloud.length || store.listShots(session.id).length > 0);
   const client = useMemo(() => userId
     ? createSessionCoach(apiUrl, sessionId, (renew) => accessToken(userId, renew), expoFetch)
@@ -294,7 +293,6 @@ export function CoachScreen({
           </View>
         ) : null}
         {!userId && notice ? <View style={styles.actions}><Chip label="Sign in" onPress={onSignIn} /></View> : null}
-        {session && unavailable ? <Notice>This shot couldn’t sync. Attach another clip to try again.</Notice> : null}
         {!syncLimit && (connecting || syncing && !ready || queued && !notice) ? (
           <Text accessibilityLiveRegion="polite" style={styles.status}>
             {connecting ? 'Connecting to Coach…' : syncing ? 'Syncing your shot with Coach…' : 'Opening your conversation…'}

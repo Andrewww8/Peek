@@ -12,7 +12,7 @@ const native = requireOptionalNativeModule<{
 }>('PeekShotPose');
 
 export type ShotAnalysisTag = { shotNumber: number; releaseMs: number };
-export type ShotAnalysisResult = { pose: Pose; releaseMs: number };
+export type ShotAnalysisResult = { pose: Pose; releaseMs: number; version?: number };
 export type ShotAnalysisState = {
   phase: 'queued' | 'detecting' | 'tracking' | 'complete' | 'failed';
   progress: number;
@@ -23,6 +23,8 @@ export type ShotAnalysisState = {
 };
 
 const cache = new SQLiteStorage('peek-guest-analysis');
+// Old results may contain a padded second after release rather than a fresh track of the footage.
+const analysisVersion = 2;
 const dailyLimit = 5;
 const usageKey = 'usage';
 const states = new Map<string, ShotAnalysisState>();
@@ -33,6 +35,7 @@ let requestSequence = 0;
 
 export const hasOnDeviceAnalysis = () => native?.isAvailable() ?? false;
 export const hasAutomaticAnalysis = () => hasOnDeviceAnalysis() && typeof native?.detectRelease === 'function';
+export const needsShotAnalysisRefresh = (result: ShotAnalysisResult) => result.version !== analysisVersion;
 
 function analysisKey(sessionId: string, tag?: ShotAnalysisTag) {
   return tag ? `pose:${sessionId}:${tag.shotNumber}:${tag.releaseMs}` : `auto-pose:${sessionId}`;
@@ -78,7 +81,7 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
   if (existing) return existing;
   const previous = getShotAnalysisState(sessionId, tag);
   const saved = previous?.result;
-  if (saved && saved.pose.frameCount > saved.pose.releaseIndex + saved.pose.fps) return Promise.resolve(saved);
+  if (saved && !needsShotAnalysisRefresh(saved)) return Promise.resolve(saved);
 
   const startedAt = Date.now();
   update(key, { phase: 'queued', progress: 0, startedAt, result: saved });
@@ -111,7 +114,7 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       const releaseMs = saved?.releaseMs ?? tag?.releaseMs ?? await native.detectRelease(uri, requestId);
       update(key, { phase: 'tracking', progress: scanShare, startedAt, result: saved });
       const { frames } = await native.analyze(uri, releaseMs, requestId);
-      const result = { pose: guestPoseFromVision(frames), releaseMs };
+      const result = { pose: guestPoseFromVision(frames), releaseMs, version: analysisVersion };
       const state: ShotAnalysisState = { phase: 'complete', progress: 1, result, startedAt, finishedAt: Date.now() };
       const writes: [string, string][] = [[key, JSON.stringify(state)]];
       if (isGuest && !saved) writes.push([usageKey, day + ':' + (used + 1)]);

@@ -22,6 +22,8 @@ export type SavedDemo = {
 
 type CloudShot = Shot & { sessionId: string };
 type CloudState = 'pending' | 'synced' | 'dirty' | 'unavailable';
+export type CloudSyncIssue = 'missing_recording' | 'unsupported_recording' | 'recording_too_large'
+  | 'recording_too_long' | 'recording_unreadable' | 'release_after_end' | 'invalid_shot' | 'cloud_clip_missing';
 
 const schema = `
   CREATE TABLE IF NOT EXISTS sessions (
@@ -63,7 +65,14 @@ const cloudSchema = `
   CREATE INDEX shots_cloud_state ON shots (cloud_state, session_id) WHERE cloud_state IS NOT NULL;
 `;
 
-const SCHEMA_VERSION = 2;
+const cloudIssueSchema = `
+  ALTER TABLE shots ADD COLUMN cloud_issue TEXT CHECK (cloud_issue IN (
+    'missing_recording', 'unsupported_recording', 'recording_too_large', 'recording_too_long',
+    'recording_unreadable', 'release_after_end', 'invalid_shot', 'cloud_clip_missing'
+  ));
+`;
+
+const SCHEMA_VERSION = 3;
 
 export class PracticeStore {
   private db: PracticeDatabase;
@@ -79,7 +88,8 @@ export class PracticeStore {
       db.execSync('BEGIN IMMEDIATE;');
       try {
         if (version < 1) db.execSync(schema);
-        db.execSync(cloudSchema);
+        if (version < 2) db.execSync(cloudSchema);
+        db.execSync(cloudIssueSchema);
         db.execSync(`PRAGMA user_version = ${SCHEMA_VERSION}; COMMIT;`);
       } catch (error) {
         db.execSync('ROLLBACK;');
@@ -121,7 +131,7 @@ export class PracticeStore {
       }
       if (session.video) {
         this.db.runSync(
-          `UPDATE shots SET cloud_state = 'pending', cloud_outcome = outcome
+          `UPDATE shots SET cloud_state = 'pending', cloud_outcome = outcome, cloud_issue = NULL
            WHERE session_id = ? AND cloud_state IS NULL AND (? IS NULL OR shot_number = ?)`,
           id, shotNumber ?? null, shotNumber ?? null,
         );
@@ -194,13 +204,14 @@ export class PracticeStore {
     );
   }
 
-  sessionCloudShots(userId: string, sessionId: string) {
-    return this.db.getAllSync<{ shotNumber: number; state: CloudState }>(
-      `SELECT shot_number AS shotNumber, cloud_state AS state FROM shots
+  sessionCloudShots(userId: string, sessionId: string): { shotNumber: number; state: CloudState; issue?: CloudSyncIssue }[] {
+    const rows = this.db.getAllSync<{ shotNumber: number; state: CloudState; issue: CloudSyncIssue | null }>(
+      `SELECT shot_number AS shotNumber, cloud_state AS state, cloud_issue AS issue FROM shots
        JOIN sessions ON sessions.id = shots.session_id
        WHERE sessions.cloud_user_id = ? AND session_id = ? AND cloud_state IS NOT NULL
        ORDER BY shot_number`, userId, sessionId,
     );
+    return rows.map(({ issue, ...shot }) => issue ? { ...shot, issue } : shot);
   }
 
   cloudShots(userId: string, state: 'pending' | 'dirty', sessionId?: string) {
@@ -213,13 +224,17 @@ export class PracticeStore {
     );
   }
 
-  finishCloudShot(userId: string, shot: CloudShot, previous: 'pending' | 'dirty', result: 'saved' | 'unavailable') {
+  finishCloudShot(
+    userId: string, shot: CloudShot, previous: 'pending' | 'dirty', result: 'saved' | 'unavailable', issue?: CloudSyncIssue,
+  ) {
     const next: CloudState = result === 'saved' ? 'synced' : 'unavailable';
     this.db.runSync(
-      `UPDATE shots SET cloud_state = CASE WHEN ? = 'synced' AND cloud_outcome <> ? THEN 'dirty' ELSE ? END
+      `UPDATE shots SET cloud_state = CASE WHEN ? = 'synced' AND cloud_outcome <> ? THEN 'dirty' ELSE ? END,
+         cloud_issue = ?
        WHERE session_id = ? AND shot_number = ? AND cloud_state = ?
          AND session_id IN (SELECT id FROM sessions WHERE cloud_user_id = ?)`,
-      next, shot.outcome, next, shot.sessionId, shot.shotNumber, previous, userId,
+      next, shot.outcome, next, result === 'unavailable' ? issue ?? null : null,
+      shot.sessionId, shot.shotNumber, previous, userId,
     );
   }
 

@@ -3,10 +3,11 @@ import { AppState, Text, View } from 'react-native';
 import { apiUrl } from './api';
 import { accessToken } from './auth';
 import type { PracticeStore } from './database';
+import { cloudIssueText } from './cloud-issue';
 import { getShotAnalysis, type ShotAnalysis } from './shot-analysis';
 import { Button, Panel, ui } from './ui';
 
-function summary(state: ReturnType<PracticeStore['sessionCloudShots']>[number]['state'], analysis?: ShotAnalysis) {
+function summary(shot: ReturnType<PracticeStore['sessionCloudShots']>[number], analysis?: ShotAnalysis) {
   switch (analysis?.status) {
     case 'complete': {
       if (!analysis.usable) return 'The pose was too unclear for reliable measurements.';
@@ -18,7 +19,7 @@ function summary(state: ReturnType<PracticeStore['sessionCloudShots']>[number]['
     case 'failed': return 'The shooter’s pose could not be measured.';
     case 'expired': return 'The clip expired before analysis.';
     case 'pending': return 'Waiting for analysis';
-    default: return state === 'unavailable' ? 'Clip unavailable for analysis' : 'Waiting for sync';
+    default: return shot.state === 'unavailable' ? cloudIssueText(shot.issue) : 'Waiting for sync';
   }
 }
 
@@ -72,12 +73,12 @@ export function ShotAnalysisPanel({ store, sessionId, userId, shotCount, onCompa
     <Panel>
       <Text accessibilityRole="header" style={ui.title}>Shot analysis</Text>
       {error ? <Text accessibilityRole="alert" style={ui.body}>Couldn’t refresh shot analysis.</Text> : null}
-      {store.sessionCloudShots(userId, sessionId).map(({ shotNumber, state }) => (
-        <View key={shotNumber} style={ui.group}>
-          <Text style={ui.text}>Shot {shotNumber}</Text>
-          <Text style={ui.body}>{summary(state, results.get(shotNumber))}</Text>
-          {results.get(shotNumber)?.usable ? (
-            <Button label="Compare with an NBA player" kind="secondary" arrow onPress={() => onCompare(shotNumber)} />
+      {store.sessionCloudShots(userId, sessionId).map((shot) => (
+        <View key={shot.shotNumber} style={ui.group}>
+          <Text style={ui.text}>Shot {shot.shotNumber}</Text>
+          <Text style={ui.body}>{summary(shot, results.get(shot.shotNumber))}</Text>
+          {results.get(shot.shotNumber)?.usable ? (
+            <Button label="Compare with an NBA player" kind="secondary" arrow onPress={() => onCompare(shot.shotNumber)} />
           ) : null}
         </View>
       ))}

@@ -1,5 +1,5 @@
 import { accountFetch, httpsUrl } from './api.ts';
-import type { PracticeStore } from './database.ts';
+import type { CloudSyncIssue, PracticeStore } from './database.ts';
 
 type CloudShot = ReturnType<PracticeStore['cloudShots']>[number];
 type SyncStore = Pick<PracticeStore, 'pendingCloudSessions' | 'cloudShots' | 'finishCloudShot'>;
@@ -7,6 +7,15 @@ type CloudAccount = { id: string; accessToken: (refresh: boolean) => Promise<str
 export type RecordingUploader = (url: string, path: string, headers: Record<string, string>, signal: AbortSignal) => Promise<number>;
 
 const contentTypes = new Map([['mov', 'video/quicktime'], ['mp4', 'video/mp4'], ['m4v', 'video/x-m4v']]);
+const rejectedRecordingStatuses = new Set([400, 413, 415, 422]);
+const responseIssues = new Map<unknown, CloudSyncIssue>([
+  ['invalid_request', 'invalid_shot'],
+  ['unsupported_media_type', 'unsupported_recording'],
+  ['recording_too_large', 'recording_too_large'],
+  ['recording_too_long', 'recording_too_long'],
+  ['recording_unreadable', 'recording_unreadable'],
+  ['clip_not_found', 'cloud_clip_missing'],
+]);
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 
 export class GuestQuotaError extends Error {}
@@ -18,11 +27,13 @@ function record(value: unknown): value is Record<string, unknown> {
 class CloudResponseError extends Error {
   readonly status: number;
   readonly from: 'api' | 'upload';
+  readonly issue?: CloudSyncIssue;
 
-  constructor(status: number, from: 'api' | 'upload' = 'api') {
+  constructor(status: number, from: 'api' | 'upload' = 'api', issue?: CloudSyncIssue) {
     super(from === 'api' ? `The clip service returned HTTP ${status}.` : `Blob upload returned HTTP ${status}.`);
     this.status = status;
     this.from = from;
+    this.issue = issue;
   }
 }
 
@@ -53,25 +64,29 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
       body: JSON.stringify(body),
       signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
     });
-    if (!response.ok || method === 'PATCH') {
-      const { ok, status } = response;
-      if (status === 429) {
+    if (!response.ok) {
+      const { status } = response;
+      if (status === 429 || rejectedRecordingStatuses.has(status) || (method === 'PATCH' && status === 404)) {
         const error: unknown = await response.json().catch(() => null);
-        if (record(error) && error.error === 'guest_daily_limit' && typeof error.message === 'string') {
+        if (status === 429 && record(error) && error.error === 'guest_daily_limit' && typeof error.message === 'string') {
           throw new GuestQuotaError(error.message);
         }
-        throw new CloudResponseError(status);
+        const issue = record(error) ? responseIssues.get(error.error) : undefined;
+        throw new CloudResponseError(status, 'api', issue);
       }
       await response.body?.cancel();
-      if (!ok) throw new CloudResponseError(status);
+      throw new CloudResponseError(status);
+    }
+    if (method === 'PATCH') {
+      await response.body?.cancel();
       return null;
     }
     return await response.json() as unknown;
   }
 
-  function finish(shots: CloudShot[], previous: 'pending' | 'dirty', result: 'saved' | 'unavailable') {
+  function finish(shots: CloudShot[], previous: 'pending' | 'dirty', result: 'saved' | 'unavailable', issue?: CloudSyncIssue) {
     if (signal.aborted) return;
-    for (const shot of shots) store.finishCloudShot(account.id, shot, previous, result);
+    for (const shot of shots) store.finishCloudShot(account.id, shot, previous, result, issue);
   }
 
   for (const session of store.pendingCloudSessions(account.id)) {
@@ -79,10 +94,14 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
     const pending = store.cloudShots(account.id, 'pending', session.id);
     if (!pending.length) continue;
     const path = session.videoPath;
-    const ext = path?.split('.').pop()?.toLowerCase();
+    if (!path || !hasRecording(path)) {
+      finish(pending, 'pending', 'unavailable', 'missing_recording');
+      continue;
+    }
+    const ext = path.split('.').pop()?.toLowerCase();
     const contentType = ext && contentTypes.get(ext);
-    if (!path || !ext || !contentType || !hasRecording(path)) {
-      finish(pending, 'pending', 'unavailable');
+    if (!contentType) {
+      finish(pending, 'pending', 'unavailable', 'unsupported_recording');
       continue;
     }
 
@@ -129,7 +148,7 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
               typeof clip.endMs === 'number' && Number.isSafeInteger(clip.endMs) && clip.endMs > clip.startMs) {
             finish([shot], 'pending', 'saved');
           } else if (clip?.error === 'release_beyond_duration') {
-            finish([shot], 'pending', 'unavailable');
+            finish([shot], 'pending', 'unavailable', 'release_after_end');
           } else if (clip?.error === 'guest_daily_limit' && typeof clip.message === 'string') {
             limitMessage = clip.message;
           }
@@ -137,8 +156,8 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
         if (limitMessage) throw new GuestQuotaError(limitMessage);
       } catch (error) {
         if (signal.aborted) return;
-        if (error instanceof CloudResponseError && error.from === 'api' && [400, 413, 415, 422].includes(error.status)) {
-          finish(batch, 'pending', 'unavailable');
+        if (error instanceof CloudResponseError && error.from === 'api' && rejectedRecordingStatuses.has(error.status)) {
+          finish(batch, 'pending', 'unavailable', error.issue);
           continue;
         }
         defer(error);
@@ -155,7 +174,7 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
     } catch (error) {
       if (signal.aborted) return;
       if (error instanceof CloudResponseError && error.status === 404) {
-        finish([shot], 'dirty', 'unavailable');
+        finish([shot], 'dirty', 'unavailable', error.issue);
       } else {
         defer(error);
       }

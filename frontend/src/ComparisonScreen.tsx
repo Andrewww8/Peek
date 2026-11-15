@@ -8,9 +8,10 @@ import { AppState, PanResponder, ScrollView, StyleSheet, Text, View } from 'reac
 
 import { accountFetch, apiUrl } from './api';
 import { accessToken } from './auth';
+import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
-import { getShotAnalysisState, hasOnDeviceAnalysis, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
+import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
 import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
@@ -80,18 +81,19 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
   const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
   const result = state?.result;
   const automatic = shot.shotNumber === undefined;
-  const refreshStarted = useRef(false);
+  const refreshStarted = useRef<string>(undefined);
 
   useEffect(() => {
     if (!video) return;
     if (automatic && !state) {
       void startShotAnalysis(sessionId, video, undefined, isGuest).catch(() => undefined);
-    } else if (!refreshStarted.current && state?.phase === 'complete' && result &&
-        result.pose.frameCount <= result.pose.releaseIndex + result.pose.fps) {
-      refreshStarted.current = true;
+    } else if (state?.phase === 'complete' && state.result && needsShotAnalysisRefresh(state.result)) {
+      const key = sessionId + ':' + (tag ? tag.shotNumber + ':' + tag.releaseMs : 'auto');
+      if (refreshStarted.current === key) return;
+      refreshStarted.current = key;
       void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
     }
-  }, [automatic, video, state, result, sessionId, tag, isGuest]);
+  }, [automatic, video, state, sessionId, tag, isGuest]);
 
   function analyze() {
     if (video) void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
@@ -106,7 +108,7 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
         {result ? (
           <>
             {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} /> : null}
-            <PoseComparison key={result.pose.frameCount} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} />
+            <PoseComparison key={result.version ?? 0} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} />
           </>
         ) : (
           <Panel>
@@ -130,7 +132,8 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
   const [connecting, setConnecting] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const { sessionId, shotNumber } = shot;
-  const state = userId && store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber)?.state;
+  const cloudShot = userId ? store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber) : undefined;
+  const state = cloudShot?.state;
   const queued = !!state && state !== 'unavailable';
   const limitNotice = state === 'pending' ? guestLimit : undefined;
   const pose = loaded?.userId === userId ? loaded.pose : undefined;
@@ -151,9 +154,9 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
         return;
       }
       try {
-        const state = store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber)?.state;
-        if (state === 'unavailable') throw new Error('This recording could not be synced for analysis.');
-        const result = await loadShotPose({ sessionId, shotNumber }, userId, state === 'pending', signal);
+        const current = store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber);
+        if (current?.state === 'unavailable') throw new Error(cloudIssueText(current.issue));
+        const result = await loadShotPose({ sessionId, shotNumber }, userId, current?.state === 'pending', signal);
         if (signal.aborted) return;
         if (typeof result === 'string') {
           setLoading(result);
@@ -207,11 +210,11 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
               : <Loading text={loading} />}</Panel>
         ) : (
           <Panel>
-            {notice ? <Notice>{notice}</Notice> : null}
+            {notice && state !== 'unavailable' ? <Notice>{notice}</Notice> : null}
             {canAnalyze && state !== 'unavailable' ? (
               <><Text style={ui.body}>Send this recording for shot analysis to create your 3D comparison.</Text>
                 <Button label={connecting ? 'Preparing shot…' : 'Analyze this shot'} onPress={() => void analyze()} disabled={connecting} /></>
-            ) : <Notice>Choose a shot with its original recording or a completed analysis.</Notice>}
+            ) : <Notice>{state === 'unavailable' ? cloudIssueText(cloudShot?.issue) : 'Choose a shot with its original recording or a completed analysis.'}</Notice>}
           </Panel>
         )}
         <Button label="Choose another shot" kind="secondary" arrow onPress={onChooseShot} />

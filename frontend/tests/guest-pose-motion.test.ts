@@ -37,17 +37,39 @@ test('guest motion follows the selected recording and stays aligned to the relea
   assert.notDeepEqual(posePoint(playback, 0, 16), posePoint(playback, 1, 16));
 });
 
-test('legacy comparisons hold the previous pose across a gap and through the full tail', () => {
+test('the player keeps moving across a release gap with later detections, then holds the last pose', () => {
   const pose = guestPoseFromVision(shot(0.5));
   const blank = (frame: number, end = frame + 1) =>
     pose.joints.fill(null, frame * coordinatesPerFrame, end * coordinatesPerFrame);
-  blank(25);
+  blank(25, 29);
   blank(31, 37);
   const playback = comparisonPlayback({ ...pose, frameCount: 37 });
   assert.equal(playback.frameCount, 55);
-  assert.deepEqual(posePoint(playback, 25, 16), posePoint(pose, 24, 16));
-  assert.deepEqual(posePoint(playback, 26, 16), posePoint(pose, 26, 16));
+  const wristHeight = (frame: number) => posePoint(playback, frame, 16)![1];
+  for (let frame = 24; frame < 29; frame++) assert.ok(wristHeight(frame) > wristHeight(frame + 1));
+  assert.deepEqual(posePoint(playback, 29, 16), posePoint(pose, 29, 16));
+  assert.deepEqual(posePoint(playback, 31, 16), posePoint(pose, 30, 16));
   assert.deepEqual(posePoint(playback, 54, 16), posePoint(pose, 30, 16));
+});
+
+test('the final second uses measured motion and ignores motion beyond the comparison window', () => {
+  const frames = shot(0.5);
+  const last = frames.at(-1)!;
+  const raisedWrist = (index: number, height: number): VisionFrame => ({
+    index, joints: last.joints.map((value, coordinate) => coordinate === 16 * 3 + 1 ? value! + height : value),
+  });
+  const pose = guestPoseFromVision([...frames, raisedWrist(52, 0.4), raisedWrist(54, 0.5)]);
+  const playback = comparisonPlayback(pose);
+  assert.equal(playback.frameCount - 1 - playback.releaseIndex, 30);
+  assert.notDeepEqual(posePoint(playback, 53, 16), posePoint(playback, 54, 16));
+  assert.deepEqual(posePoint(playback, 54, 16), posePoint(pose, 54, 16));
+
+  // An extra source frame beyond +1.0s cannot act as an interpolation endpoint.
+  const overrun = structuredClone(pose);
+  overrun.joints.fill(null, 54 * coordinatesPerFrame);
+  overrun.joints.push(...pose.joints.slice(54 * coordinatesPerFrame));
+  overrun.frameCount++;
+  assert.deepEqual(posePoint(comparisonPlayback(overrun), 54, 16), posePoint(pose, 53, 16));
 });
 
 test('guest analysis rejects footage without a pose instead of providing sample motion', () => {

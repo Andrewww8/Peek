@@ -43,18 +43,27 @@ export function shotMotionWindow(pose: Pose): [first: number, last: number] {
 
 export function comparisonPlayback(pose: Pose, first = 0): Pose {
   const frameCount = pose.releaseIndex + pose.fps - first + 1;
-  let lastVisible: number | undefined;
-  const frames = Array.from({ length: frameCount }, (_, i) => {
+  const visible = Array.from({ length: Math.min(frameCount, Math.max(0, pose.frameCount - first)) }, (_, i) => first + i)
+    .filter((frame) => bones.some(([a, b]) => b < jointCount && posePoint(pose, frame, a) && posePoint(pose, frame, b)));
+  let next = 0;
+  const frames = Array.from({ length: frameCount }, (_, i): [number, number, number] => {
     const frame = first + i;
-    if (frame < pose.frameCount && bones.some(([a, b]) => b < jointCount && posePoint(pose, frame, a) && posePoint(pose, frame, b))) {
-      lastVisible = frame;
-      return frame;
-    }
-    // Preserve the last whole tracked pose across detection gaps and beyond the end of the clip.
-    return frame >= pose.releaseIndex ? lastVisible ?? frame : frame;
+    while (next < visible.length && visible[next]! <= frame) next++;
+    const before = visible[next - 1];
+    const after = visible[next];
+    if (before === undefined || before === frame) return [frame, frame, 0];
+    // Bridge gaps between measured poses instead of freezing at release and jumping on reacquisition.
+    if (after !== undefined) return [before, after, (frame - before) / (after - before)];
+    // After the final measured pose, keep it on screen while the comparison finishes.
+    return [before, before, 0];
   });
-  const samples = (values: PoseSample[], width: number) => frames.flatMap((frame) =>
-    Array.from({ length: width }, (_, i) => values[frame * width + i] ?? null),
+  const samples = (values: PoseSample[], width: number) => frames.flatMap(([before, after, fraction]) =>
+    Array.from({ length: width }, (_, i) => {
+      const start = values[before * width + i] ?? null;
+      if (before === after) return start;
+      const end = values[after * width + i] ?? null;
+      return start !== null && end !== null ? start + (end - start) * fraction : null;
+    }),
   );
   return {
     ...pose,

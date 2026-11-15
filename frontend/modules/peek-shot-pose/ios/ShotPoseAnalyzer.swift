@@ -53,33 +53,45 @@ enum ShotPoseAnalyzer {
     guard release <= duration + 0.001 else {
       throw ShotPoseError.invalidRelease
     }
+    guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+      throw ShotPoseError.invalidRecording
+    }
+    let videoRange = try await videoTrack.load(.timeRange)
+    let videoStart = max(0, videoRange.start.seconds)
+    let videoEnd = min(duration, videoRange.end.seconds)
 
     let generator = AVAssetImageGenerator(asset: asset)
     generator.appliesPreferredTrackTransform = true
     generator.maximumSize = CGSize(width: 960, height: 960)
-    // Forty-two ms is a full frame at 24 fps. Limiting tolerance to 33 ms
-    // keeps the sampled pose close to each point of the 30 fps comparison.
-    let tolerance = CMTime(value: 1, timescale: 30)
-    generator.requestedTimeToleranceBefore = tolerance
-    generator.requestedTimeToleranceAfter = tolerance
+    generator.requestedTimeToleranceBefore = .zero
+    generator.requestedTimeToleranceAfter = .zero
 
     var frames: [[String: Any]] = []
     var lastTime: CMTime?
     let releaseIndex = 24
     let fps = 30
-    // Sample every other comparison frame through a full second after release.
     let lastIndex = releaseIndex + fps
-    for index in stride(from: 0, through: lastIndex, by: 2) {
+    let windowEnd = release + 1
+    // The asset can have audio beyond its last image. Sample just inside the video end
+    // if the clip ends between regular samples instead of losing its final pose.
+    let finalTime = min(windowEnd, videoEnd - 0.0001)
+    var times = stride(from: 0, through: lastIndex, by: 2)
+      .map { release + Double($0 - releaseIndex) / Double(fps) }
+      .filter { $0 >= videoStart && $0 <= finalTime }
+    if finalTime >= videoStart && finalTime > (times.last ?? -.infinity) + 0.0001 {
+      times.append(finalTime)
+    }
+
+    for (step, seconds) in times.enumerated() {
       try Task.checkCancellation()
-      defer { progress(Double(index / 2 + 1) / Double(lastIndex / 2 + 1)) }
-      let seconds = release + Double(index - releaseIndex) / Double(fps)
-      guard seconds >= 0, seconds < duration else { continue }
-      let requestedTime = CMTime(seconds: seconds, preferredTimescale: 600)
+      defer { progress(Double(step + 1) / Double(times.count)) }
+      let requestedTime = CMTime(seconds: seconds, preferredTimescale: 60_000)
       guard let frame = try? await generator.image(at: requestedTime),
             frame.actualTime.isNumeric,
-            abs(frame.actualTime.seconds - seconds) <= tolerance.seconds + 0.001,
+            frame.actualTime.seconds <= windowEnd,
             lastTime.map({ CMTimeCompare($0, frame.actualTime) < 0 }) ?? true else { continue }
       lastTime = frame.actualTime
+      let index = min(lastIndex, max(0, releaseIndex + Int(((frame.actualTime.seconds - release) * Double(fps)).rounded())))
 
       let joints: [Any]? = try autoreleasepool {
         let request = VNDetectHumanBodyPose3DRequest()
