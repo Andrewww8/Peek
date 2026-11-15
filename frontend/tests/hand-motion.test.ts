@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { stabilizeARHands } from '../src/ar-hand-motion.ts';
-import { coordinatesPerFrame, fingerCount, handJoints, jointCount, posePoint, type Pose } from '../src/pose-3d.ts';
+import { comparisonPlayerPlayback, coordinatesPerFrame, fingerCount, handJoints, jointCount, posePoint, sampleComparisonPose, type Pose } from '../src/pose-3d.ts';
+import { stabilizeHandMotion } from '../src/hand-motion.ts';
 
 type Point = [number, number, number];
 
@@ -29,6 +29,24 @@ function offset(pose: Pose, frame: number, a: number, b: number): Point {
   return [first[0] - second[0], first[1] - second[1], first[2] - second[2]];
 }
 
+test('samples in-between comparison frames without interpolating through missing hand measurements', () => {
+  const pose = record();
+  pose.pelvisRise = [0, 0.1, 0.2];
+  for (let frame = 0; frame < 3; frame++) {
+    const x = 0.06 * frame;
+    putSample(pose, frame, 13, [x, 0, 0]);
+    putSample(pose, frame, 21, [x, -0.05, 0]);
+    if (frame > 0) putSample(pose, frame, 17, [x, -0.1, 0]);
+  }
+  assert.equal(sampleComparisonPose(pose, 0.5).points[17], null);
+  assert.deepEqual(sampleComparisonPose(pose, 1).points[17], [0.06, -0.1, 0]);
+  const sample = sampleComparisonPose(pose, 1.5);
+  assert.ok(Math.abs(sample.pelvisRise - 0.15) < 1e-9);
+  assert.deepEqual(sample.points[13], [0.09, 0, 0]);
+  assert.deepEqual(sample.points[21], [0.09, -0.05, 0]);
+  assert.deepEqual(sample.points[17], [0.09, -0.1, 0]);
+});
+
 test('rejects isolated finger reversals and bridges only supported gaps through release', () => {
   const pose = record();
   for (let frame = 0; frame < pose.frameCount; frame++) {
@@ -52,7 +70,7 @@ test('rejects isolated finger reversals and bridges only supported gaps through 
       putSample(pose, frame, 18, [x + 0.42, -0.102 - length, 0]);
     }
   }
-  const filtered = stabilizeARHands(pose, handJoints);
+  const filtered = comparisonPlayerPlayback(pose);
   for (const joint of [17, 19, 21, 23]) {
     assert.equal(posePoint(filtered, 2, joint), null, 'discard the isolated reversal at the first detection');
     assert.ok(posePoint(filtered, 7, joint), 'nearby agreeing observations can bridge a one-frame gap');
@@ -64,7 +82,7 @@ test('rejects isolated finger reversals and bridges only supported gaps through 
   assert.ok(offset(filtered, 9, 19, 23)[1] < -0.04, 'attach the index tip to its own index knuckle');
   assert.ok(offset(filtered, 11, 19, 13)[2] < offset(filtered, 9, 19, 13)[2] - 0.006, 'retain follow-through');
   assert.equal(filtered.releaseIndex, 9);
-  assert.equal(filtered.frameCount, pose.frameCount);
+  assert.equal(filtered.frameCount, pose.releaseIndex + pose.fps + 1);
   assert.deepEqual(filtered.metrics, pose.metrics);
   assert.ok(posePoint(pose, 2, 17), 'do not mutate the saved source pose');
 });
@@ -80,7 +98,7 @@ test('bounds wrist corrections and preserves the final hold', () => {
     putSample(pose, frame, 21, [x, wristY - 0.04, 0]);
     putSample(pose, frame, 17, [x, wristY - 0.08, 0]);
   }
-  const filtered = stabilizeARHands(pose, handJoints);
+  const filtered = stabilizeHandMotion(pose, handJoints);
   assert.ok(Math.hypot(...offset(filtered, 9, 13, 12)) > 0.12, 'steady the wrist near the measured forearm length');
   for (let frame = 0; frame < pose.frameCount; frame++) {
     const before = posePoint(pose, frame, 13)!, after = posePoint(filtered, frame, 13)!;

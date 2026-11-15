@@ -148,8 +148,8 @@ function limitLength(vector: Point, median: number | null, low: number, high: nu
   return scale(vector, clamp(size, median * low, median * high) / size);
 }
 
-/** Stabilize the measured user hands in AR. Positions are in body-height units. */
-export function stabilizeARHands(pose: Pose, chains: readonly FingerChain[]): Pose {
+/** Stabilize the measured user hands. Positions are in body-height units. */
+export function stabilizeHandMotion(pose: Pose, chains: readonly FingerChain[]): Pose {
   if (!pose.frameCount) return pose;
   const bodyStride = pose.joints.length / pose.frameCount;
   const fingers = pose.fingers?.slice();

@@ -12,7 +12,7 @@ import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
-import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePointCount, shotMotionWindow, stabilizedShotPlayback, visiblePosePoint } from './pose-3d';
+import { bones, comparisonPlayback, comparisonPlayerPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, sampleComparisonPose, shotMotionWindow, stabilizedShotPlayback } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -242,7 +242,8 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
 }) {
   const [reference, setReference] = useState(preferred);
   const [firstFrame, lastMotionFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
-  const playerPose = useMemo(() => stabilizedShotPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
+  const bodyPlayback = useMemo(() => stabilizedShotPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
+  const playerPose = useMemo(() => comparisonPlayerPlayback(bodyPlayback), [bodyPlayback]);
   const referencePose = useMemo(() => comparisonPlayback(reference.pose, firstFrame), [reference, firstFrame]);
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(playerPose.frameCount > 1);
@@ -271,12 +272,12 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
 
   useEffect(() => {
     if (!playing) return;
-    // Play both shots at half speed on the same release-aligned timeline.
+    // Play both shots at half speed, with a midpoint between each pair of source frames.
     const started = performance.now() - playhead.current * 2000 / playerPose.fps;
     let animation: number;
     const tick = () => {
-      const elapsed = Math.floor((performance.now() - started) * playerPose.fps / 2000);
-      const next = elapsed % playerPose.frameCount;
+      const elapsedTicks = Math.floor((performance.now() - started) * playerPose.fps / 1000);
+      const next = Math.min(playerPose.frameCount - 1, (elapsedTicks % (2 * playerPose.frameCount)) / 2);
       if (next !== playhead.current) {
         playhead.current = next;
         setFrame(next);
@@ -302,7 +303,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
       try {
         const png = await loadNameAtlas();
         if (signal.aborted) return;
-        const bytes = comparisonUsdz(playerPose, referencePose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
+        const bytes = comparisonUsdz(bodyPlayback, referencePose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
         const cache = new Directory(Paths.cache, 'peek-ar');
         cache.create({ idempotent: true, intermediates: true });
         const name = 'peek-comparison-' + randomUUID();
@@ -349,7 +350,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
     }
     void prepareAndOpen();
     return () => request.abort();
-  }, [arRequested, playerLabel, playerPose, reference.player, referencePose, updatingPose]);
+  }, [arRequested, bodyPlayback, playerLabel, reference.player, referencePose, updatingPose]);
 
   function seek(next: number) {
     setPlaying(false);
@@ -369,7 +370,8 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
     setARRequested(true);
   }
 
-  const frameDeltaMs = Math.round((frame - playerPose.releaseIndex) * 1000 / playerPose.fps);
+  const wholeFrame = Math.floor(frame);
+  const frameDeltaMs = Math.round((wholeFrame - playerPose.releaseIndex) * 1000 / playerPose.fps);
   return (
     <>
       <View style={styles.stageRow} {...rotate.panHandlers}>
@@ -393,7 +395,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
             {frameDeltaMs === 0 ? 'RELEASE' : (frameDeltaMs > 0 ? '+' : '−') + String(Math.abs(frameDeltaMs)) + ' MS FROM RELEASE'}
           </Text>
         </View>
-        <Slider minimumValue={0} maximumValue={playerPose.frameCount - 1} step={1} value={frame} tapToSeek
+        <Slider minimumValue={0} maximumValue={playerPose.frameCount - 1} step={1} value={wholeFrame} tapToSeek
           accessibilityLabel="Both shots' playhead" minimumTrackTintColor={colors.note}
           maximumTrackTintColor={colors.border} thumbTintColor={colors.note}
           onSlidingStart={() => setPlaying(false)} onValueChange={seek} />
@@ -466,9 +468,8 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
   const cos = Math.cos(angle);
   const scale = Math.min(size.width * 1.07, size.height * 0.54);
   const floor = size.height * 0.92;
-  const pelvisRise = pose.pelvisRise?.[frame] ?? 0;
-  const joints = Array.from({ length: posePointCount }, (_, index): Point | null => {
-    const point = visiblePosePoint(pose, frame, index);
+  const { points, pelvisRise } = sampleComparisonPose(pose, frame);
+  const joints = points.map((point): Point | null => {
     if (!point) return null;
     const [x, y, z] = point;
     const horizontal = cos * x + sin * z;
@@ -482,7 +483,8 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
       <Text style={styles.stageName} numberOfLines={2}>{label}</Text>
       <Text style={ui.mono}>{detail}</Text>
       <View style={styles.figure} accessible accessibilityLabel={label + ' animated three-dimensional skeleton'}
-        onLayout={({ nativeEvent: { layout } }) => setSize({ width: layout.width, height: layout.height })}>
+        onLayout={({ nativeEvent: { layout: { width, height } } }) => setSize((previous) =>
+          width === previous.width && height === previous.height ? previous : { width, height })}>
         <View pointerEvents="none" style={[styles.floor, { top: floor }]} />
         {size.height > 0 ? (
           <>
@@ -493,8 +495,11 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
               const width = Math.hypot(dx, dy);
               const thickness = to >= jointCount ? 1 : 3;
               return <View key={from + '-' + to} style={[styles.bone, {
-                width, height: thickness, backgroundColor: tint, left: (a[0] + b[0] - width) / 2, top: (a[1] + b[1] - thickness) / 2,
-                transform: [{ rotate: String(Math.atan2(dy, dx)) + 'rad' }],
+                height: thickness, backgroundColor: tint,
+                transform: [
+                  { translateX: (a[0] + b[0] - 1) / 2 }, { translateY: (a[1] + b[1] - thickness) / 2 },
+                  { rotate: String(Math.atan2(dy, dx)) + 'rad' }, { scaleX: width },
+                ],
               }]} />;
             })}
             {joints.map((point, index) => {
@@ -502,9 +507,10 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
               const wrist = index === 13 || index === 16;
               const radius = index >= jointCount ? index < jointCount + 4 ? 1.2 : 0.8 : index === 10 ? 6 : wrist ? 2.65 : 2.5;
               return <View key={index} style={{
-                position: 'absolute', left: point[0] - radius, top: point[1] - radius,
+                position: 'absolute', left: 0, top: 0,
                 width: 2 * radius, height: 2 * radius, borderRadius: radius,
                 backgroundColor: wrist ? 'transparent' : tint, borderColor: tint, borderWidth: wrist ? 1.15 : 0,
+                transform: [{ translateX: point[0] - radius }, { translateY: point[1] - radius }],
               }} />;
             })}
           </>
@@ -520,7 +526,7 @@ const styles = StyleSheet.create({
   stageName: { ...ui.title, fontSize: 14, lineHeight: 18, minHeight: 36, textAlignVertical: 'center' },
   figure: { height: 183, borderRadius: 12, overflow: 'hidden' },
   floor: { height: 1, backgroundColor: colors.border, position: 'absolute', left: 7, right: 7 },
-  bone: { position: 'absolute', height: 3, borderRadius: 1.5 },
+  bone: { position: 'absolute', left: 0, top: 0, width: 1 },
   playback: { gap: 8 },
   stageActions: { flexDirection: 'row', gap: 8 },
   action: { flex: 1 },

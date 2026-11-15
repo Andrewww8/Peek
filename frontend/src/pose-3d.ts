@@ -1,5 +1,5 @@
 import { buildUsdz } from '../../mobile/src/core/usdz.ts';
-import { stabilizeARHands } from './ar-hand-motion.ts';
+import { stabilizeHandMotion } from './hand-motion.ts';
 import { jumpClearance, type JumpSample } from './shot-grounding.ts';
 
 export type PoseSample = number | null;
@@ -217,6 +217,27 @@ export function visiblePosePoint(pose: Pose, frame: number, joint: number): Vect
   return posePoint(pose, frame, joint);
 }
 
+export function comparisonPlayerPlayback(pose: Pose): Pose {
+  return stabilizeHandMotion(comparisonPlayback(pose), handJoints);
+}
+
+export function sampleComparisonPose(pose: Pose, frame: number) {
+  const clamped = Math.max(0, Math.min(frame, pose.frameCount - 1));
+  const before = Math.floor(clamped);
+  const after = Math.min(before + 1, pose.frameCount - 1);
+  const fraction = clamped - before;
+  const blend = (start: number, end: number) => start + (end - start) * fraction;
+  const points = Array.from({ length: posePointCount }, (_, joint): Vector | null => {
+    const start = visiblePosePoint(pose, before, joint);
+    if (!start || fraction === 0) return start;
+    const end = visiblePosePoint(pose, after, joint);
+    if (!end) return null;
+    return [blend(start[0], end[0]), blend(start[1], end[1]), blend(start[2], end[2])];
+  });
+  const pelvisRise = blend(pose.pelvisRise?.[before] ?? 0, pose.pelvisRise?.[after] ?? 0);
+  return { points, pelvisRise };
+}
+
 function anchor(pose: Pose, frame: number, joint: number, ground: number, offset: number): Vector | null {
   const point = visiblePosePoint(pose, frame, joint);
   if (!point) return null;
@@ -430,7 +451,7 @@ export function comparisonUsdz(player: Pose, reference: Pose, labels?: Compariso
   if (player.fps !== reference.fps || player.releaseIndex !== reference.releaseIndex) {
     throw new Error('The two shots must use the same release timeline.');
   }
-  const playerPlayback = stabilizeARHands(comparisonPlayback(player), handJoints);
+  const playerPlayback = comparisonPlayerPlayback(player);
   const referencePlayback = comparisonPlayback(reference);
   const fps = String(player.fps * arSubframes / 2);
   const white: Vector = [1, 1, 1];
