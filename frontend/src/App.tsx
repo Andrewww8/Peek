@@ -12,11 +12,12 @@ import { randomUUID } from 'expo-crypto';
 import { useFonts } from 'expo-font';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  AppState, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View,
+  Animated, AppState, BackHandler, Easing, Linking, Pressable, ScrollView, StyleSheet, Text,
+  useAnimatedValue, useWindowDimensions, View,
 } from 'react-native';
-import { initialWindowMetrics, SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { initialWindowMetrics, SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AccountScreen, AuthScreen, SwitchAccount } from './AccountScreen';
 import type { EntryMode } from './AccountScreen';
@@ -30,7 +31,7 @@ import { guestUserId, restoreDeviceGuest, subscribeToGuest } from './device-gues
 import { loadPractice, localVideoUri } from './device-storage';
 import { hasAutomaticAnalysis, startShotAnalysis } from './guest-pose';
 import { ClipPicker, SavedClips } from './LibraryScreen';
-import { Splash } from './PeekMotion';
+import { Splash, useReduceMotion } from './PeekMotion';
 import type { Session } from './practice';
 import { RecordScreen } from './RecordScreen';
 import { ReplayScreen } from './ReplayScreen';
@@ -368,8 +369,6 @@ function PracticeApp({ store }: { store: PracticeStore }) {
 
   if (!authReady || seenWelcome === undefined) return <Splash />;
 
-  const knownConversations = menu ? authenticatedRecent : [];
-
   return (
     <>
       {currentRoute.screen !== 'welcome' ? (
@@ -385,7 +384,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
         </View>
       ) : null}
       {content}
-      <Menu visible={menu} session={playerSession} chats={knownConversations} onDismiss={() => setMenu(false)}
+      <Menu visible={menu} session={playerSession} chats={authenticatedRecent} onDismiss={() => setMenu(false)}
         onNewChat={newChat} onSaved={() => go({ screen: 'saved' })}
         onAccount={() => go(accountRoute)} onSwitch={() => { setMenu(false); setStack([accountRoute, { screen: 'switch' }]); }}
         onChat={openRecentChat} />
@@ -416,6 +415,8 @@ function Welcome({ onSignIn, onCreate, onGuest }: { onSignIn: () => void; onCrea
   );
 }
 
+const drawerEasing = Easing.bezier(0, 0, 0.58, 1);
+
 function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccount, onSwitch, onChat }: {
   visible: boolean;
   session: AuthSession | null;
@@ -427,12 +428,57 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccoun
   onSwitch: () => void;
   onChat: (sessionId: string) => void;
 }) {
+  const [retained, setRetained] = useState(false);
+  const progress = useAnimatedValue(0);
+  const reduceMotion = useReduceMotion();
+  const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const drawerWidth = Math.min(width * 306 / 390, 334);
+
+  useLayoutEffect(() => {
+    const target = visible ? 1 : 0;
+    if (visible || reduceMotion !== false) setRetained(visible);
+    if (reduceMotion !== false) {
+      progress.setValue(target);
+      return;
+    }
+    // Figma drawer 211:559 uses the same 300 ms ease-out in either direction.
+    const animation = Animated.timing(progress, {
+      toValue: target, duration: 300, easing: drawerEasing, useNativeDriver: true, isInteraction: false,
+    });
+    animation.start(({ finished }) => { if (finished && !visible) setRetained(false); });
+    return () => animation.stop();
+  }, [progress, reduceMotion, visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const back = BackHandler.addEventListener('hardwareBackPress', () => {
+      onDismiss();
+      return true;
+    });
+    return () => back.remove();
+  }, [onDismiss, visible]);
+
+  // An exiting drawer is decorative so navigation and new sheets can appear immediately.
+  if (!visible && (!retained || reduceMotion !== false)) return null;
+  const opacity = reduceMotion === false
+    ? progress.interpolate({ inputRange: [0, 1], outputRange: [0, 0.6] }) : 0.6;
+  const translateX = reduceMotion === false
+    ? progress.interpolate({ inputRange: [0, 1], outputRange: [-drawerWidth, 0] }) : 0;
   const name = session ? accountName(session.user) : 'Guest';
   return (
-    <Modal animationType="fade" visible={visible} transparent onRequestClose={onDismiss}>
-      <View style={styles.drawerOverlay}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onDismiss} accessible={false} />
-        <SafeAreaView style={styles.drawer} accessibilityViewIsModal>
+    <View
+      pointerEvents={visible ? 'auto' : 'none'}
+      accessibilityViewIsModal={visible}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+      onAccessibilityEscape={onDismiss}
+      style={[styles.drawerOverlay, { top: -insets.top, bottom: -insets.bottom, left: -insets.left, right: -insets.right }]}
+    >
+      <Animated.View pointerEvents="none" style={[styles.drawerScrim, { opacity }]} />
+      <Pressable style={StyleSheet.absoluteFill} onPress={onDismiss} accessible={false} />
+      <Animated.View style={[styles.drawerFrame, { width: drawerWidth, transform: [{ translateX }] }]}>
+        <SafeAreaView style={styles.drawer}>
           <View style={styles.drawerHeader}>
             <Brand size={44} wordmark />
             <IconButton icon="close" label="Close menu" style={styles.close} onPress={onDismiss} />
@@ -460,8 +506,8 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccoun
             {session ? <IconButton icon="switch" label="Switch account" style={styles.close} onPress={onSwitch} /> : null}
           </View>
         </SafeAreaView>
-      </View>
-    </Modal>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -489,9 +535,11 @@ const styles = StyleSheet.create({
   heroCopy: { ...ui.serif, marginTop: 13 },
   welcomeActions: { gap: 21, marginTop: 27 },
   guest: { marginTop: 'auto', marginBottom: 7 },
-  drawerOverlay: { flex: 1, backgroundColor: '#000a' },
+  drawerOverlay: { ...StyleSheet.absoluteFill, zIndex: 4, overflow: 'hidden' },
+  drawerScrim: { ...StyleSheet.absoluteFill, backgroundColor: '#000' },
+  drawerFrame: { height: '100%' },
   drawer: {
-    flex: 1, width: '79%', maxWidth: 334, backgroundColor: colors.drawer, borderRightWidth: 1, borderRightColor: colors.border,
+    flex: 1, backgroundColor: colors.drawer, borderRightWidth: 1, borderRightColor: colors.border,
     borderTopRightRadius: 23, borderBottomRightRadius: 23, paddingHorizontal: 14, overflow: 'hidden',
   },
   drawerHeader: { ...ui.row, paddingLeft: 6, marginTop: 3, marginBottom: 14, minHeight: 46 },

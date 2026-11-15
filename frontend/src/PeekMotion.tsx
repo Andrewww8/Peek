@@ -27,7 +27,7 @@ const brandRed = '#b32821';
 const easeInOut = Easing.inOut(Easing.ease);
 const steps = splashSteps.map((_, index) => index + 1);
 
-function useReduceMotion() {
+export function useReduceMotion() {
   const [reduceMotion, setReduceMotion] = useState<boolean>();
   useEffect(() => {
     let active = true;

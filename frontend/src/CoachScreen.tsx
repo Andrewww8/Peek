@@ -3,7 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import type { ComponentRef } from 'react';
 import {
-  Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  Animated, Easing, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, useAnimatedValue, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { CoachMessage } from '../../mobile/src/core/apiClient';
@@ -16,7 +16,7 @@ import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState } from './guest-pose';
 import { withShootingHand } from './guest-pose-motion';
-import { ThinkingDots } from './PeekMotion';
+import { ThinkingDots, useReduceMotion } from './PeekMotion';
 import { clipTime, sessionTime, type Session } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
 import { Brand, Chip, colors, fonts, gradients, Icon, IconButton, message, Notice, TopBar, ui } from './ui';
@@ -68,6 +68,9 @@ export function CoachScreen({
   const [queued, setQueued] = useState<CoachSubmission>();
   const [submitted, setSubmitted] = useState('');
   const [attachOpen, setAttachOpen] = useState(false);
+  const [attachRendered, setAttachRendered] = useState(false);
+  const attachOpacity = useAnimatedValue(0);
+  const reduceMotion = useReduceMotion();
   const [, setRevision] = useState(0);
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const activeTurn = useRef<AbortController>(null);
@@ -123,6 +126,32 @@ export function CoachScreen({
   useEffect(() => {
     if (!visible) setAttachOpen(false);
   }, [visible]);
+
+  useEffect(() => {
+    if (!visible) {
+      attachOpacity.setValue(0);
+      setAttachRendered(false);
+      return;
+    }
+    if (attachOpen) setAttachRendered(true);
+    if (reduceMotion !== false) {
+      attachOpacity.setValue(attachOpen ? 1 : 0);
+      if (!attachOpen) setAttachRendered(false);
+      return;
+    }
+    // Figma Coach → Attach open (152:407), and its reverse transition.
+    const dissolve = Animated.timing(attachOpacity, {
+      toValue: attachOpen ? 1 : 0,
+      duration: attachOpen ? 250 : 200,
+      easing: Easing.out(Easing.ease),
+      useNativeDriver: true,
+      isInteraction: false,
+    });
+    dissolve.start(({ finished }) => {
+      if (finished && !attachOpen) setAttachRendered(false);
+    });
+    return () => dissolve.stop();
+  }, [attachOpacity, attachOpen, reduceMotion, visible]);
 
   useEffect(() => () => { submission.current = null; }, []);
 
@@ -256,6 +285,7 @@ export function CoachScreen({
   const title = firstQuestion ? chatTitle(firstQuestion.text) : hasMessages ? 'New chat' : 'Coach';
   const videoRemoved = !!session && !localVideoUri(session.videoPath);
   const syncLimit = syncing && !ready ? guestLimit : undefined;
+  const showAttachments = visible && (attachOpen || attachRendered);
 
   return (
     <KeyboardAvoidingView behavior="padding" keyboardVerticalOffset={top} style={styles.fill} enabled={visible}>
@@ -309,8 +339,12 @@ export function CoachScreen({
         </ScrollView>
       )}
 
-      {attachOpen ? <Pressable accessible={false} onPress={() => setAttachOpen(false)} style={styles.scrim} /> : null}
-      <View style={[styles.footer, attachOpen && styles.footerOpen]}>
+      {showAttachments ? (
+        <Animated.View pointerEvents={attachOpen ? 'auto' : 'none'} style={[styles.scrim, { opacity: attachOpacity }]}>
+          <Pressable accessible={false} onPress={() => setAttachOpen(false)} style={StyleSheet.absoluteFill} />
+        </Animated.View>
+      ) : null}
+      <View style={[styles.footer, showAttachments && styles.footerOpen]}>
         {notice || syncLimit ? (
           <View style={styles.feedback}>
             <Notice>{notice ?? syncLimit}</Notice>
@@ -352,7 +386,7 @@ export function CoachScreen({
               onPress={() => {
                 if (submission.current) return;
                 Keyboard.dismiss();
-                setAttachOpen(!attachOpen);
+                setAttachOpen((open) => !open);
               }} disabled={busy} style={[styles.round, styles.attach]} />
             <TextInput style={styles.input} placeholder="Ask Coach about your shot…" placeholderTextColor={colors.muted}
               accessibilityLabel="Ask Coach about your shot" multiline value={question}
@@ -366,13 +400,17 @@ export function CoachScreen({
               style={[styles.round, question.trim() ? styles.sendActive : styles.attach]} />
           </View>
         </View>
-        {attachOpen ? (
-          <View style={styles.attachOverlay} accessibilityViewIsModal>
+        {showAttachments ? (
+          <Animated.View style={[styles.attachOverlay, { opacity: attachOpacity }]}
+            pointerEvents={attachOpen ? 'auto' : 'none'}
+            accessibilityViewIsModal={attachOpen}
+            accessibilityElementsHidden={!attachOpen}
+            importantForAccessibility={attachOpen ? 'auto' : 'no-hide-descendants'}>
             <View style={styles.attachMenu}>
               <AttachAction icon="camera" label="Camera" onPress={() => startAttachment(onRecord)} />
               <AttachAction icon="upload" label="Upload clip" onPress={() => startAttachment(onPickClip)} />
             </View>
-          </View>
+          </Animated.View>
         ) : null}
       </View>
     </KeyboardAvoidingView>
@@ -479,7 +517,7 @@ const styles = StyleSheet.create({
   clipText: { ...ui.mono, color: colors.text, fontSize: 9 },
   remove: { position: 'absolute', right: 0, top: 0, borderRadius: 11, minWidth: 22, minHeight: 22, backgroundColor: colors.text },
   attachOverlay: { position: 'absolute', left: 0, right: 0, bottom: 70, zIndex: 2 },
-  scrim: { ...StyleSheet.absoluteFill, bottom: 64, backgroundColor: '#0005', zIndex: 1 },
+  scrim: { ...StyleSheet.absoluteFill, bottom: 64, backgroundColor: 'rgba(0, 0, 0, 0.35)', zIndex: 1 },
   attachMenu: {
     alignSelf: 'flex-start', marginLeft: 24, backgroundColor: colors.input, borderColor: colors.border,
     borderWidth: 1, borderRadius: 18, width: 196, paddingHorizontal: 10, paddingVertical: 5,
