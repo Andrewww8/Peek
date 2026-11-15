@@ -26,7 +26,7 @@ OUTPUTS (all in outputs/)
   <video>_similar_<type>.txt / .json        the printed report and the same result as data
   <video>_difference_<type>_<player>.txt / .json / .csv     report, data, and the full table of measures
   ..._similar_<type>.glb / ..._difference_<type>_<player>.glb       animated 3D file: your skeleton (grey) over the player's average shot (orange),
-                                            46 keys at 30 fps, release at 1.0 s; similar = the closest player, difference = the player you chose
+                                            136 keys over 1.5 s (three per 30 fps frame), release at 1.0 s; similar = the closest player, difference = the player you chose
   <video>.mp4                               only with --clip
 
 REQUIREMENTS (all next to this script)
@@ -970,12 +970,29 @@ def rig_skeleton(pose, ext, rise, hand, height):
     """Joint positions -> one position + rotation per bone and frame, for a skeleton `height` metres tall. World: x right, y forward, z up, floor at z = 0.
 
     Every bone keeps one length and thickness for the whole clip and the joints are chained from the pelvis outwards, so a bone can only swing,
-    never stretch or spin about its own length. The whole body gets one fixed turn: upright (over the last frames on the ground the weight between
-    hips and chest sits above the feet, which removes the camera's tilt) and square (at lift-off, the fastest rise of the hips before the release,
+    never stretch or spin about its own length. The whole body gets one fixed turn about the vertical: square (at lift-off, the fastest rise of the hips before the release,
     the shoulder line faces the shot head on). Feet stay planted until lift-off; after it the measured rise of the hips drives the jump.
+    Knees always bend the way the hips face, an ankle is never closer to the middle than its own hip, and feet lie flat pointing forward and slightly out.
     Palms face each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick."""
     P, E, rise = np.asarray(pose, float), np.asarray(ext, float), np.nan_to_num(np.asarray(rise, float))
     ok = ~np.isnan(P).any((1, 2)); v0 = int(np.argmax(ok)); v1 = int(len(ok) - 1 - np.argmax(ok[::-1])); eok = ~np.isnan(E).any((1, 2))
+    from scipy.ndimage import gaussian_filter1d                          # a light pass over time: an average shot steps where fewer shots contribute, and a single
+    P = P.copy(); E = E.copy()                                           # clip keeps a little frame-to-frame noise; both read as twitches on a rigid skeleton
+    n_ok = v1 - v0 + 1; edge = np.clip(1 - np.minimum(np.arange(n_ok), np.arange(n_ok)[::-1]) / 6.0, 0, 1)        # 1 at the first and last frame, 0 from six frames in
+
+    def glide(x, sigma):                                                  # smoothing that carries on at the end speed instead of braking to a stop at the clip's edges
+        n = int(np.ceil(3 * sigma)); k = min(4, len(x) - 1); v0_, v1_ = (x[k] - x[0]) / k, (x[-1] - x[-1 - k]) / k; r = np.arange(1, n + 1).reshape((-1,) + (1,) * (x.ndim - 1))
+        return gaussian_filter1d(np.concatenate([x[0] - v0_ * r[::-1], x, x[-1] + v1_ * r]), sigma, axis=0, mode="nearest")[n:-n]
+
+    def calm(x, w):                                                       # light everywhere, heavier at the ends where filters and averages are least reliable
+        a = glide(x, 1.2); b = glide(x, 3.0); w = w.reshape((-1,) + (1,) * (x.ndim - 1)); return a * (1 - w) + b * w
+    def despike(x):                                                       # no point moves in one frame much further than it ever normally does in this clip
+        x = x.copy(); step = np.linalg.norm(np.diff(x, axis=0), axis=-1); cap = 1.5 * np.percentile(step, 90, axis=0) + 1e-4
+        for i in range(1, len(x)):
+            dlt = x[i] - x[i - 1]; n = np.linalg.norm(dlt, axis=-1); k = np.minimum(1.0, cap / np.maximum(n, 1e-12)); x[i] = x[i - 1] + dlt * k[..., None]
+        return x
+    P[v0:v1 + 1] = calm(despike(P[v0:v1 + 1]), edge); rise[v0:v1 + 1] = calm(rise[v0:v1 + 1], edge)
+    if eok.sum() > 4: E[eok] = calm(E[eok], edge[eok[v0:v1 + 1]] if eok[v0:v1 + 1].sum() == eok.sum() else np.zeros(int(eok.sum())))
     out = _rig_solve(P, E, eok, rise, hand, 1.8, v0, v1)
     return _rig_solve(P, E, eok, rise, hand, 1.8 * height / out["stand"], v0, v1)
 
@@ -994,12 +1011,16 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
 
     def bone(down, hint, alt):
         z = -down; x = perp(hint, z, alt); y = np.cross(z, x); return x, y, z, quat(x, y, z)
+
+    def carry(key, z_new, start):                                         # a bone's sideways axis from the frame before, swung along with the bone (no spin about its length)
+        if key not in prev: return start
+        x0, z0 = prev[key]; ax = np.cross(z0, z_new); sn = float(np.linalg.norm(ax))
+        return x0 if sn < 1e-9 else Rotation.from_rotvec(ax / sn * np.arctan2(sn, float(z0 @ z_new))).apply(x0)
     # ---- one fixed turn of the whole body
     lift, best = max(v0, min(30, v1)), -1e9
     for i in range(max(v0 + 1, 12), min(30, v1 - 1) + 1):
         if rise[i + 1] - rise[i - 1] > best: best, lift = rise[i + 1] - rise[i - 1], i
-    bal = nrm(sum(0.6 * cv(P[i, 0]) + 0.4 * cv(P[i, 8]) - 0.5 * cv(P[i, 3]) - 0.5 * cv(P[i, 6]) for i in range(max(v0, lift - 6), lift + 1)))
-    ax = np.cross(bal, Z); R0 = Rotation.from_rotvec(nrm(ax) * np.arctan2(np.linalg.norm(ax), bal @ Z)).as_matrix() if np.linalg.norm(ax) > 1e-9 else np.eye(3)
+    R0 = np.eye(3)                                                        # up stays the camera's up: the picture is the one thing measured directly
     sh = R0 @ cv(P[lift, 14] - P[lift, 11]); R0 = Rotation.from_rotvec(Z * -np.arctan2(sh[1], sh[0])).as_matrix() @ R0
 
     def W(q, i):
@@ -1007,7 +1028,7 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
     J_all = {i: np.array([W(q, i) for q in P[i]]) for i in fr}
     med = lambda a, b: float(np.median([np.linalg.norm(J_all[i][a] - J_all[i][b]) for i in fr]))
     Lth, Lsh, Lua, Lfa, Ltr = (med(1, 2) + med(4, 5)) / 2, (med(2, 3) + med(5, 6)) / 2, (med(14, 15) + med(11, 12)) / 2, (med(15, 16) + med(12, 13)) / 2, med(0, 8)
-    g = (Lth + Lsh) / (T["thigh"] + T["shank"]); st = float(np.clip((Ltr - T["sacrum"] * g) / T["torso"], 0.92 * g, 1.2 * g)); k = lambda a, b: float(np.clip(a / b / g, 0.85, 1.2)) * g
+    g = (Lth + Lsh) / (T["thigh"] + T["shank"]); st = float(np.clip((Ltr - T["sacrum"] * g) / T["torso"], 0.92 * g, 1.2 * g)); k = lambda a, b: float(np.clip(a / b / g, 0.6, 1.3)) * g
     scale = dict(pelvis=[g, g, g], torso=[st, st, st], head=[g, g, g], uarm=[g, g, k(Lua, T["uarm"])], larm=[g, g, k(Lfa, T["larm"])], hand=[g, g, g],
                  thigh=[g, g, Lth / T["thigh"]], shank=[g, g, Lsh / T["shank"]], foot=[g, g, g])
     LEN = dict(uarm=T["uarm"] * scale["uarm"][2], larm=T["larm"] * scale["larm"][2], thigh=Lth, shank=Lsh)
@@ -1020,32 +1041,87 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
         flick[i] = last
     sm = {i: sum(flick[j] * (3 - abs(j - i)) for j in range(i - 2, i + 3) if v0 <= j <= v1) / sum(3 - abs(j - i) for j in range(i - 2, i + 3) if v0 <= j <= v1) for i in fr}
 
+    SG = dict(r=1.0, l=-1.0); flat = lambda v: nrm(np.array([v[0], v[1], 0.0]))
+
+    def toes(F, s):                                                        # where a foot points: the way the hips face, turned out a little
+        return flat(F["_py"] + SG[s] * 0.17 * F["_px"])
+
     def set_leg(F, s):
-        q = F["_leg"][s]; tx_, ty_, _, tq_ = bone(nrm(q["K"] - q["P"]), F["_px"], F["_py"]); _, cy_, _, cq_ = bone(nrm(q["A"] - q["K"]), tx_, ty_)
-        fy = np.array([cy_[0], cy_[1], 0.0])
-        if fy @ fy < 1e-4: fy = np.array([F["_py"][0], F["_py"][1], 0.0])
-        fy = nrm(fy); F[s + "_thigh"] = [q["P"].copy(), tq_]; F[s + "_shank"] = [q["K"].copy(), cq_]; F[s + "_foot"] = [q["A"].copy(), quat(np.cross(fy, Z), fy, Z)]
-    prev, FR = {}, {}
+        q = F["_leg"][s]; tx_, ty_, _, tq_ = bone(nrm(q["K"] - q["P"]), F["_px"], F["_py"]); _, _, _, cq_ = bone(nrm(q["A"] - q["K"]), tx_, ty_)
+        fy = F["_toes"].get(s, toes(F, s)); F[s + "_thigh"] = [q["P"].copy(), tq_]; F[s + "_shank"] = [q["K"].copy(), cq_]; F[s + "_foot"] = [q["A"].copy(), quat(np.cross(fy, Z), fy, Z)]
+    prev, FR, last_dir = {}, {}, {}
+    BONE = {k: med(*k) for k in ((14, 15), (15, 16), (11, 12), (12, 13), (1, 2), (2, 3), (4, 5), (5, 6))}
     for i in fr:
-        J, F = J_all[i], {}; d = lambda a, b: nrm(J[b] - J[a])
+        J, F = J_all[i], {}
+
+        def d(a, b):
+            """Direction of a bone. A limb bone whose measured length is far from its usual one (an averaged pose can collapse or stretch it, and its
+            direction is then close to meaningless) may only turn slowly; a bone of normal length may turn as fast as a real arm does."""
+            v = J[b] - J[a]; n_ = float(np.linalg.norm(v)); t = v / max(n_, 1e-12)
+            if (a, b) in BONE and (a, b) in last_dir:
+                trust = 1 - float(np.clip((abs(n_ / BONE[(a, b)] - 1) - 0.2) / 0.35, 0, 1)); step = np.radians(8 + 42 * trust)        # most it may turn this frame
+                o = last_dir[(a, b)]; ang = float(np.arccos(np.clip(o @ t, -1, 1)))
+                if ang > step:
+                    ax = np.cross(o, t); ax = ax / np.linalg.norm(ax) if np.linalg.norm(ax) > 1e-9 else perp(np.array([1.0, 0, 0]), o, np.array([0, 1.0, 0]))
+                    t = Rotation.from_rotvec(ax * step).apply(o)
+            last_dir[(a, b)] = t; return t
         up = d(0, 8); px = perp(J[1] - J[4], up, np.array([1.0, 0, 0])); py = np.cross(up, px); O = J[0].copy(); F["pelvis"] = [O, quat(px, py, up)]
         tz = nrm(d(7, 8) + up); tx = perp(J[14] - J[11], tz, px); ty = np.cross(tz, tx); T0 = O + tz * (T["sacrum"] * g + T["torso"] * st); tq = quat(tx, ty, tz)
         F["torso"] = [T0, tq]; F["head"] = [T0 + tz * T["neck"] * g, tq]; hands = {}
+        # Arms: each wrist goes where the measured wrist is relative to its shoulder (the model's shoulders sit a little wider than the measured ones),
+        # and the elbow is then placed by the two bone lengths, bending the way the measured elbow does.
+        arm = {}; reach_ = (LEN["uarm"] + LEN["larm"]) / max(Lua + Lfa, 1e-6)
         for s, sg, a_sh, a_el, a_wr in (("r", 1, 14, 15, 16), ("l", -1, 11, 12, 13)):
-            Ps = T0 + tx * sg * T["shX"] * st + tz * T["shZ"] * st + ty * T["shY"] * st
-            ux, uy, uz, uq = bone(d(a_sh, a_el), prev.get(s + "u", tx), ty); prev[s + "u"] = ux; F[s + "_uarm"] = [Ps, uq]; El = Ps - uz * LEN["uarm"]
-            lx, ly, lz, lq = bone(d(a_el, a_wr), prev.get(s + "l", ux), uy); prev[s + "l"] = lx; F[s + "_larm"] = [El, lq]; hz = lz
+            Ps = T0 + tx * sg * T["shX"] * st + tz * T["shZ"] * st + ty * T["shY"] * st; arm[s] = dict(P=Ps, W=Ps + (J[a_wr] - J[a_sh]) * reach_, bend=d(a_sh, a_el))
+        # Until just after the release both hands are on the ball, so they are never further apart than the measured wrists are.
+        hold = float(np.clip((34 - i) / 4.0, 0, 1)); gv = arm["r"]["W"] - arm["l"]["W"]; gc = float(np.linalg.norm(gv))
+        if hold > 0 and gc > 1e-6:
+            want = min(gc, max(float(np.linalg.norm(J[16] - J[13])), 0.12)); gn = gc + (want - gc) * hold; mid = 0.5 * (arm["r"]["W"] + arm["l"]["W"])
+            arm["r"]["W"] = mid + gv / gc * gn / 2; arm["l"]["W"] = mid - gv / gc * gn / 2
+        for s in ("r", "l"):
+            Ps, a_, b_ = arm[s]["P"], LEN["uarm"], LEN["larm"]; v = arm[s]["W"] - Ps; n_ = float(np.linalg.norm(v)); al = v / max(n_, 1e-9)
+            u_ = n_ / (a_ + b_); dd = float(np.clip((a_ + b_) * (u_ if u_ <= 0.9 else 0.9 + 0.085 * (1 - np.exp(-(u_ - 0.9) / 0.085))), abs(a_ - b_) + 1e-3, 0.985 * (a_ + b_))); x_ = (a_ * a_ - b_ * b_ + dd * dd) / (2 * dd); h_ = np.sqrt(max(a_ * a_ - x_ * x_, 0.0))
+            kd = arm[s]["bend"] - al * (arm[s]["bend"] @ al); sure = float(np.clip(np.linalg.norm(kd) / 0.5, 0, 1))          # how clearly the elbow sits off the shoulder-wrist line
+            old = last_dir.get((s, "bend")); old = None if old is None else old - al * (old @ al)
+            if old is not None and old @ old > 1e-8: kd = sure * nrm(kd) + (1 - sure) * nrm(old)                     # a nearly straight arm keeps the bend direction it had
+            if kd @ kd < 1e-8: kd = -Z - al * (-Z @ al)
+            last_dir[(s, "bend")] = nrm(kd)
+            El = Ps + al * x_ + nrm(kd) * h_; Wr = Ps + al * dd; du, df = nrm(El - Ps), nrm(Wr - El)
+            for key, pair in (("u", (14, 15) if s == "r" else (11, 12)), ("f", (15, 16) if s == "r" else (12, 13))):     # same turning limit as every other limb bone
+                t_ = du if key == "u" else df; trust = 1 - float(np.clip((abs(float(np.linalg.norm(J[pair[1]] - J[pair[0]])) / BONE[pair] - 1) - 0.2) / 0.35, 0, 1))
+                o_ = last_dir.get((s, key))
+                if o_ is not None:
+                    ang_ = float(np.arccos(np.clip(o_ @ t_, -1, 1))); step_ = np.radians(8 + 42 * trust)
+                    if ang_ > step_:
+                        ax_ = np.cross(o_, t_); ax_ = ax_ / np.linalg.norm(ax_) if np.linalg.norm(ax_) > 1e-9 else perp(np.array([1.0, 0, 0]), o_, np.array([0, 1.0, 0])); t_ = Rotation.from_rotvec(ax_ * step_).apply(o_)
+                last_dir[(s, key)] = t_
+                if key == "u": du = t_
+                else: df = t_
+            El = Ps + du * a_; Wr = El + df * b_; arm[s].update(El=El, Wr=Wr)
+        F["_arm"], F["_tx"], F["_ty"] = arm, tx, ty
+        F["_px"], F["_py"], F["_leg"], F["_toes"] = px, py, {}, {}
+        for s, sg, hp, kn, an in (("r", 1, 1, 2, 3), ("l", -1, 4, 5, 6)):
+            Ph = O + px * sg * T["hipX"] * g; K = Ph + d(hp, kn) * LEN["thigh"]; A = K + d(kn, an) * LEN["shank"]; F["_leg"][s] = dict(P=Ph, K=K, A=A); set_leg(F, s)
+        FR[i] = F
+    # ---- arms, second pass: the elbow and wrist paths are smoothed over time (an elbow placed from two lengths is twitchy), then the bones are built
+    from scipy.ndimage import gaussian_filter1d as _gf
+    for s in ("r", "l"):
+        Ps_ = np.array([FR[i]["_arm"][s]["P"] for i in fr]); El_ = _gf(np.array([FR[i]["_arm"][s]["El"] for i in fr]), 1.2, axis=0, mode="nearest")
+        Wr_ = _gf(np.array([FR[i]["_arm"][s]["Wr"] for i in fr]), 1.2, axis=0, mode="nearest")
+        for k_, i in enumerate(fr):
+            du = nrm(El_[k_] - Ps_[k_]); El = Ps_[k_] + du * LEN["uarm"]; df = nrm(Wr_[k_] - El); FR[i]["_arm"][s].update(du=du, df=df, El=El, Wr=El + df * LEN["larm"])
+    for i in fr:
+        F, tx, ty, hands = FR[i], FR[i]["_tx"], FR[i]["_ty"], {}
+        for s in ("r", "l"):
+            q_ = F["_arm"][s]; ux, uy, uz, uq = bone(q_["du"], carry(s + "u", -q_["du"], tx), ty); prev[s + "u"] = (ux, uz); F[s + "_uarm"] = [q_["P"], uq]
+            lx, ly, lz, lq = bone(q_["df"], carry(s + "l", -q_["df"], ux), uy); prev[s + "l"] = (lx, lz); F[s + "_larm"] = [q_["El"], lq]; hz = lz
             if s == s_sh:
                 f = -lz; nn = perp(ty + np.array([0, 0, -0.5]), f, -Z); hz = -nrm(f * np.cos(sm[i]) + nn * np.sin(sm[i]))
-            hands[s] = dict(p=El - lz * LEN["larm"], z=hz, x=lx)
+            hands[s] = dict(p=q_["Wr"], z=hz, x=lx)
         for s, o in (("r", "l"), ("l", "r")):                               # palms face each other
             h = hands[s]; m = hands[o]["p"] - h["p"]; m = m - h["z"] * (m @ h["z"])
             y = nrm(m) if np.linalg.norm(m) > 0.06 else (perp(prev[s + "h"], h["z"], h["x"]) if s + "h" in prev else h["x"] * (-1 if s == "r" else 1))
             prev[s + "h"] = y; F[s + "_hand"] = [h["p"], quat(np.cross(y, h["z"]), y, h["z"])]
-        F["_px"], F["_py"], F["_leg"] = px, py, {}
-        for s, sg, hp, kn, an in (("r", 1, 1, 2, 3), ("l", -1, 4, 5, 6)):
-            Ph = O + px * sg * T["hipX"] * g; K = Ph + d(hp, kn) * LEN["thigh"]; A = K + d(kn, an) * LEN["shank"]; F["_leg"][s] = dict(P=Ph, K=K, A=A); set_leg(F, s)
-        FR[i] = F
     # ---- feet planted until lift-off: working back from lift-off, move the body so a grounded foot neither slides nor sinks; with both feet down, re-bend each knee to reach its own spot
     sole = T["sole"] * g
 
@@ -1054,28 +1130,77 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
         for s in "rl":
             for kk in "PKA": F["_leg"][s][kk] = F["_leg"][s][kk] + o
 
-    def reach(F, s, Tg):
-        q = F["_leg"][s]; a, b = LEN["thigh"], LEN["shank"]; v = Tg - q["P"]; dd = float(np.clip(np.linalg.norm(v), abs(a - b) + 1e-3, a + b - 1e-3)); al = nrm(v)
-        x = (a * a - b * b + dd * dd) / (2 * dd); h = np.sqrt(max(a * a - x * x, 0.0)); kd = q["K"] - q["P"]; kd = kd - al * (kd @ al)
-        if kd @ kd < 1e-6: kd = F["_py"] - al * (F["_py"] @ al)
+    def reach(F, s, Tg):                                                   # bend the leg so the ankle lands on Tg; the knee always points the way the hips face, slightly out
+        q = F["_leg"][s]; a, b = LEN["thigh"], LEN["shank"]; v = Tg - q["P"]; full = a + b; n_ = float(np.linalg.norm(v)); al = nrm(v)
+        u = n_ / full; dd = float(np.clip(full * (u if u <= 0.9 else 0.9 + 0.085 * (1 - np.exp(-(u - 0.9) / 0.085))), abs(a - b) + 1e-3, 0.985 * full))   # eases towards 98.5% of full length: a knee locked dead straight snaps
+        x = (a * a - b * b + dd * dd) / (2 * dd); h = np.sqrt(max(a * a - x * x, 0.0)); kd = F["_py"] + SG[s] * 0.15 * F["_px"]; kd = kd - al * (kd @ al)
         q["K"] = q["P"] + al * x + nrm(kd) * h; q["A"] = q["P"] + al * dd; set_leg(F, s)
-    o, oL, Tg = np.zeros(3), np.zeros(3), {}
-    for i in range(lift, v0 - 1, -1):
-        F = FR[i]; q = F["_leg"]; zm = min(q["r"]["A"][2], q["l"]["A"][2]); down = {s: q[s]["A"][2] - zm < 0.06 for s in "rl"}
-        ds = [Tg[s] - q[s]["A"] for s in "rl" if down[s] and Tg.get(s) is not None]
-        o = np.mean(ds, 0) if ds else np.array([o[0], o[1], sole - zm])
-        if i == lift: oL = o.copy()
-        move(F, o)
-        for s in "rl":
-            if not down[s]: Tg[s] = None; continue
-            if Tg.get(s) is None: Tg[s] = np.array([q[s]["A"][0], q[s]["A"][1], sole])
-            reach(F, s, Tg[s])
-    for i in range(lift + 1, v1 + 1): move(FR[i], oL)
+
+    def apart(F, s, A):                                                    # an ankle is never closer to the middle than its own hip socket
+        side = flat(F["_px"]); lat = (A - F["pelvis"][0]) @ side; return A + side * (SG[s] * max(SG[s] * lat, T["hipX"] * g) - lat)
+    from scipy.ndimage import gaussian_filter1d
+    floor_gap = lambda i, s_: FR[i]["_leg"][s_]["A"][2] - min(FR[i]["_leg"]["r"]["A"][2], FR[i]["_leg"]["l"]["A"][2])
+    down = {i: {s_: i <= lift and floor_gap(i, s_) < 0.06 for s_ in "rl"} for i in fr}
+    for s_ in "rl":                                                        # a contact that flickers for one frame is not a step
+        for i in range(v0 + 1, lift):
+            if down[i - 1][s_] == down[i + 1][s_] != down[i][s_]: down[i][s_] = down[i - 1][s_]
+    o, o_raw, tgt, toe, Tg, Ty = np.zeros(3), {}, {i: {} for i in fr}, {i: {} for i in fr}, {}, {}
+    for i in range(lift, v0 - 1, -1):                                      # 1. where each planted foot stands, and how far the body must shift for that
+        q = FR[i]["_leg"]; zm = min(q["r"]["A"][2], q["l"]["A"][2])
+        ds = [Tg[s_] - q[s_]["A"] for s_ in "rl" if down[i][s_] and Tg.get(s_) is not None]
+        o = np.mean(ds, 0) if ds else np.array([o[0], o[1], sole - zm]); o_raw[i] = o.copy()
+        for s_ in "rl":
+            if not down[i][s_]: Tg[s_] = None; continue
+            if Tg.get(s_) is None:
+                Tg[s_] = apart(FR[i], s_, q[s_]["A"]) + o; Tg[s_][2] = sole; Ty[s_] = toes(FR[i], s_)        # a planted foot keeps its spot and its direction
+            tgt[i][s_] = Tg[s_].copy(); toe[i][s_] = Ty[s_]
+    for i in range(lift + 1, v1 + 1): o_raw[i] = o_raw[lift]
+    # 2. The body glides. Following the planted foot exactly makes the hips lurch back and forth whenever the anchoring foot changes (each leg's depth is
+    #    guessed a little differently), so the shift is smoothed over about a third of a second and the hips may not travel faster than 0.8 m/s.
+    #    Whatever travel that removes is given to the planted feet instead: early in a walk-in they slide a little; close to lift-off they are fixed.
+    exact = gaussian_filter1d(np.array([o_raw[i] for i in fr]), 2.0, axis=0, mode="nearest"); shift = gaussian_filter1d(np.array([o_raw[i] for i in fr]), 4.0, axis=0, mode="nearest")
+    kl = fr.index(lift) if isinstance(fr, list) else list(fr).index(lift); cap = 0.8 / 30.0
+    for k in range(kl - 1, -1, -1):
+        stp = shift[k] - shift[k + 1]; stp[2] = 0; n_h = float(np.linalg.norm(stp)); shift[k, :2] = shift[k + 1, :2] + (stp[:2] * min(1.0, cap / max(n_h, 1e-9)))
+    shift[:kl + 1, :2] = gaussian_filter1d(shift[:kl + 1, :2], 1.5, axis=0, mode="nearest"); shift[:, 2] = exact[:, 2]
+    near = np.clip((kl - np.arange(len(shift)) - 6) / 8.0, 0, 1)[:, None]; shift[:, :2] = exact[:, :2] * (1 - near) + shift[:, :2] * near     # the last 0.2 s before lift-off follows the feet exactly
+    slide = shift - exact; slide[:, 2] = 0
+    for k, i in enumerate(fr):
+        move(FR[i], shift[k])
+        for s_ in tgt[i]: tgt[i][s_] = tgt[i][s_] + slide[k]
+    for s_ in "rl":                                                        # 3. ankles: planted ones stay put, free ones ease into and out of the planted spot
+        free = gaussian_filter1d(np.array([apart(FR[i], s_, FR[i]["_leg"][s_]["A"]) for i in fr]), 2.5, axis=0, mode="nearest")
+        fixed = np.array([s_ in tgt[i] for i in fr]); A = free.copy()
+        for k in np.where(fixed)[0]:                                       # in the last frames before lift-off the heel may come up; the foot still does not slide
+            A[k] = tgt[fr[k]][s_]; A[k][2] = sole + float(np.clip((fr[k] - (lift - 6)) / 6.0, 0, 1)) * max(0.0, free[k][2] - sole)
+        for k in np.where(~fixed)[0]:
+            for step in (-1, 1):                                           # nearest planted frame on each side, within 10 frames
+                j = k + step
+                while 0 <= j < len(A) and not fixed[j] and abs(j - k) < 10: j += step
+                if 0 <= j < len(A) and fixed[j]:
+                    w = max(0.0, 1.0 - abs(j - k) / 10.0); A[k] = A[k] + (A[j] - free[j]) * w * w * (3 - 2 * w)
+        A = np.where(fixed[:, None], A, gaussian_filter1d(A, 1.5, axis=0, mode="nearest"))
+        for k in np.where(~fixed)[0]:                                      # a foot does not leave or reach the ground at full speed: it eases over five frames
+            near = [j for j in range(max(k - 5, 0), min(k + 6, len(A))) if fixed[j]]
+            if near and int(fr[k]) <= lift:
+                j = min(near, key=lambda j_: abs(j_ - k)); u_ = abs(j - k) / 6.0; A[k] = A[j] + (A[k] - A[j]) * (u_ * u_ * (3 - 2 * u_))
+        for _ in range(8):
+            B = A.copy(); B[1:-1] = 0.25 * A[:-2] + 0.5 * A[1:-1] + 0.25 * A[2:]; A = np.where(fixed[:, None], A, B)
+        for k, i in enumerate(fr):
+            if s_ in toe[i]: FR[i]["_toes"][s_] = toe[i][s_]
+            reach(FR[i], s_, A[k])
     N = len(P); idx = np.clip(np.arange(N), v0, v1); pos, rot = {}, {}                          # frames outside the usable range hold the nearest pose
     for n_ in RIG_SEGMENTS:
         pos[n_] = np.array([FR[i][n_][0] for i in idx]); qq = np.array([FR[i][n_][1] for i in idx])
         for j in range(1, N):
             if qq[j] @ qq[j - 1] < 0: qq[j] = -qq[j]                                             # keep the rotation continuous for interpolation
+        if n_.endswith("hand") and N > 37:                                                       # late follow-through: the hand rides its forearm as it was 0.2 s after the release
+            fa = Rotation.from_quat(np.array([FR[i][n_[0] + "_larm"][1] for i in idx])); rel = fa.inv() * Rotation.from_quat(qq); hold = rel[36]
+            for j in range(37, N):
+                w = min(1.0, (j - 36) / 4.0); qj = (fa[j] * hold * Rotation.from_rotvec((hold.inv() * rel[j]).as_rotvec() * (1 - w))).as_quat()
+                qq[j] = qj if qj @ qq[j - 1] >= 0 else -qj
+        if n_.split("_")[-1] in ("hand", "foot", "head"):                                        # end bones carry nothing, so their turning can be smoothed freely
+            qq = gaussian_filter1d(qq, 3.0 if n_.endswith("hand") else 1.5, axis=0, mode="nearest"); qq = qq / np.linalg.norm(qq, axis=1, keepdims=True)
         rot[n_] = qq
     return dict(pos=pos, rot=rot, scale={n_: scale[n_.split("_")[-1]] for n_ in RIG_SEGMENTS}, lift=lift,
                 stand=T["sole"] * g + Lsh + Lth + T["sacrum"] * g + T["torso"] * st + (T["neck"] + T["head"]) * g)
@@ -1109,7 +1234,9 @@ def write_glb(path, skeletons, fps=30.0):
             pr = src["meshes"][nd["mesh"]]["primitives"][0]; ix = read(pr["indices"]).ravel()
             geo[nd["name"]] = dict(POSITION=add(read(pr["attributes"]["POSITION"]).astype(np.float32), "VEC3", 34962, True), NORMAL=add(read(pr["attributes"]["NORMAL"]).astype(np.float32), "VEC3", 34962),
                                    indices=add(ix.astype(np.uint16 if ix.max() < 65535 else np.uint32), "SCALAR", 34963))
-    n_fr = len(next(iter(skeletons[0][1]["pos"].values()))); t_acc = add((np.arange(n_fr) / fps).astype(np.float32), "SCALAR", None, True)
+    from scipy.interpolate import PchipInterpolator                       # three keys per frame on a smooth curve, so slow motion is not a string of straight segments
+    n_fr = len(next(iter(skeletons[0][1]["pos"].values()))); t_in = np.arange(n_fr) / fps; t_out = np.linspace(0, t_in[-1], (n_fr - 1) * 3 + 1)
+    fine = lambda x: PchipInterpolator(t_in, x, axis=0)(t_out); t_acc = add(t_out.astype(np.float32), "SCALAR", None, True)
     out["nodes"].append(dict(name="shot", rotation=[0, 0.7071067811865476, 0.7071067811865476, 0], children=[])); anim = dict(name="shot", samplers=[], channels=[])   # root: z up, facing +y  ->  y up, facing +z
     for k, (name, rg, rgba) in enumerate(skeletons):
         mat = dict(name=name, pbrMetallicRoughness=dict(baseColorFactor=list(rgba), metallicFactor=0.0, roughnessFactor=0.9))
@@ -1118,7 +1245,7 @@ def write_glb(path, skeletons, fps=30.0):
         for seg in RIG_SEGMENTS:
             if seg not in geo: continue
             out["meshes"].append(dict(name=f"{name} {seg}", primitives=[dict(attributes=dict(POSITION=geo[seg]["POSITION"], NORMAL=geo[seg]["NORMAL"]), indices=geo[seg]["indices"], material=k)]))
-            p, q = rg["pos"][seg].astype(np.float32), rg["rot"][seg].astype(np.float32); q = q / np.linalg.norm(q, axis=1, keepdims=True)
+            p, q = fine(rg["pos"][seg]).astype(np.float32), fine(rg["rot"][seg]).astype(np.float32); q = q / np.linalg.norm(q, axis=1, keepdims=True)
             out["nodes"].append(dict(name=f"{name} {seg}", mesh=len(out["meshes"]) - 1, translation=p[0].tolist(), rotation=q[0].tolist(), scale=[float(x) for x in rg["scale"][seg]]))
             ni = len(out["nodes"]) - 1; grp["children"].append(ni)
             for pth, arr, typ in (("translation", p, "VEC3"), ("rotation", q, "VEC4")):
@@ -1138,6 +1265,71 @@ def canon_rot(p):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
+def refine_limb_depth(p, ext):
+    """Re-solve how far each arm and leg bone points towards or away from the camera. A single camera measures a bone's sideways and vertical extent
+    well but its depth poorly: the lifter can flatten one limb into the picture and stretch the other, or bend a straight leg. Each bone has one true
+    length, so the size of its depth is whatever is left once the in-picture length is taken out. Which way it
+    points (towards or away) is the lifter's, except:
+      - a leg bends at the knee with the thigh forward and the shin back under it (see below);
+      - an upper arm raised above the shoulder cannot point behind the chest, so it takes the direction that puts it in front of the body;
+      - until just after the release both hands are on or near the ball, so the two forearms take the directions that bring the wrists closest together
+        (the lifter's choice wins ties); the follow-through keeps the directions it had at the release.
+    Fingertip and foot points move with their wrist or ankle. Input and output: (T,17,3) and (T,12,3) in the camera frame (x right, y down, z away)."""
+    p, ext = p.copy(), ext.copy(); ok = ~np.isnan(p).any((1, 2))
+    if ok.sum() < 8: return p, ext
+    q = p[ok]; z0 = q[:, :, 2].copy(); unit = lambda v: v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-9)
+    up = unit(q[:, 8] - q[:, 0]); fwd = unit(np.cross(up, unit((q[:, 14] - q[:, 11]) + (q[:, 1] - q[:, 4]))))      # the way the chest faces
+    from scipy.ndimage import gaussian_filter1d
+    smooth = lambda x: gaussian_filter1d(x, 2.5, mode="nearest")
+    depth = lambda a, b, L: np.sqrt(np.clip(L * L - ((q[:, b] - q[:, a])[:, :2] ** 2).sum(-1), 0, None))
+    face = np.clip(fwd[:, 2] / 0.25, -1, 1)                                                 # +1 chest faces away from the camera, -1 towards, fading to 0 side-on
+    length = lambda pair: float(np.median(np.concatenate([np.linalg.norm(q[:, b] - q[:, a], axis=-1) for a, b in pair])))
+    side = lambda v: np.where(v[:, 2] >= 0, 1.0, -1.0)
+    L = length(((14, 15), (11, 12)))
+    for sh, el, wr in ((14, 15, 16), (11, 12, 13)):                                         # upper arms; the wrist follows the moved elbow
+        v = q[:, el] - q[:, sh]; raised = np.clip((-v[:, 1] / L - 0.05) / 0.3, 0, 1)        # 0 arm down .. 1 elbow clearly above the shoulder
+        late = np.where(ok)[0] > 32
+        if late.any() and (~late).any(): raised[late] = np.maximum(raised[late], raised[~late][-1])    # no switching back as the arm drops in the follow-through
+        sign = (1 - raised) * np.clip(v[:, 2] / (0.3 * L), -1, 1) + raised * face             # blended, so the arm never snaps from one to the other
+        shift = smooth(sign * depth(sh, el, L)) - v[:, 2]; q[:, el, 2] += shift; q[:, wr, 2] += shift
+    L = length(((15, 16), (12, 13))); mR, mL = depth(15, 16, L), depth(12, 13, L); zR, zL = (q[:, 16] - q[:, 15])[:, 2], (q[:, 13] - q[:, 12])[:, 2]
+    best, pick = np.full(len(q), np.inf), np.zeros((len(q), 2)); held = (np.where(ok)[0] <= 32).astype(float)        # the release is sample 30
+    for sR in (1.0, -1.0):
+        for sL in (1.0, -1.0):
+            gap = np.sqrt(((q[:, 16, :2] - q[:, 13, :2]) ** 2).sum(-1) + ((q[:, 15, 2] + sR * mR) - (q[:, 12, 2] + sL * mL)) ** 2)
+            cost = gap * held + 0.1 * L * ((np.sign(zR) != sR).astype(float) + (np.sign(zL) != sL))          # small preference for the lifter's own choice
+            upd = cost < best; best[upd] = cost[upd]; pick[upd] = (sR, sL)
+    if (held > 0).any(): pick[held == 0] = pick[held > 0][-1]                                # the follow-through keeps the directions it had at the release
+    q[:, 16, 2] = q[:, 15, 2] + smooth(pick[:, 0] * mR); q[:, 13, 2] = q[:, 12, 2] + smooth(pick[:, 1] * mL)
+    # Hands on the ball: while the wrists are close together in the picture (which is measured), they cannot be far apart in depth (which is guessed).
+    # Their front-to-back gap is held to at most three quarters of their in-picture gap, and never less than a ball needs.
+    side_gap = np.linalg.norm(q[:, 16, :2] - q[:, 13, :2], axis=-1); depth_gap = q[:, 16, 2] - q[:, 13, 2]
+    allow = np.sqrt(np.clip(np.maximum(side_gap * 1.25, 0.11) ** 2 - side_gap ** 2, 0, None)); w_hold = np.clip((34 - np.where(ok)[0]) / 4.0, 0, 1)
+    cut = smooth((np.abs(depth_gap) - np.minimum(np.abs(depth_gap), allow)) * np.sign(depth_gap) * w_hold) / 2; q[:, 16, 2] -= cut; q[:, 13, 2] += cut
+    # Legs: in a jump shot each leg is close to straight and side-on to the camera at some point, so a leg bone's true length is about the longest it gets in
+    # the picture. Measuring that per leg also cancels the nearer leg looking bigger than the farther one when the camera is close.
+    seen = lambda a, b: float(np.percentile(np.linalg.norm((q[:, b] - q[:, a])[:, :2], axis=-1), 75))        # upper quarter: robust to a stretched detection
+    # A leg that looks shorter than that is bent, and a knee only bends one way: the thigh comes forward (the way the chest faces) and the shin goes
+    # back under it, which also keeps the foot under the hip instead of far in front of or behind the body.
+    for hp, kn, an in ((1, 2, 3), (4, 5, 6)):                                               # thigh, then shank from the moved knee
+        q[:, kn, 2] = q[:, hp, 2] + smooth(face * depth(hp, kn, seen(hp, kn))); q[:, an, 2] = q[:, kn, 2] + smooth(-face * depth(kn, an, seen(kn, an)))
+    dz = q[:, :, 2] - z0; e = ext[ok]
+    for k, j in ((0, 13), (1, 16), (2, 13), (3, 16), (4, 13), (5, 16), (6, 6), (7, 3), (8, 6), (9, 3), (10, 6), (11, 3)): e[:, k, 2] += dz[:, j]
+    p[ok] = q; ext[ok] = e; return p, ext
+
+
+def level_camera(p, ext):
+    """Take out the camera's up/down tilt. A camera aimed slightly down makes everything lean towards it (aimed up: away), and the picture cannot
+    tell that apart from a real lean. The reference is the trunk at the release: around samples 27-33 the hips-to-chest line is taken to be upright
+    front-to-back, and the whole clip is tipped by that one angle (at most 20 degrees). Sideways lean and all motion are untouched; a shooter who really
+    fades at the release is drawn upright there. Input and output in the camera frame (x right, y down, z away)."""
+    v = p[27:34, 8] - p[27:34, 0]; v = v[~np.isnan(v).any(1)]
+    if len(v) == 0: return p, ext
+    v = np.median(v, 0); a = float(np.clip(np.arctan(-v[2] / min(v[1], -1e-6)), -np.radians(20), np.radians(20))); c, s_ = np.cos(a), np.sin(a)
+    Rx = np.array([[1, 0, 0], [0, c, -s_], [0, s_, c]])
+    return p @ Rx.T, ext @ Rx.T
+
+
 def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
     """Animated .glb: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
     avg = ref.get("averages", {}).get(player, {}).get(stype)
@@ -1152,7 +1344,7 @@ def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
                     a = int(np.floor(q)); b = min(a + 1, len(x) - 1); out[j] = x[a] * (1 - (q - a)) + x[b] * (q - a)
             return out
         p, ext, rise = shift(p), shift(ext), shift(rise)
-    rise = np.nan_to_num(rise)
+    rise = np.nan_to_num(rise); p, ext = level_camera(*refine_limb_depth(p, ext))
     Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
     h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
     nan = lambda x: np.array([[[np.nan] * 3] * len(x[0] if x[0] is not None else x[-1]) if f is None else f for f in x], float)
