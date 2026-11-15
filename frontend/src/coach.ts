@@ -3,6 +3,14 @@ import { SseParser } from '../../mobile/src/core/coach.ts';
 import { accountFetch } from './api.ts';
 
 export const maxCoachQuestionLength = 2000;
+const tooSlow = 'Coach took too long to answer. Reopen this chat in a moment to check for the reply.';
+
+function aborted(signal: AbortSignal) {
+  return new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
 export type RecentChat = { sessionId: string; title: string; reply: string; updatedAt: number };
 type OnDeviceShot = {
   releaseMs: number;
@@ -12,8 +20,15 @@ type OnDeviceShot = {
   releaseHeight: number | null;
 };
 
+/**
+ * The API streams a reply for up to its function's maxDuration (300 s) and sends a keep-alive
+ * comment every 15 s while tools or the model run, so wait on silence, not on the whole reply.
+ */
+export const coachReplyTimeouts = { idleMs: 90_000, totalMs: 300_000 };
+
 export function createSessionCoach(
   baseUrl: string, sessionId: string, token: (refresh: boolean) => Promise<string | null>, fetchApi?: typeof fetch,
+  timeouts = coachReplyTimeouts,
 ) {
   const path = `/v1/sessions/${encodeURIComponent(sessionId)}/coach/messages`;
   const request = (init: RequestInit) => accountFetch(baseUrl, token, fetchApi)(path, init);
@@ -38,19 +53,41 @@ export function createSessionCoach(
     },
     async ask(message: string, signal: AbortSignal, onStatus: (message: string) => void,
       onToken?: (token: string) => void, onDeviceShot?: OnDeviceShot) {
-      const response = await request({
-        method: 'POST',
-        headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, onDeviceShot }),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
-      });
-      await check(response);
-      const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
-      if (!reader) throw new Error('The coach did not open a reply stream.');
+      const quiet = new AbortController();
+      let idle: ReturnType<typeof setTimeout> | undefined;
+      const waitForData = () => {
+        clearTimeout(idle);
+        idle = setTimeout(() => quiet.abort(), timeouts.idleMs);
+      };
+      waitForData();
+      const timeout = AbortSignal.any([quiet.signal, AbortSignal.timeout(timeouts.totalMs)]);
+      let reader: ReadableStreamDefaultReader<string> | undefined;
+      try {
+        const response = await request({
+          method: 'POST',
+          headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, onDeviceShot }),
+          signal: AbortSignal.any([signal, timeout]),
+        });
+        await check(response);
+        reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
+      } catch (error) {
+        clearTimeout(idle);
+        if (timeout.aborted && !signal.aborted) throw new Error(tooSlow);
+        throw error;
+      }
+      if (!reader) {
+        clearTimeout(idle);
+        throw new Error('The coach did not open a reply stream.');
+      }
       const parser = new SseParser();
+      // Stop waiting even if the fetch implementation does not end the body when its signal aborts.
+      const stopped = aborted(timeout);
+      stopped.catch(() => undefined);
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          waitForData();
+          const { done, value } = await Promise.race([reader.read(), stopped]);
           if (done) break;
           for (const { event, data } of parser.push(value)) {
             const update = JSON.parse(data) as { messageId?: string; text?: string; message?: string };
@@ -63,7 +100,11 @@ export function createSessionCoach(
           }
         }
         throw new Error('The coach disconnected before answering. Reopen this session to check the conversation.');
+      } catch (error) {
+        if (timeout.aborted && !signal.aborted) throw new Error(tooSlow);
+        throw error;
       } finally {
+        clearTimeout(idle);
         await reader.cancel().catch(() => undefined);
       }
     },

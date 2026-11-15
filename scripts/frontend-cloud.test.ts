@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { unzipSync } from 'fflate';
 import { GuestQuotaError, syncCloudClips } from '../frontend/src/clip-sync.ts';
-import { createSessionCoach } from '../frontend/src/coach.ts';
+import { coachReplyTimeouts, createSessionCoach } from '../frontend/src/coach.ts';
 import { PracticeStore } from '../frontend/src/database.ts';
 import { comparisonUsdz, type NameAtlas, type Pose } from '../frontend/src/pose-3d.ts';
 import { getShotAnalysis } from '../frontend/src/shot-analysis.ts';
@@ -270,4 +270,42 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   await run(async () => token);
   assert.equal(await deps.usage.count(user, today), 1);
   assert.equal(store.hasCloudWork(user), false);
+});
+
+/** An SSE reply that sends `: ping` every `everyMs` for `forMs`, then the answer (or stalls). */
+function pingingReply(everyMs: number, forMs: number, done = true): typeof fetch {
+  const encoder = new TextEncoder();
+  return async (_input, init) => new Response(new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const started = Date.now();
+      while (Date.now() - started < forMs) {
+        if (init?.signal?.aborted) return controller.error(init.signal.reason);
+        controller.enqueue(encoder.encode(': ping\n\n'));
+        await new Promise((resolve) => setTimeout(resolve, everyMs));
+      }
+      if (!done) return;
+      controller.enqueue(encoder.encode('event: done\ndata: {"messageId":"m1","text":"Hold your finish."}\n\n'));
+      controller.close();
+    },
+  }), { headers: { 'content-type': 'text/event-stream' } });
+}
+
+test('Coach waits for a reply as long as the API may stream one', async () => {
+  const vercel = JSON.parse(await readFile('server/vercel.json', 'utf8')) as { functions: Record<string, { maxDuration: number }> };
+  const maxDurationMs = vercel.functions['api/index.ts']!.maxDuration * 1000;
+  assert.ok(coachReplyTimeouts.totalMs >= maxDurationMs,
+    `a ${maxDurationMs} ms reply must not be cut off at ${coachReplyTimeouts.totalMs} ms`);
+  // The API sends a keep-alive comment every 15 s while tools or the model run.
+  assert.ok(coachReplyTimeouts.idleMs > 15_000 && coachReplyTimeouts.idleMs < coachReplyTimeouts.totalMs);
+
+  const sessionId = randomUUID();
+  const steady = createSessionCoach('https://perspective.example.test', sessionId, async () => 'token',
+    pingingReply(20, 400), { idleMs: 150, totalMs: 5_000 });
+  assert.equal((await steady.ask('How was my follow-through?', AbortSignal.timeout(5_000), () => {})).text, 'Hold your finish.');
+
+  const stalled = createSessionCoach('https://perspective.example.test', sessionId, async () => 'token',
+    pingingReply(20, 60, false), { idleMs: 150, totalMs: 5_000 });
+  const started = Date.now();
+  await assert.rejects(stalled.ask('Hello?', AbortSignal.timeout(5_000), () => {}), /Coach took too long to answer/);
+  assert.ok(Date.now() - started < 2_000);
 });
