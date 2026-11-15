@@ -9,7 +9,7 @@ import type { PracticeStore } from './database';
 import { localVideoUri, recordingFiles } from './device-storage';
 import { getShotAnalysisState, hasAutomaticAnalysis, startShotAnalysis } from './guest-pose';
 import { clipTime, DRILL_NAME, sessionTime, shotStats } from './practice';
-import type { Session, Shot, ShotOutcome } from './practice';
+import type { Session, ShootingHand, Shot, ShotOutcome } from './practice';
 import { removeRecording } from './recordings';
 import { ShotAnalysisPanel } from './ShotAnalysisPanel';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -36,6 +36,7 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
   onCompare: (shotNumber?: number) => void;
 }) {
   const [session, setSession] = useState(initialSession);
+  const [shootingHand, setShootingHand] = useState(() => store.getShootingHand(initialSession.id));
   const [shots, setShots] = useState(() => store.listShots(session.id));
   const [edit, setEdit] = useState<Shot>();
   const [removing, setRemoving] = useState(false);
@@ -44,6 +45,16 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
   const video = localVideoUri(session.videoPath);
   const stats = shotStats(shots);
   const cloudShotCount = cloudUserId ? store.sessionCloudShots(cloudUserId, session.id).length : 0;
+
+  function chooseShootingHand(hand: ShootingHand) {
+    try {
+      store.setShootingHand(session.id, hand);
+      setShootingHand(hand);
+      setNotice(undefined);
+    } catch (error) {
+      setNotice(message(error, 'The shooting hand could not be saved.'));
+    }
+  }
 
   function compareAutomatically() {
     setNotice(undefined);
@@ -98,6 +109,18 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
       <ScreenHeader backLabel={backLabel} detail="ON THIS IPHONE" onBack={onBack} />
       <Page style={styles.page}>
         <Title title="Session details" subtitle={DRILL_NAME} />
+        <Panel>
+          <View style={ui.row}>
+            <Text style={styles.panelLabel}>SHOOTING HAND</Text>
+            {!shootingHand ? <Text style={ui.label}>AUTO</Text> : null}
+          </View>
+          <View style={styles.outcomes}>
+            <Button label="Left hand" kind="secondary" style={styles.outcome}
+              selected={shootingHand === 'left'} onPress={() => chooseShootingHand('left')} />
+            <Button label="Right hand" kind="secondary" style={styles.outcome}
+              selected={shootingHand === 'right'} onPress={() => chooseShootingHand('right')} />
+          </View>
+        </Panel>
         <Button label="Compare your shot vs NBA" arrow onPress={compareAutomatically} />
         <ShotAnalysisProgress sessionId={session.id} />
         {notice ? <Notice>{notice}</Notice> : null}

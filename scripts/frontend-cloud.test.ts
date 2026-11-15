@@ -75,6 +75,7 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   store.saveSession({
     id: sessionId, createdAt: Date.now(), shotType: 'three_point', videoPath, durationMs: 7000, sizeBytes: recording.length,
   }, user);
+  store.setShootingHand(sessionId, 'right');
   store.addShot(sessionId, 3500, 'made', user);
   store.addShot(sessionId, 5900, 'missed', user);
 
@@ -99,6 +100,7 @@ test('a guest syncs private shots, compares their motion, and chats within the d
     return refresh ? token : expired;
   });
   assert.equal(refreshes, 1);
+  assert.equal((await deps.clips.get(user, sessionId, 1))?.shootingHand, 'right');
 
   async function list(bearer: string) {
     const response = await fetch(`${localUrl}/v1/clips?sessionId=${sessionId}`, {
@@ -186,6 +188,15 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   assert.equal(playerPoseResponse.status, 200);
   assert.equal(playerPoseResponse.headers.get('cache-control'), 'private, no-store');
   const { pose: playerPose } = await playerPoseResponse.json() as { pose: Pose };
+  store.setShootingHand(sessionId, 'left');
+  const leftResponse = await fetch(localUrl + posePath + '?followThrough=1&shootingHand=' + store.getShootingHand(sessionId), {
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  assert.equal(leftResponse.status, 200, leftResponse.ok ? undefined : await leftResponse.text());
+  const { pose: leftPose } = await leftResponse.json() as { pose: Pose };
+  assert.equal(leftPose.shootingHand, 'left');
+  assert.notEqual(leftPose.metrics.releaseElbowDeg, playerPose.metrics.releaseElbowDeg);
+  assert.equal((await deps.clips.get(user, sessionId, 1))?.shootingHand, 'right');
   const library = JSON.parse(await readFile('frontend/assets/peek-nba-poses.json', 'utf8')) as {
     player: string; pose: typeof playerPose;
   }[];

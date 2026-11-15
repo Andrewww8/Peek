@@ -65,7 +65,7 @@ export function ShotAnalysisProgress({ sessionId, tag, style }: {
   );
 }
 
-export function RecordingSaveProgress() {
+export function RecordingSaveProgress({ label = 'Saving to this iPhone…' }: { label?: string }) {
   const position = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     const motion = Animated.loop(Animated.timing(position, {
@@ -77,8 +77,8 @@ export function RecordingSaveProgress() {
 
   return (
     <View style={styles.progress}>
-      <Text style={styles.status} accessibilityLiveRegion="polite">Saving to this iPhone…</Text>
-      <View style={styles.track} accessible accessibilityRole="progressbar" accessibilityLabel="Saving recording">
+      <Text style={styles.status} accessibilityLiveRegion="polite">{label}</Text>
+      <View style={styles.track} accessible accessibilityRole="progressbar" accessibilityLabel={label}>
         <Animated.View style={[styles.fill, styles.saveFill, {
           left: position.interpolate({ inputRange: [0, 1], outputRange: ['-33%', '100%'] }),
         }]} />

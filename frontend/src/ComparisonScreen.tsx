@@ -12,9 +12,11 @@ import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
+import { withShootingHand } from './guest-pose-motion';
 import { bones, comparisonPlayback, comparisonPlayerPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, sampleComparisonPose, shotMotionWindow, stabilizedShotPlayback } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
+import type { ShootingHand } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
 import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Sheet, Title, ui } from './ui';
 
@@ -40,10 +42,13 @@ async function loadNameAtlas() {
   });
 }
 
-async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
+async function loadShotPose(
+  shot: TaggedComparisonShot, userId: string, syncing: boolean, shootingHand: ShootingHand | null, signal: AbortSignal,
+): Promise<Pose | string> {
   const { sessionId, shotNumber } = shot;
   const request = accountFetch(apiUrl, (renew) => accessToken(userId, renew));
-  const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose?followThrough=1', {
+  const query = shootingHand ? '?followThrough=1&shootingHand=' + shootingHand : '?followThrough=1';
+  const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose' + query, {
     signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]),
   });
   const body = await response.json() as { pose?: Pose; shotType?: string; message?: string };
@@ -56,7 +61,7 @@ async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing:
       !Array.isArray(pose.joints) || pose.joints.length !== pose.frameCount * coordinatesPerFrame) {
     throw new Error('This shot could not be lined up with the three-point reference.');
   }
-  return pose;
+  return withShootingHand(pose, shootingHand);
 }
 
 type ComparisonProps = Navigation & {
@@ -85,13 +90,15 @@ export function ComparisonScreen(props: ComparisonProps) {
   return <CloudComparisonScreen {...props} shot={{ sessionId, shotNumber }} />;
 }
 
-function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backLabel, onBack, onChooseShot }: ComparisonProps & {
+function OnDeviceComparisonScreen({ shot, store, tag, video, isGuest, playerName, backLabel, onBack, onChooseShot }: ComparisonProps & {
   video?: string;
   tag?: ShotAnalysisTag;
 }) {
   const { sessionId } = shot;
   const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
   const result = state?.result;
+  const shootingHand = store.getShootingHand(sessionId);
+  const pose = useMemo(() => result && withShootingHand(result.pose, shootingHand), [result, shootingHand]);
   const updatingPose = state?.phase === 'queued' || state?.phase === 'detecting' || state?.phase === 'tracking';
   const automatic = shot.shotNumber === undefined;
   const refreshStarted = useRef<string>(undefined);
@@ -118,10 +125,10 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
       <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
       <Page>
         <Title title="Your shot vs NBA" subtitle={`${automatic ? 'Catch-and-shoot three' : 'Shot ' + shot.shotNumber}${releaseTime}`} />
-        {result ? (
+        {pose ? (
           <>
             {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} /> : null}
-            <PoseComparison key={sessionId + ':' + (tag ? `${tag.shotNumber}:${tag.releaseMs}` : 'auto')} playerPose={result.pose}
+            <PoseComparison key={sessionId + ':' + (tag ? `${tag.shotNumber}:${tag.releaseMs}` : 'auto')} playerPose={pose}
               playerLabel={playerName ?? 'Your shot'} updatingPose={updatingPose} />
           </>
         ) : (
@@ -146,6 +153,7 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
   const [connecting, setConnecting] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const { sessionId, shotNumber } = shot;
+  const shootingHand = store.getShootingHand(sessionId);
   const cloudShot = userId ? store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber) : undefined;
   const state = cloudShot?.state;
   const queued = !!state && state !== 'unavailable';
@@ -170,7 +178,7 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
       try {
         const current = store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber);
         if (current?.state === 'unavailable') throw new Error(cloudIssueText(current.issue));
-        const result = await loadShotPose({ sessionId, shotNumber }, userId, current?.state === 'pending', signal);
+        const result = await loadShotPose({ sessionId, shotNumber }, userId, current?.state === 'pending', shootingHand, signal);
         if (signal.aborted) return;
         if (typeof result === 'string') {
           setLoading(result);
@@ -182,7 +190,7 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
     };
     void load();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [store, sessionId, shotNumber, userId, queued, attempt, limitNotice]);
+  }, [store, sessionId, shotNumber, userId, queued, attempt, limitNotice, shootingHand]);
 
   async function analyze() {
     if (connecting) return;

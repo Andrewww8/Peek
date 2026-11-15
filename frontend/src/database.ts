@@ -1,5 +1,5 @@
 import { SHOT_TYPE, shotStats } from './practice.ts';
-import type { Session, Shot, ShotOutcome } from './practice.ts';
+import type { Session, ShootingHand, Shot, ShotOutcome } from './practice.ts';
 
 type SqlValue = string | number | null;
 
@@ -72,7 +72,11 @@ const cloudIssueSchema = `
   ));
 `;
 
-const SCHEMA_VERSION = 3;
+const shootingHandSchema = `
+  ALTER TABLE sessions ADD COLUMN shooting_hand TEXT CHECK (shooting_hand IN ('left', 'right'));
+`;
+
+const SCHEMA_VERSION = 4;
 
 export class PracticeStore {
   private db: PracticeDatabase;
@@ -89,7 +93,8 @@ export class PracticeStore {
       try {
         if (version < 1) db.execSync(schema);
         if (version < 2) db.execSync(cloudSchema);
-        db.execSync(cloudIssueSchema);
+        if (version < 3) db.execSync(cloudIssueSchema);
+        db.execSync(shootingHandSchema);
         db.execSync(`PRAGMA user_version = ${SCHEMA_VERSION}; COMMIT;`);
       } catch (error) {
         db.execSync('ROLLBACK;');
@@ -100,6 +105,17 @@ export class PracticeStore {
 
   getSession(id: string) {
     return this.db.getFirstSync<Session>(`SELECT ${sessionColumns} FROM sessions WHERE id = ?`, id);
+  }
+
+  getShootingHand(id: string): ShootingHand | null {
+    return this.db.getFirstSync<{ shootingHand: ShootingHand | null }>(
+      'SELECT shooting_hand AS shootingHand FROM sessions WHERE id = ?', id,
+    )?.shootingHand ?? null;
+  }
+
+  setShootingHand(id: string, hand: ShootingHand) {
+    const { changes } = this.db.runSync('UPDATE sessions SET shooting_hand = ? WHERE id = ?', hand, id);
+    if (!changes) throw new Error('This session could not be found.');
   }
 
   listSessions() {

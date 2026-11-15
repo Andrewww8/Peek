@@ -1,12 +1,13 @@
 import type { CoachMessage } from '../../mobile/src/core/apiClient.ts';
 import { SseParser } from '../../mobile/src/core/coach.ts';
 import { accountFetch } from './api.ts';
+import type { ShootingHand } from './practice.ts';
 
 export const maxCoachQuestionLength = 2000;
 export type RecentChat = { sessionId: string; title: string; reply: string; updatedAt: number };
 type OnDeviceShot = {
   releaseMs: number;
-  shootingHand: 'left' | 'right';
+  shootingHand: ShootingHand;
   releaseElbowDeg: number | null;
   kneeDipDeg: number | null;
   releaseHeight: number | null;
@@ -37,11 +38,11 @@ export function createSessionCoach(
       return messages;
     },
     async ask(message: string, signal: AbortSignal, onStatus: (message: string) => void,
-      onToken?: (token: string) => void, onDeviceShot?: OnDeviceShot) {
+      onToken?: (token: string) => void, onDeviceShot?: OnDeviceShot, shootingHand?: ShootingHand) {
       const response = await request({
         method: 'POST',
         headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, onDeviceShot }),
+        body: JSON.stringify({ message, onDeviceShot, shootingHand }),
         signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
       });
       await check(response);

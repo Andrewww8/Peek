@@ -1,5 +1,6 @@
-import { coordinatesPerFrame, fingerCount, jointCount } from './pose-3d.ts';
+import { coordinatesPerFrame, fingerCount, jointCount, posePoint } from './pose-3d.ts';
 import type { Pose, PoseSample } from './pose-3d.ts';
+import type { ShootingHand } from './practice.ts';
 import type { JumpSample } from './shot-grounding.ts';
 
 export type VisionFrame = {
@@ -98,6 +99,23 @@ function angle(a?: Point | null, b?: Point | null, c?: Point | null) {
   if (!length) return NaN;
   const cosine = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / length;
   return Math.acos(Math.max(-1, Math.min(1, cosine))) * 180 / Math.PI;
+}
+
+export function withShootingHand(pose: Pose, hand: ShootingHand | null): Pose {
+  if (!hand || hand === pose.shootingHand) return pose;
+  const [shoulder, elbow, wrist] = hand === 'left'
+    ? [leftShoulder, leftElbow, leftWrist] : [rightShoulder, rightElbow, rightWrist];
+  const joint = (index: number) => posePoint(pose, pose.releaseIndex, index);
+  const handPoint = joint(wrist), headPoint = joint(head);
+  return {
+    ...pose,
+    shootingHand: hand,
+    metrics: {
+      ...pose.metrics,
+      releaseElbowDeg: number(angle(joint(shoulder), joint(elbow), handPoint)),
+      releaseHeight: handPoint && headPoint ? number(headPoint[1] - handPoint[1]) : null,
+    },
+  };
 }
 
 /** Align the actual Vision detections to the same release time and body frame as NBA references. */

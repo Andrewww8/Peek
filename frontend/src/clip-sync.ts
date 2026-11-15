@@ -2,7 +2,7 @@ import { accountFetch, httpsUrl } from './api.ts';
 import type { CloudSyncIssue, PracticeStore } from './database.ts';
 
 type CloudShot = ReturnType<PracticeStore['cloudShots']>[number];
-type SyncStore = Pick<PracticeStore, 'pendingCloudSessions' | 'cloudShots' | 'finishCloudShot'>;
+type SyncStore = Pick<PracticeStore, 'pendingCloudSessions' | 'cloudShots' | 'finishCloudShot' | 'getShootingHand'>;
 type CloudAccount = { id: string; accessToken: (refresh: boolean) => Promise<string | null> };
 export type RecordingUploader = (url: string, path: string, headers: Record<string, string>, signal: AbortSignal) => Promise<number>;
 
@@ -133,8 +133,10 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
         const status = await upload(destination.href, path, headers, AbortSignal.any([signal, AbortSignal.timeout(120_000)]));
         if (status < 200 || status >= 300) throw new CloudResponseError(status, 'upload');
         if (signal.aborted) return;
+        const hand = store.getShootingHand(session.id);
         const result = await apiCall('POST', `/v1/recordings/${grant.uploadId}/clips`, {
           sessionId: session.id, shotType: session.shotType,
+          ...(hand ? { shootingHand: hand === 'left' ? 'L' : 'R' } : {}),
           shots: batch.map(({ shotNumber, releaseMs, outcome }) => ({ shotNumber, releaseMs, outcome })),
         }, 300_000);
         if (!record(result) || !Array.isArray(result.clips)) throw new Error('The clip service returned an invalid clip list.');

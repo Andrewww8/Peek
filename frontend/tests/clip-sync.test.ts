@@ -28,7 +28,8 @@ const getGrant = () => Response.json({ method: 'PUT', uploadId, uploadUrl, heade
 
 test('migrates existing sessions and shot stats without queueing their recordings', (t) => {
   const session = newSession();
-  const { store } = environment(t).open((db) => {
+  const { open } = environment(t);
+  const { store, close } = open((db) => {
     db.exec(`
       CREATE TABLE sessions (id TEXT PRIMARY KEY, created_at INTEGER, shot_type TEXT, video_path TEXT, duration_ms INTEGER, size_bytes INTEGER);
       CREATE TABLE shots (session_id TEXT, shot_number INTEGER, release_ms INTEGER, outcome TEXT, PRIMARY KEY (session_id, shot_number));
@@ -44,6 +45,16 @@ test('migrates existing sessions and shot stats without queueing their recording
   assert.equal(store.listShots(session.id)[0]?.outcome, 'made');
   store.addShot(session.id, 6_000, 'missed', user);
   assert.equal(store.hasCloudWork(user), false);
+  assert.equal(store.getShootingHand(session.id), null);
+  store.setShootingHand(session.id, 'left');
+  close();
+  const reopened = open().store;
+  assert.equal(reopened.getShootingHand(session.id), 'left');
+  reopened.clearVideo(session.id);
+  reopened.setShootingHand(session.id, 'right');
+  assert.equal(reopened.getShootingHand(session.id), 'right');
+  assert.equal(reopened.getSession(session.id)?.videoPath, null);
+  assert.equal(reopened.listShots(session.id).length, 2);
 });
 
 test('upgrades the existing cloud queue without assigning a cause to old failures', (t) => {

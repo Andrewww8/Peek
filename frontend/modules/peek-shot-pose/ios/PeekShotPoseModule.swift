@@ -10,6 +10,11 @@ public final class PeekShotPoseModule: Module {
       return false
     }
 
+    AsyncFunction("recognizeShot") { (uri: String, budgetMs: Double) async throws -> Bool in
+      guard #available(iOS 17.0, *) else { return false }
+      return try await AutomaticReleaseDetector.recognizesShot(uri: uri, budgetMs: budgetMs)
+    }
+
     AsyncFunction("detectRelease") { (uri: String, requestId: String?) async throws -> Double in
       guard #available(iOS 17.0, *) else {
         throw ShotPoseError.unsupportedSystem

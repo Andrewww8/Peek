@@ -12,7 +12,8 @@ import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { PracticeStore } from './database';
 import { inspectRecording, localVideoUri, recordingFiles, removeIfPresent } from './device-storage';
 import { clipTime, DRILL_NAME, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES, sessionTime, STORAGE_RESERVE_BYTES, type Session } from './practice';
-import { saveRecording } from './recordings';
+import { confirmRecordingFootage } from './recording-review';
+import { saveConfirmedRecording } from './recordings';
 import {
   Button, colors, fonts, gradients, Icon, Loading, message, Notice, Page, Panel, StatsGrid, Strip,
   TextButton, Title, TopBar, ui,
@@ -99,7 +100,8 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
   onImported: (session: Session) => void;
   onCancel: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<'opening' | 'checking' | 'saving'>();
+  const busy = phase !== undefined;
   const [notice, setNotice] = useState<string>();
   const importing = useRef(false);
   const sessions = store.listSessions().flatMap((session) => {
@@ -111,7 +113,7 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
     if (importing.current) return;
     importing.current = true;
     setNotice(undefined);
-    setBusy(true);
+    setPhase('opening');
     let source: string | undefined;
     let saving = false;
     try {
@@ -130,16 +132,21 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
       if (recordingFiles.size(source) > RECORD_MAX_BYTES) throw new Error('Choose a video smaller than 20 MB.');
       const draft = await inspectRecording(source, randomUUID(), Date.now());
       if (draft.durationMs > RECORD_LIMIT_SECONDS * 1000) throw new Error('Choose a video up to 30 seconds long.');
-      saving = true;
-      const saved = saveRecording(draft, recordingFiles, store, userId);
-      onImported(saved);
+      setPhase('checking');
+      const saved = await saveConfirmedRecording(draft, recordingFiles, store, async () => {
+        if (!await confirmRecordingFootage(draft.sourceUri)) return false;
+        saving = true;
+        setPhase('saving');
+        return true;
+      }, userId);
+      if (saved) onImported(saved);
     } catch (error) {
       setNotice(message(error, 'The video could not be imported.'));
     } finally {
       if (source?.startsWith(Paths.cache.uri) && !saving) {
         try { removeIfPresent(source); } catch { /* The picker’s cache can be purged by the system. */ }
       }
-      setBusy(false);
+      setPhase(undefined);
       importing.current = false;
     }
   }
@@ -155,7 +162,7 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
       {notice || busy ? (
         <View style={styles.importAction}>
           {notice ? <Notice>{notice}</Notice> : null}
-          {busy ? <Loading text="Opening video…" /> : null}
+          {phase ? <Loading text={phase === 'checking' ? 'Checking for a shot…' : phase === 'saving' ? 'Saving to this iPhone…' : 'Opening video…'} /> : null}
         </View>
       ) : null}
       <FlatList

@@ -15,6 +15,7 @@ import type { RecentChat } from './coach';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState } from './guest-pose';
+import { withShootingHand } from './guest-pose-motion';
 import { ThinkingDots } from './PeekMotion';
 import { clipTime, sessionTime, type Session } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -185,10 +186,12 @@ export function CoachScreen({
     const request = new AbortController();
     activeTurn.current = request;
     const shot = session && getShotAnalysisState(session.id)?.result;
-    const onDeviceShot = shot ? {
+    const declaredHand = session ? store.getShootingHand(session.id) : null;
+    const pose = shot && withShootingHand(shot.pose, declaredHand);
+    const onDeviceShot = shot && pose ? {
       releaseMs: shot.releaseMs,
-      shootingHand: shot.pose.shootingHand,
-      ...shot.pose.metrics,
+      shootingHand: pose.shootingHand,
+      ...pose.metrics,
     } : undefined;
     setStatus(onDeviceShot || ready ? 'Looking at your shot…' : 'Thinking…');
     setPending(text);
@@ -201,7 +204,7 @@ export function CoachScreen({
         setStatus(update);
       }, (piece) => {
         if (!request.signal.aborted) setWriting((current) => current + piece);
-      }, onDeviceShot);
+      }, onDeviceShot, declaredHand ?? undefined);
       if (request.signal.aborted) return;
       const next = [...history, { id: null, text, role: 'user', createdAt: new Date().toISOString() } satisfies CoachMessage, reply];
       setHistory(next);

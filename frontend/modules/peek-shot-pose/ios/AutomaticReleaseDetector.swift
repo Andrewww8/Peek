@@ -33,14 +33,27 @@ enum AutomaticReleaseDetector {
     let score: Double
   }
 
+  static func recognizesShot(uri: String, budgetMs: Double) async throws -> Bool {
+    guard budgetMs.isFinite, budgetMs > 0 else { return false }
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(budgetMs / 1_000))
+    let (asset, duration) = try await ShotPoseAnalyzer.recording(uri: uri)
+    let generator = makeGenerator(asset, maximumSize: 512)
+    let request = VNDetectHumanBodyPoseRequest()
+
+    // A confirmation can use an early candidate. The full analysis still scans the recording and refines its timing.
+    let samples = try await scan(
+      from: 0, to: duration, interval: 0.1, generator: generator, request: request,
+      shouldContinue: { clock.now < deadline },
+      foundShot: { findCandidate(in: $0, duration: duration) != nil },
+      progress: { _ in }
+    )
+    return findCandidate(in: samples, duration: duration) != nil
+  }
+
   static func releaseMs(uri: String, progress: (Double) -> Void = { _ in }) async throws -> Double {
     let (asset, duration) = try await ShotPoseAnalyzer.recording(uri: uri)
-    let generator = AVAssetImageGenerator(asset: asset)
-    generator.appliesPreferredTrackTransform = true
-    generator.maximumSize = CGSize(width: 640, height: 640)
-    let tolerance = CMTime(value: 1, timescale: 30)
-    generator.requestedTimeToleranceBefore = tolerance
-    generator.requestedTimeToleranceAfter = tolerance
+    let generator = makeGenerator(asset, maximumSize: 640)
     let request = VNDetectHumanBodyPoseRequest()
 
     let coarse = try await scan(
@@ -60,9 +73,21 @@ enum AutomaticReleaseDetector {
     return ((refined ?? likely).time * 1_000).rounded()
   }
 
+  private static func makeGenerator(_ asset: AVAsset, maximumSize: Int) -> AVAssetImageGenerator {
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: maximumSize, height: maximumSize)
+    let tolerance = CMTime(value: 1, timescale: 30)
+    generator.requestedTimeToleranceBefore = tolerance
+    generator.requestedTimeToleranceAfter = tolerance
+    return generator
+  }
+
   private static func scan(
     from start: Double, to end: Double, interval: Double,
     generator: AVAssetImageGenerator, request: VNDetectHumanBodyPoseRequest,
+    shouldContinue: () -> Bool = { true },
+    foundShot: ([Sample]) -> Bool = { _ in false },
     progress: (Double) -> Void
   ) async throws -> [Sample] {
     let count = max(1, Int(ceil((end - start) / interval)))
@@ -70,6 +95,7 @@ enum AutomaticReleaseDetector {
     var lastTime = -Double.infinity
     for index in 0..<count {
       try Task.checkCancellation()
+      guard shouldContinue() else { break }
       // Publish at a bounded rate even when a frame can't be decoded or has no usable pose.
       defer {
         if index % 3 == 0 || index == count - 1 {
@@ -79,6 +105,7 @@ enum AutomaticReleaseDetector {
       let time = CMTime(seconds: start + Double(index) * interval, preferredTimescale: 600)
       guard let frame = try? await generator.image(at: time), frame.actualTime.isNumeric,
             frame.actualTime.seconds > lastTime else { continue }
+      guard shouldContinue() else { break }
       lastTime = frame.actualTime.seconds
       let previous = samples.last
       let tracked: Sample? = try autoreleasepool {
@@ -96,6 +123,7 @@ enum AutomaticReleaseDetector {
       }
       if let tracked {
         samples.append(tracked)
+        if foundShot(samples) { break }
       }
     }
     return samples

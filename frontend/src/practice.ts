@@ -6,6 +6,7 @@ export const RECORD_MAX_BYTES = 20_000_000;
 export const STORAGE_RESERVE_BYTES = 12_000_000;
 
 export type ShotOutcome = 'made' | 'missed' | 'unmarked';
+export type ShootingHand = 'left' | 'right';
 
 export type Session = {
   id: string;

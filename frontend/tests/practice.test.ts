@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { clipTime, shotStats } from '../src/practice.ts';
-import { recoverRecordings, removeRecording, saveRecording } from '../src/recordings.ts';
+import { recoverRecordings, removeRecording, saveConfirmedRecording, saveRecording } from '../src/recordings.ts';
 import type { RecordingDraft } from '../src/recordings.ts';
 import { environment } from './fixture.ts';
 
@@ -82,6 +82,33 @@ test('rejects an incomplete clip and leaves no dangling session', (t) => {
   assert.throws(() => saveRecording(pending, files, store), /completed recording/);
   assert.deepEqual(store.listSessions(), []);
   assert.deepEqual(files.listVideos(), []);
+});
+
+test('keeps unconfirmed footage outside saved sessions and accepts an explicitly confirmed save', async (t) => {
+  const { open, files, path } = environment(t);
+  const connection = open();
+  const pending = draft();
+  writeFileSync(path(pending.sourceUri), Buffer.alloc(pending.sizeBytes));
+
+  let answer!: (confirmed: boolean) => void;
+  const confirmation = new Promise<boolean>((resolve) => { answer = resolve; });
+  const saving = saveConfirmedRecording(pending, files, connection.store, () => confirmation);
+  assert.deepEqual(connection.store.listSessions(), []);
+  assert.deepEqual(files.listVideos(), []);
+  assert.equal(files.size(pending.sourceUri), pending.sizeBytes);
+  answer(false);
+  assert.equal(await saving, null);
+  connection.close();
+
+  const { store } = open();
+  recoverRecordings(files, store);
+  assert.deepEqual(store.listSessions(), []);
+  assert.deepEqual(files.listVideos(), []);
+
+  const saved = await saveConfirmedRecording(pending, files, store, async () => true);
+  assert.ok(saved?.videoPath);
+  assert.equal(files.size(saved.videoPath), pending.sizeBytes);
+  assert.deepEqual(store.listSessions(), [saved]);
 });
 
 test('stores ordered release timestamps, recomputes after edits, and keeps stats after removing video', (t) => {

@@ -22,7 +22,10 @@ export const onDeviceShotSchema = z.object({
   kneeDipDeg: angleEstimate,
   releaseHeight: z.number().min(-2).max(2).nullable(),
 });
-export const coachContextSchema = z.object({ userId: z.string(), sessionId: z.string(), onDeviceShot: onDeviceShotSchema.optional() });
+export const coachContextSchema = z.object({
+  userId: z.string(), sessionId: z.string(), onDeviceShot: onDeviceShotSchema.optional(),
+  shootingHand: z.enum(['left', 'right']).optional(),
+});
 export type CoachContext = z.infer<typeof coachContextSchema>;
 
 /** Numeric metrics the tools compare. */
@@ -83,7 +86,12 @@ export function toolStatus(name: string, args: Record<string, unknown>): { tool:
 export function createCoachTools(deps: { clips: ClipRepo; references: ReferenceRepo }) {
   const session = async (runtime: unknown) => {
     const c = ctx(runtime);
-    return deps.clips.list(c.userId, c.sessionId);
+    const rows = await deps.clips.list(c.userId, c.sessionId);
+    const { shootingHand } = c;
+    return shootingHand ? rows.map((row) => {
+      const selected = { ...row, shootingHand };
+      return { ...selected, analysis: effectiveAnalysis(selected) };
+    }) : rows;
   };
   const shot = async (runtime: unknown, n: number) => (await session(runtime)).find((r) => r.shotNumber === n) ?? null;
 

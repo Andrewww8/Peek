@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { GUEST_LIMIT_MESSAGE } from './coach/deps.js';
+import { effectiveAnalysis } from './coach/compare.js';
 import { coachRoutes } from './coach/routes.js';
-import { recompute, type ShotAnalysis } from './cv/metrics.js';
 import { playbackPoseView, poseView } from './cv/pose-view.js';
 import {
   AuthError,
@@ -290,7 +290,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
 
   coachRoutes(app, { coach: deps?.coach, clips, guestDailyLimit, sessionParam });
 
-  app.get<{ Params: { sessionId: string; shotNumber: string }; Querystring: { followThrough?: string } }>('/v1/sessions/:sessionId/shots/:shotNumber/pose', async (req, reply) => {
+  app.get<{ Params: { sessionId: string; shotNumber: string }; Querystring: { followThrough?: string; shootingHand?: string } }>('/v1/sessions/:sessionId/shots/:shotNumber/pose', async (req, reply) => {
     const sessionId = sessionParam(req.params.sessionId);
     const shotNumber = shotNumberParam(req.params.shotNumber);
     const row = await clips.get(req.userId, sessionId, shotNumber);
@@ -298,14 +298,15 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     if (row.analysisStatus === 'pending') {
       throw new ApiError(409, 'analysis_pending', 'Pose analysis is still running for this shot.');
     }
-    const analysis = row.analysis as Partial<ShotAnalysis> | null;
-    if (row.analysisStatus !== 'complete' || !analysis?.quality?.usable) {
+    const { shootingHand } = req.query;
+    if (shootingHand !== undefined && shootingHand !== 'left' && shootingHand !== 'right') {
+      throw bad('shootingHand must be "left" or "right"');
+    }
+    const analysis = effectiveAnalysis(shootingHand ? { ...row, shootingHand } : row);
+    if (!analysis?.quality?.usable) {
       throw new ApiError(422, 'pose_unavailable', 'This shot does not have a usable 3D pose.');
     }
-    let comparison = analysis.comparison;
-    if (comparison === undefined && analysis.pose && analysis.input) {
-      comparison = recompute({ pose: analysis.pose, input: analysis.input }).comparison;
-    }
+    const { comparison } = analysis;
     if (!comparison) throw new ApiError(422, 'pose_unavailable', 'The shot needs a clearer view of the shooter through release.');
     reply.header('Cache-Control', 'private, no-store');
     const pose = req.query.followThrough === '1' && analysis.pose && analysis.metrics

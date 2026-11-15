@@ -46,13 +46,17 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
   app.post<{ Params: { sessionId: string } }>('/v1/sessions/:sessionId/coach/messages', async (req, reply) => {
     const c = need();
     const sessionId = sessionParam(req.params.sessionId);
-    const body = req.body as { message?: unknown; onDeviceShot?: unknown } | null;
+    const body = req.body as { message?: unknown; onDeviceShot?: unknown; shootingHand?: unknown } | null;
     const message = typeof body?.message === 'string' ? body.message.trim() : '';
     if (!message || message.length > COACH_MAX_MESSAGE_CHARS) {
       throw new ApiError(400, 'invalid_request', `message must be 1 to ${COACH_MAX_MESSAGE_CHARS} characters`);
     }
     const localShot = onDeviceShotSchema.optional().safeParse(body?.onDeviceShot);
     if (!localShot.success) throw new ApiError(400, 'invalid_request', 'onDeviceShot must contain a valid release and shot measurements');
+    const shootingHand = body?.shootingHand;
+    if (shootingHand !== undefined && shootingHand !== 'left' && shootingHand !== 'right') {
+      throw new ApiError(400, 'invalid_request', 'shootingHand must be "left" or "right"');
+    }
     const userId = req.userId;
     const day = (c.today ?? utcDay)();
     let limit: number | null = c.dailyLimit;
@@ -68,7 +72,7 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
 
     const config = {
       configurable: { thread_id: threadId(userId, sessionId) },
-      context: { userId, sessionId, onDeviceShot: localShot.data },
+      context: { userId, sessionId, onDeviceShot: localShot.data, shootingHand },
     };
     const a = getAgent();
     reply.hijack();

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { guestPoseFromVision, type VisionFrame } from '../src/guest-pose-motion.ts';
+import { guestPoseFromVision, withShootingHand, type VisionFrame } from '../src/guest-pose-motion.ts';
 import { comparisonPlayback, coordinatesPerFrame, fingerCount, jointCount, posePoint, shotMotionWindow } from '../src/pose-3d.ts';
 
 const body = [
@@ -35,6 +35,26 @@ test('guest motion follows the selected recording and stays aligned to the relea
   assert.equal(playback.frameCount - 1 - playback.releaseIndex, playback.fps);
   assert.deepEqual(posePoint(playback, playback.frameCount - 1, 16), posePoint(high, last, 16));
   assert.notDeepEqual(posePoint(playback, 0, 16), posePoint(playback, 1, 16));
+});
+
+test('a saved shooting hand uses that arm for release metrics without changing the recording pose', () => {
+  const pose = guestPoseFromVision(shot(0.5));
+  const left = withShootingHand(pose, 'left');
+  assert.equal(pose.shootingHand, 'right');
+  assert.equal(left.shootingHand, 'left');
+  assert.equal(left.joints, pose.joints);
+  assert.equal(left.releaseIndex, pose.releaseIndex);
+  assert.notEqual(left.metrics.releaseElbowDeg, pose.metrics.releaseElbowDeg);
+  assert.equal(left.metrics.kneeDipDeg, pose.metrics.kneeDipDeg);
+  const head = posePoint(pose, pose.releaseIndex, 10)!;
+  const wrist = posePoint(pose, pose.releaseIndex, 13)!;
+  assert.equal(left.metrics.releaseHeight, Number((head[1] - wrist[1]).toFixed(4)));
+
+  const partial = { ...pose, joints: pose.joints.slice() };
+  partial.joints.fill(null, pose.releaseIndex * coordinatesPerFrame + 13 * 3, pose.releaseIndex * coordinatesPerFrame + 14 * 3);
+  const missing = withShootingHand(partial, 'left');
+  assert.equal(missing.metrics.releaseHeight, null);
+  assert.equal(missing.metrics.releaseElbowDeg, null);
 });
 
 function hands(index: number, height?: number): VisionFrame {

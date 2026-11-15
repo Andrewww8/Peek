@@ -53,6 +53,14 @@ export function saveRecording(draft: RecordingDraft, files: RecordingFiles, sess
   return session;
 }
 
+export async function saveConfirmedRecording(
+  draft: RecordingDraft, files: RecordingFiles, sessions: Sessions,
+  confirm: () => Promise<boolean>, cloudUserId: string | null = null,
+) {
+  if (!await confirm()) return null;
+  return saveRecording(draft, files, sessions, cloudUserId);
+}
+
 export function recoverRecordings(files: RecordingFiles, sessions: Sessions) {
   for (const filename of files.listVideos()) {
     const match = filenamePattern.exec(filename);

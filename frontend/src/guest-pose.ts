@@ -6,6 +6,7 @@ import { coordinatesPerFrame, fingerCount, type Pose } from './pose-3d';
 type NativeProgress = { requestId: string; operation: 'detectRelease' | 'analyze'; progress: number };
 const native = requireOptionalNativeModule<{
   isAvailable(): boolean;
+  recognizeShot?(uri: string, budgetMs: number): Promise<boolean>;
   detectRelease(uri: string, requestId?: string): Promise<number>;
   analyze(uri: string, releaseMs: number, requestId?: string): Promise<{ frames: VisionFrame[]; trackingVersion?: number }>;
   addListener(event: 'onShotPoseProgress', listener: (event: NativeProgress) => void): { remove(): void };
@@ -36,6 +37,30 @@ let requestSequence = 0;
 export const hasOnDeviceAnalysis = () => native?.isAvailable() ?? false;
 export const hasAutomaticAnalysis = () => hasOnDeviceAnalysis() && typeof native?.detectRelease === 'function';
 export const needsShotAnalysisRefresh = (result: ShotAnalysisResult) => result.version !== analysisVersion;
+
+export async function recognizeRecordingShot(uri: string): Promise<'recognized' | 'uncertain'> {
+  const budgetMs = 1_800;
+  const deadline = Date.now() + budgetMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    if (!native?.isAvailable() || !native.recognizeShot) return 'uncertain';
+    const check = queue.then(() => {
+      const remainingMs = deadline - Date.now();
+      return remainingMs > 0 ? native.recognizeShot?.(uri, remainingMs) ?? false : false;
+    });
+    // A Vision request already processing a frame can outlive the UI's timeout.
+    queue = check.then(() => undefined, () => undefined);
+    const recognized = await Promise.race([
+      check,
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2_000); }),
+    ]);
+    return recognized ? 'recognized' : 'uncertain';
+  } catch {
+    return 'uncertain';
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function analysisKey(sessionId: string, tag?: ShotAnalysisTag) {
   return tag ? `pose:${sessionId}:${tag.shotNumber}:${tag.releaseMs}` : `auto-pose:${sessionId}`;
