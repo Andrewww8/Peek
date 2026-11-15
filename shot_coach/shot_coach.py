@@ -16,6 +16,7 @@ INPUTS
                --all        include the measures that rely on estimated depth / fingertip position
                --explain    print what each measure means
                --top N      how many differences to list (default 8)
+               --height H   your height (178, 5'10, 70in) so the 3D viewer draws you at your real size next to the player
 
 OUTPUTS (all in outputs/)
   <video>.npz                               the pose, clipped to 1.0 s before the release .. 0.5 s after, 30 fps, 46 samples, release at index 30:
@@ -75,6 +76,8 @@ VIDEO_EXT = (".mp4", ".mov", ".m4v", ".avi", ".mkv")
 PRE, POST, NT = 1.0, 0.5, 46                       # shot window: seconds before / after the release, samples at 30 fps
 EXT_THREADS = 3                                        # fingertip/toe frames processed at once
 FRAME_BUDGET = 1.6e9                               # bytes of decoded frames kept in memory (longer videos are re-read instead)
+PLAYER_HEIGHT_CM = {"Stephen Curry": 188, "Damian Lillard": 188, "Kyrie Irving": 188, "Ray Allen": 196, "Anthony Edwards": 193, "Luke Kennard": 196,
+                    "Luka Doncic": 198, "Donte DiVincenzo": 193, "LaMelo Ball": 201, "Shai Gilgeous-Alexander": 198}      # listed heights, for the 3D viewer
 ALIAS = {"sga": "Shai Gilgeous-Alexander", "steph": "Stephen Curry", "ant": "Anthony Edwards", "dame": "Damian Lillard", "luka": "Luka Doncic", "melo": "LaMelo Ball"}
 from concurrent.futures import ThreadPoolExecutor
 
@@ -988,7 +991,7 @@ import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-const D=__DATA__,NT=46,REL=30,H=1.8,$=id=>document.getElementById(id);
+const D=__DATA__,NT=46,REL=30,$=id=>document.getElementById(id);
 // where the bones of the model join, in the model's own units: hip and shoulder sockets, top of the sacrum, neck, sole of the foot
 const TR={hipX:0.085,shX:0.17,shY:0,shZ:-0.04,sacrum:0.07,neck:0.147,headFwd:0,sole:0.075};
 const canvas=$('cv'),scene=new THREE.Scene();scene.background=new THREE.Color(0x1a1a1a);
@@ -1004,11 +1007,11 @@ const draco=new DRACOLoader();draco.setDecoderPath('https://www.gstatic.com/drac
 const SEG=['pelvis','torso','head','l_uarm','r_uarm','l_larm','r_larm','l_hand','r_hand','l_thigh','r_thigh','l_shank','r_shank','l_foot','r_foot'];
 function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.name)src[c.name]=c;S.mesh={};S.group=new THREE.Group();
  for(const n of SEG){if(!src[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m)}scene.add(S.group);
- S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);solve(S)}
+ S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);S.H=1.8;solve(S);S.H*=S.height/S.stand;solve(S)}   // second pass: scale to the real standing height
 // Rigid skeleton: every bone keeps one length and one thickness for the whole clip, joints are chained from the pelvis outwards,
 // and a bone can only swing, never spin about its own length. Hands keep their palms turned towards each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick; feet stay flat, pointing where the shin faces.
 function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
- for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H));
+ const H=S.H;for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H));
  const med=f=>{const a=[];for(let i=S.v0;i<=S.v1;i++)a.push(f(all[i]));a.sort((x,y)=>x-y);return a[a.length>>1]},d=(a,b)=>med(J=>J[a].distanceTo(J[b]));
  const Lth=(d(1,2)+d(4,5))/2,Lsh=(d(2,3)+d(5,6))/2,Lua=(d(14,15)+d(11,12))/2,Lfa=(d(15,16)+d(12,13))/2,Ltr=d(0,8);
  const g=(Lth+Lsh)/0.927,st=Math.max(0.92*g,Math.min(1.2*g,(Ltr-TR.sacrum*g)/0.361)),k=(a,b)=>Math.max(0.85,Math.min(1.2,a/b/g))*g;
@@ -1039,7 +1042,8 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
    let fy=V(c.y.x,c.y.y,0);if(fy.lengthSq()<1e-4)fy=V(py.x,py.y,0);fy.normalize();const fz=V(0,0,1);F[s+'_foot']={p:A,q:quat(V().crossVectors(fy,fz),fy,fz)}}
   S.fr[i]=F}
  let lo=1e9;for(let i=S.v0;i<=Math.min(S.v0+12,S.v1);i++)lo=Math.min(lo,S.fr[i].r_foot.p.z,S.fr[i].l_foot.p.z);lo-=TR.sole*g;
- for(let i=S.v0;i<=S.v1;i++)for(const n in S.fr[i])S.fr[i][n].p.z-=lo}
+ for(let i=S.v0;i<=S.v1;i++)for(const n in S.fr[i])S.fr[i][n].p.z-=lo;
+ S.stand=TR.sole*g+Lsh+Lth+TR.sacrum*g+0.361*st+(TR.neck+0.102)*g}                 // height of this skeleton standing straight
 const P_=new THREE.Vector3(),Q_=new THREE.Quaternion();
 function pose(S,tt){const c=Math.max(S.v0,Math.min(S.v1,tt)),a=Math.floor(c),b=Math.min(a+1,S.v1),f=c-a,A=S.fr[a],B=S.fr[b];
  for(const n in S.mesh){const m=S.mesh[n];P_.lerpVectors(A[n].p,B[n].p,f);Q_.slerpQuaternions(A[n].q,B[n].q,f);m.matrix.compose(P_,Q_,S.scale[n.replace(/^[lr]_/,'')]);m.matrixWorldNeedsUpdate=true}}
@@ -1070,7 +1074,21 @@ def canon_rot(p):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
-def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
+def parse_height(text):
+    """'178', '178cm', '1.78m', '70in', 5'10, 5-10 or 5ft10 -> centimetres."""
+    t = text.strip().lower().replace('"', "").replace("inches", "in").replace(" ", "")
+    m = re.fullmatch(r"(\d)(?:'|ft|-)(\d{1,2}(?:\.\d+)?)?(?:in)?", t)
+    if m: cm = int(m.group(1)) * 30.48 + float(m.group(2) or 0) * 2.54
+    elif t.endswith("cm"): cm = float(t[:-2])
+    elif t.endswith("in"): cm = float(t[:-2]) * 2.54
+    elif t.endswith("m"): cm = float(t[:-1]) * 100
+    else:
+        cm = float(t); cm = cm * 100 if cm < 3 else (cm * 2.54 if cm < 100 else cm)
+    if not 100 <= cm <= 250: raise ValueError(text)
+    return cm
+
+
+def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot, height_cm=None):
     """3D viewer page: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
     avg = ref.get("averages", {}).get(player, {}).get(stype)
     if avg is None or not os.path.exists(os.path.join(ROOT, "assets", "skeleton.glb")): return False
@@ -1093,8 +1111,11 @@ def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
     kind = "three" if stype == "three" else "mid-range"
     with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
         glb = base64.b64encode(fh.read()).decode()
-    data = dict(you=dict(label="You, " + shot["name"] + (" (mirrored)" if hand == "L" else ""), pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist()),
-                player=dict(label=f"{player}, average {kind} shot" + (" (mirrored)" if avg.get("hand") == "L" else ""), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"]), glb=glb)
+    pcm = PLAYER_HEIGHT_CM.get(player, 193); ycm = height_cm or pcm                        # without your height both are drawn the same size
+    ft = lambda cm: f"{int(cm / 2.54 // 12)}'{int(round(cm / 2.54 % 12)) % 12}\"" if round(cm / 2.54 % 12) < 12 else f"{int(cm / 2.54 // 12) + 1}'0\""
+    data = dict(you=dict(label="You, " + shot["name"] + (f", {ft(ycm)}" if height_cm else ", drawn at his height") + (" (mirrored)" if hand == "L" else ""),
+                         pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist(), height=ycm / 100),
+                player=dict(label=f"{player}, {ft(pcm)}, average {kind} shot" + (" (mirrored)" if avg.get("hand") == "L" else ""), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"], height=pcm / 100), glb=glb)
     with open(path, "w") as fh:
         fh.write(VIEWER_HTML.replace("__TITLE__", f"You vs {player}").replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
     return True
@@ -1193,8 +1214,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["similar", "difference", "lift"]); ap.add_argument("shot"); ap.add_argument("shot_type", nargs="?", choices=["three", "mid", "midrange"])
     ap.add_argument("player", nargs="?"); ap.add_argument("--hand", choices=["R", "L"]); ap.add_argument("--relift", action="store_true"); ap.add_argument("--clip", action="store_true")
-    ap.add_argument("--out"); ap.add_argument("--all", action="store_true"); ap.add_argument("--explain", action="store_true"); ap.add_argument("--top", type=int, default=8)
+    ap.add_argument("--out"); ap.add_argument("--all", action="store_true"); ap.add_argument("--explain", action="store_true"); ap.add_argument("--top", type=int, default=8); ap.add_argument("--height")
     a = ap.parse_args(); t_start = time.time()
+    try: height_cm = parse_height(a.height) if a.height else None
+    except ValueError: sys.exit(f"Could not read the height '{a.height}'. Examples: 178   5'10   70in")
     if a.mode != "lift" and not a.shot_type: sys.exit(f"{a.mode} needs a shot type: three or mid")
     if a.mode == "difference" and not a.player: sys.exit('difference needs a player, e.g.  shot_coach.py difference shot.mov three curry')
     if os.path.isdir(a.shot) or not os.path.exists(a.shot): sys.exit(f"'{a.shot}' is not a file. Give ONE shot: a video or a pose .npz.")
@@ -1240,7 +1263,7 @@ def main():
             w = csv.DictWriter(fh, fieldnames=list(res["measures"][0])); w.writeheader(); w.writerows(res["measures"])
         saved.append(base + ".csv")
     who = res["player"] if a.mode == "difference" else res["closest"]
-    if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot):
+    if write_viewer(base + ".html", p, ext, rise, r, str(d["hand"]), ref, who, stype, res, shot, height_cm):
         saved.append(base + ".html"); print(f"\n3D viewer, you vs {who}:  {base}.html")
     print("Saved in " + out_dir + ": " + ", ".join(os.path.basename(x) for x in saved))
 

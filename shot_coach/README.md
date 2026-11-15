@@ -44,6 +44,7 @@ python shot_coach.py difference my_shot.mov mid curry --hand L
   - `--all`: include the less reliable measures.
   - `--explain`: print what each measure means.
   - `--top N`: how many differences to list (default 8).
+  - `--height H`: your height (`178`, `5'10`, `70in`). The 3D viewer then draws you at your real size next to the player, who is drawn at his listed height. Without it, both skeletons are drawn the same height.
 
 ## Outputs
 
