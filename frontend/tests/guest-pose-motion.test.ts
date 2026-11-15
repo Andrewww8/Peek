@@ -37,15 +37,16 @@ test('guest motion follows the selected recording and stays aligned to the relea
   assert.notDeepEqual(posePoint(playback, 0, 16), posePoint(playback, 1, 16));
 });
 
-test('hand-only detections fill short gaps without covering observed misses or repeating a resting hand', () => {
-  const hands = (index: number, height?: number): VisionFrame => {
-    const fingerOffsets = Array<number | null>(fingerCount * 3).fill(null);
-    if (height !== undefined) {
-      fingerOffsets.splice(3, 3, 0, height, 0.02);
-      fingerOffsets.splice(15, 3, 0, height / 2, 0.01);
-    }
-    return { index, joints: [], fingerOffsets };
-  };
+function hands(index: number, height?: number): VisionFrame {
+  const fingerOffsets = Array<number | null>(fingerCount * 3).fill(null);
+  if (height !== undefined) {
+    fingerOffsets.splice(3, 3, 0, height, 0.02);
+    fingerOffsets.splice(15, 3, 0, height / 2, 0.01);
+  }
+  return { index, joints: [], fingerOffsets };
+}
+
+test('hand-only detections bridge short misses between agreeing hands without extending a resting hand', () => {
   const frames = shot(0.5);
   const bodyOnly = guestPoseFromVision(frames);
   const pose = guestPoseFromVision([...frames, hands(21, 0.09), hands(23, 0.13), hands(24),
@@ -57,10 +58,24 @@ test('hand-only detections fill short gaps without covering observed misses or r
   assert.equal(pose.releaseIndex, bodyOnly.releaseIndex);
   assert.ok(wristRelativeY(21) > wristRelativeY(22));
   assert.ok(wristRelativeY(22) > wristRelativeY(23));
+  assert.ok(wristRelativeY(23) < wristRelativeY(24));
+  assert.ok(wristRelativeY(24) < wristRelativeY(25));
   assert.ok(posePoint(pose, 30, tip));
-  for (const frame of [20, 24, 26, 31, 33, 54]) {
+  for (const frame of [20, 26, 31, 33, 54]) {
     assert.equal(posePoint(pose, frame, tip), null);
   }
+});
+
+test('an isolated palm reversal is corrected when neighbors agree and a measured turn stays intact', () => {
+  const frames = shot(0.3);
+  const tip = jointCount + 1;
+  const isolated = guestPoseFromVision([...frames, hands(22, 0.12), hands(24, -0.12), hands(26, 0.11)]);
+  const turn = guestPoseFromVision([...frames, hands(22, 0.12), hands(24, -0.12), hands(25, -0.11), hands(26, -0.1)]);
+  const gap = guestPoseFromVision([...frames, hands(22, 0.12), hands(24), hands(26, -0.12)]);
+
+  assert.ok(posePoint(isolated, 24, tip)![1] < posePoint(isolated, 24, 16)![1]);
+  assert.ok(posePoint(turn, 24, tip)![1] > posePoint(turn, 24, 16)![1]);
+  assert.equal(posePoint(gap, 24, tip), null);
 });
 
 test('the player keeps moving across a release gap with later detections, then holds the last pose', () => {

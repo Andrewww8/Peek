@@ -434,7 +434,7 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
               if (!a || !b) return null;
               const dx = b[0] - a[0], dy = b[1] - a[1];
               const width = Math.hypot(dx, dy);
-              const thickness = to >= jointCount ? 1.25 : 3;
+              const thickness = to >= jointCount ? 1 : 3;
               return <View key={from + '-' + to} style={[styles.bone, {
                 width, height: thickness, backgroundColor: tint, left: (a[0] + b[0] - width) / 2, top: (a[1] + b[1] - thickness) / 2,
                 transform: [{ rotate: String(Math.atan2(dy, dx)) + 'rad' }],
@@ -442,10 +442,12 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
             })}
             {joints.map((point, index) => {
               if (!point) return null;
-              const radius = index >= jointCount ? 1.4 : index === 10 ? 6 : index === 13 || index === 16 ? 3 : 2.5;
+              const wrist = index === 13 || index === 16;
+              const radius = index >= jointCount ? index < jointCount + 4 ? 1.2 : 0.8 : index === 10 ? 6 : wrist ? 2.65 : 2.5;
               return <View key={index} style={{
                 position: 'absolute', left: point[0] - radius, top: point[1] - radius,
-                width: 2 * radius, height: 2 * radius, borderRadius: radius, backgroundColor: tint,
+                width: 2 * radius, height: 2 * radius, borderRadius: radius,
+                backgroundColor: wrist ? 'transparent' : tint, borderColor: tint, borderWidth: wrist ? 1.15 : 0,
               }} />;
             })}
           </>

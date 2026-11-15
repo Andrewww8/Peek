@@ -270,8 +270,9 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
     if (!positions.some(Boolean)) continue;
     const finger = joint >= jointCount;
     const sparse = finger && positions.includes(null);
+    const radius = finger ? joint < jointCount + 4 ? 0.011 : 0.007 : joint === 10 ? 0.056 : joint === 13 || joint === 16 ? 0.023 : 0.027;
     parts.push('def Sphere "' + (finger ? 'Finger_' + String(joint - jointCount) : 'Joint_' + String(joint)) + '" {',
-      'double radius = ' + (finger ? '0.013' : joint === 10 ? '0.056' : '0.027'), color,
+      'double radius = ' + radius, color,
       track('double3', 'translate', positions, [offset, 0, 0]), visibility(positions),
       ...(sparse ? [track('float3', 'scale', positions.map((position) => position ? [1, 1, 1] : hiddenScale), [1, 1, 1])] : []),
       'uniform token[] xformOpOrder = ["xformOp:translate"' + (sparse ? ', "xformOp:scale"' : '') + ']', '}');
@@ -294,7 +295,7 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
     if (!data.some(Boolean)) continue;
     const missingScale = to >= jointCount ? hiddenScale : null;
     parts.push('def Cylinder "Bone_' + String(from) + '_' + String(to) + '" {',
-      'uniform token axis = "Y"', 'double radius = ' + (to >= jointCount ? '0.007' : '0.016'), 'double height = 2', color,
+      'uniform token axis = "Y"', 'double radius = ' + (to >= jointCount ? '0.0055' : '0.016'), 'double height = 2', color,
       track('double3', 'translate', data.map((item) => item?.center ?? null), [offset, 0, 0]),
       track('quatf', 'orient', data.map((item) => item?.rotation ?? null), [1, 0, 0, 0]),
       track('float3', 'scale', data.map((item) => item?.scale ?? missingScale), [1, 0, 1]), visibility(data),

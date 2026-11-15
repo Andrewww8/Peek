@@ -26,7 +26,7 @@ public final class PeekShotPoseModule: Module {
       let frames = try await ShotPoseAnalyzer.frames(uri: uri, releaseMs: releaseMs) { progress in
         self.reportProgress(requestId, operation: "analyze", progress: progress)
       }
-      return ["frames": frames, "trackingVersion": 8]
+      return ["frames": frames, "trackingVersion": 9]
     }
   }
 

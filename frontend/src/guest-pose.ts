@@ -23,7 +23,7 @@ export type ShotAnalysisState = {
 };
 
 const cache = new SQLiteStorage('peek-guest-analysis');
-const analysisVersion = 8;
+const analysisVersion = 9;
 const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
@@ -51,7 +51,7 @@ function readSavedAnalysis(key: string, tag?: ShotAnalysisTag): ShotAnalysisStat
     if (!result || !Number.isFinite(result.releaseMs) ||
         result.pose.frameCount * coordinatesPerFrame !== result.pose.joints.length) return;
     // The previous hand data could include repeated end poses. Refresh it from the original clip.
-    const fingers = result.version === analysisVersion && Array.isArray(result.pose.fingers) &&
+    const fingers = (result.version === 8 || result.version === analysisVersion) && Array.isArray(result.pose.fingers) &&
       result.pose.fingers.length === result.pose.frameCount * fingerCount * 3
       ? result.pose.fingers : undefined;
     const display = { ...result, pose: { ...result.pose, fingers } };

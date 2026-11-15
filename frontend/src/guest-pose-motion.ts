@@ -15,7 +15,7 @@ const fps = 30;
 const releaseIndex = 24;
 const frameCount = releaseIndex + fps + 1;
 const maxGap = 6;
-const maxHandGap = 3;
+const maxHandGap = 4;
 const templateHeight = 0.968;
 const { pelvis, rightHip, rightKnee, rightAnkle, leftHip, leftKnee, leftAnkle, thorax,
   head, leftShoulder, leftElbow, leftWrist, rightShoulder, rightElbow, rightWrist } = {
@@ -34,6 +34,61 @@ function visionPoint(samples: PoseSample[], joint: number): Point | null {
   const [x, y, z] = samples.slice(joint * 3, joint * 3 + 3);
   if (x == null || y == null || z == null || ![x, y, z].every(Number.isFinite)) return null;
   return [x, -y, -z];
+}
+
+const add = (a: Point, b: Point): Point => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const dot = (a: Point, b: Point) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+function direction(point: Point | null | undefined): Point | null {
+  const size = point ? Math.hypot(...point) : 0;
+  return point && size > 1e-6 ? [point[0] / size, point[1] / size, point[2] / size] : null;
+}
+
+function trackedHands(measured: Map<number, (Point | null)[]>, first: number, last: number, height: number) {
+  const samples = [...measured.entries()].filter(([frame]) => frame >= first && frame <= last)
+    .sort(([a], [b]) => a - b).map(([frame, hand]) => ({ frame, hand: hand.slice() }));
+  if (!samples.length) return;
+
+  // A single palm facing away from two nearby observations that agree is likely a mismatched hand.
+  for (const side of [0, 1]) {
+    const palms = samples.flatMap((sample) => {
+      const middle = direction(sample.hand[4 + side]), index = direction(sample.hand[6 + side]);
+      const palm = middle && index ? direction(add(middle, index)) : middle ?? index;
+      return palm ? [{ ...sample, palm }] : [];
+    });
+    for (let i = 1; i + 1 < palms.length; i++) {
+      const before = palms[i - 1]!, current = palms[i]!, after = palms[i + 1]!;
+      if (current.frame - before.frame > 5 || after.frame - current.frame > 5 || dot(before.palm, after.palm) < 0.72) continue;
+      const expected = direction(mix(before.palm, after.palm, (current.frame - before.frame) / (after.frame - before.frame)));
+      if (!expected || dot(current.palm, expected) >= 0.20) continue;
+      for (let point = side; point < fingerCount; point += 2) current.hand[point] = null;
+    }
+  }
+
+  const rows = Array.from({ length: frameCount }, () => Array<Point | null>(fingerCount).fill(null));
+  for (const { frame, hand } of samples) rows[frame] = hand.slice();
+  for (let tip = 0; tip < 4; tip++) {
+    const knuckle = tip + 4;
+    const valid = samples.filter(({ hand }) => hand[tip] && hand[knuckle]);
+    for (let i = 1; i < valid.length; i++) {
+      const from = valid[i - 1]!, to = valid[i]!;
+      const gap = to.frame - from.frame;
+      if (gap < 2 || gap > maxHandGap) continue;
+      const a = from.hand[tip]!, b = to.hand[tip]!, baseA = from.hand[knuckle]!, baseB = to.hand[knuckle]!;
+      const dirA = direction(baseA), dirB = direction(baseB);
+      if (!dirA || !dirB || dot(dirA, dirB) < 0.5 || distance(a, b) > 0.075 * height) continue;
+      for (let frame = from.frame + 1; frame < to.frame; frame++) {
+        const hand = rows[frame]!;
+        const t = (frame - from.frame) / gap;
+        const base = mix(baseA, baseB, t);
+        // Use the observed knuckle if it agrees with the nearby hand. Keep a real turn intact.
+        if (hand[knuckle] && distance(hand[knuckle], base) > 0.025 * height) continue;
+        hand[knuckle] ??= base;
+        hand[tip] ??= mix(a, b, t);
+      }
+    }
+  }
+  return rows;
 }
 
 function angle(a?: Point | null, b?: Point | null, c?: Point | null) {
@@ -116,33 +171,13 @@ export function guestPoseFromVision(frames: VisionFrame[]): Pose {
   });
   const firstBodyFrame = indexes[0]!;
   const lastBodyFrame = indexes.at(-1)!;
-  const handFrames = [...measuredHands.keys()]
-    .filter((index) => index >= firstBodyFrame && index <= lastBodyFrame)
-    .sort((a, b) => a - b);
-  const blankHand = Array<null>(fingerCount).fill(null);
-  const blankCoordinates = Array<null>(fingerCount * 3).fill(null);
-  const fingers = handFrames.length ? rows.flatMap((row, index) => {
-    if (index < firstBodyFrame || index > lastBodyFrame) return blankCoordinates;
-    let offsets = measuredHands.get(index);
-    if (!offsets) {
-      const before = handFrames.findLast((frame) => frame < index);
-      const after = handFrames.find((frame) => frame > index);
-      // Only fill a short unsampled gap bounded by real observations. An observed miss stays hidden.
-      if (before !== undefined && after !== undefined && after - before <= maxHandGap) {
-        const next = measuredHands.get(after)!;
-        const t = (index - before) / (after - before);
-        offsets = measuredHands.get(before)!.map((a, finger) => {
-          const b = next[finger];
-          return a && b ? mix(a, b, t) : null;
-        });
-      }
-    }
-    return (offsets ?? blankHand).flatMap((offset, finger) => {
+  const handOffsets = trackedHands(measuredHands, firstBodyFrame, lastBodyFrame, height);
+  const fingers = handOffsets ? rows.flatMap((row, index) => {
+    const offsets = handOffsets[index]!;
+    return offsets.flatMap((offset, finger) => {
       const wrist = row[fingerWrist(finger)];
-      // The samples contain the four tips first, followed by their matching knuckles.
-      const hasBase = finger >= 4 || !!offsets?.[finger + 4];
-      const point: Point | null = offset && wrist && hasBase
-        ? [wrist[0] + offset[0], wrist[1] + offset[1], wrist[2] + offset[2]] : null;
+      // A fingertip is drawn only with its own observed or briefly bridged knuckle.
+      const point = offset && wrist && (finger >= 4 || offsets[finger + 4]) ? add(wrist, offset) : null;
       return normalize(point, row[pelvis]);
     });
   }) : undefined;
