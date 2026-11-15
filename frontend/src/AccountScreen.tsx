@@ -127,7 +127,10 @@ export function AuthScreen({ initialMode, initialEmail, recoveryError, onBack, o
 
       const { data, error } = await auth.signInWithPassword(credentials);
       if (error?.code === 'email_not_confirmed') {
+        // Signing in sends nothing, and the code from sign-up may have expired. Send a fresh one.
+        const resent = await auth.resend({ type: 'signup', email: normalizedEmail });
         changeMode('verify');
+        setInfo(resent.error ? 'Tap Resend code if you need a new code.' : 'A new code was sent. Check your email.');
       } else if (error?.code === 'invalid_credentials') {
         throw new Error('That email and password didn’t match.\nTry again or reset your password.');
       } else if (error) {
