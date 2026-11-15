@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from 'expo';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import { guestPoseFromVision, type VisionFrame } from './guest-pose-motion';
-import { coordinatesPerFrame, type Pose } from './pose-3d';
+import { coordinatesPerFrame, fingerCount, type Pose } from './pose-3d';
 
 type NativeProgress = { requestId: string; operation: 'detectRelease' | 'analyze'; progress: number };
 const native = requireOptionalNativeModule<{
@@ -23,8 +23,8 @@ export type ShotAnalysisState = {
 };
 
 const cache = new SQLiteStorage('peek-guest-analysis');
-// Old results may contain a padded second after release rather than a fresh track of the footage.
-const analysisVersion = 2;
+const bodyOnlyAnalysisVersion = 2;
+const analysisVersion = 3;
 const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
@@ -115,7 +115,9 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       const releaseMs = saved?.releaseMs ?? tag?.releaseMs ?? await native.detectRelease(uri, requestId);
       update(key, { phase: 'tracking', progress: scanShare, startedAt, result: saved });
       const { frames } = await native.analyze(uri, releaseMs, requestId);
-      const result = { pose: guestPoseFromVision(frames), releaseMs, version: analysisVersion };
+      // Older native builds omit hand data. Keep these cached poses eligible for refresh after an app update.
+      const supportsHands = frames.some(({ fingers }) => fingers?.length === fingerCount * 3);
+      const result = { pose: guestPoseFromVision(frames), releaseMs, version: supportsHands ? analysisVersion : bodyOnlyAnalysisVersion };
       const state: ShotAnalysisState = { phase: 'complete', progress: 1, result, startedAt, finishedAt: Date.now() };
       const writes: [string, string][] = [[key, JSON.stringify(state)]];
       // Keep counting during unlimited mode so a rollback uses the same daily history.

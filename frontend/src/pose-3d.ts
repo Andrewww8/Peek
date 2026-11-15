@@ -22,6 +22,13 @@ export const bones = [
   [13, 21], [16, 22], [21, 17], [22, 18], [21, 19], [22, 20],
 ] as const;
 
+export function hasTrackedFingers(pose: Pose): boolean {
+  const { fingers } = pose;
+  return Array.isArray(fingers) && fingers.length === pose.frameCount * fingerCount * 3 && fingers.some((coordinate, index) =>
+    index % 3 === 0 && Number.isFinite(coordinate) && Number.isFinite(fingers[index + 1]) && Number.isFinite(fingers[index + 2]),
+  );
+}
+
 export function shotMotionWindow(pose: Pose): [first: number, last: number] {
   const sameFrame = (a: number, b: number) => {
     if ((pose.pelvisRise?.[a] ?? 0) !== (pose.pelvisRise?.[b] ?? 0)) return false;
@@ -57,12 +64,12 @@ export function comparisonPlayback(pose: Pose, first = 0): Pose {
     // After the final measured pose, keep it on screen while the comparison finishes.
     return [before, before, 0];
   });
-  const samples = (values: PoseSample[], width: number) => frames.flatMap(([before, after, fraction]) =>
+  const samples = (values: PoseSample[], width: number, maxGap = Infinity) => frames.flatMap(([before, after, fraction]) =>
     Array.from({ length: width }, (_, i) => {
       const start = values[before * width + i] ?? null;
       if (before === after) return start;
       const end = values[after * width + i] ?? null;
-      return start !== null && end !== null ? start + (end - start) * fraction : null;
+      return start !== null && end !== null && after - before <= maxGap ? start + (end - start) * fraction : null;
     }),
   );
   return {
@@ -70,7 +77,7 @@ export function comparisonPlayback(pose: Pose, first = 0): Pose {
     frameCount,
     releaseIndex: pose.releaseIndex - first,
     joints: samples(pose.joints, coordinatesPerFrame),
-    fingers: pose.fingers && samples(pose.fingers, fingerCount * 3),
+    fingers: pose.fingers && samples(pose.fingers, fingerCount * 3, pose.fps / 5),
     pelvisRise: pose.pelvisRise && samples(pose.pelvisRise, 1),
   };
 }

@@ -12,7 +12,7 @@ import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
-import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
+import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, hasTrackedFingers, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -73,27 +73,32 @@ export function ComparisonScreen(props: ComparisonProps) {
   return <CloudComparisonScreen {...props} shot={{ sessionId, shotNumber }} />;
 }
 
-function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backLabel, onBack, onChooseShot }: ComparisonProps & {
+function OnDeviceComparisonScreen({ shot, tag, video, fallbackPose, isGuest, playerName, backLabel, onBack, onChooseShot }: ComparisonProps & {
   video?: string;
   tag?: ShotAnalysisTag;
+  fallbackPose?: Pose;
 }) {
   const { sessionId } = shot;
   const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
   const result = state?.result;
+  const useFallback = !!fallbackPose && (!result || !hasTrackedFingers(result.pose));
+  const pose = useFallback ? fallbackPose : result?.pose;
   const automatic = shot.shotNumber === undefined;
+  const canStart = automatic || !!fallbackPose;
+  const updatingHands = state?.phase === 'queued' || state?.phase === 'detecting' || state?.phase === 'tracking';
   const refreshStarted = useRef<string>(undefined);
 
   useEffect(() => {
     if (!video) return;
-    if (automatic && !state) {
-      void startShotAnalysis(sessionId, video, undefined, isGuest).catch(() => undefined);
+    if (canStart && !state) {
+      void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
     } else if (state?.phase === 'complete' && state.result && needsShotAnalysisRefresh(state.result)) {
       const key = sessionId + ':' + (tag ? tag.shotNumber + ':' + tag.releaseMs : 'auto');
       if (refreshStarted.current === key) return;
       refreshStarted.current = key;
       void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
     }
-  }, [automatic, video, state, sessionId, tag, isGuest]);
+  }, [canStart, video, state, sessionId, tag, isGuest]);
 
   function analyze() {
     if (video) void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
@@ -105,10 +110,10 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
       <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
       <Page>
         <Title title="Your shot vs NBA" subtitle={`${automatic ? 'Catch-and-shoot three' : 'Shot ' + shot.shotNumber}${releaseTime}`} />
-        {result ? (
+        {pose ? (
           <>
-            {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} /> : null}
-            <PoseComparison key={result.version ?? 0} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} />
+            {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} trackingLabel="Tracking wrists and fingers…" /> : null}
+            <PoseComparison key={useFallback ? 'cloud' : result?.version ?? 0} playerPose={pose} playerLabel={playerName ?? 'Your shot'} updatingHands={updatingHands} />
           </>
         ) : (
           <Panel>
@@ -125,7 +130,8 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
   );
 }
 
-function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync }: ComparisonProps & { shot: TaggedComparisonShot }) {
+function CloudComparisonScreen(props: ComparisonProps & { shot: TaggedComparisonShot }) {
+  const { shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync } = props;
   const [loaded, setLoaded] = useState<{ userId: string; pose: Pose }>();
   const [notice, setNotice] = useState<string>();
   const [loading, setLoading] = useState('Opening your shot…');
@@ -137,7 +143,8 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
   const queued = !!state && state !== 'unavailable';
   const limitNotice = state === 'pending' ? guestLimit : undefined;
   const pose = loaded?.userId === userId ? loaded.pose : undefined;
-  const canAnalyze = !!localVideoUri(store.getSession(sessionId)?.videoPath ?? null);
+  const video = localVideoUri(store.getSession(sessionId)?.videoPath ?? null) ?? undefined;
+  const canAnalyze = !!video;
 
   useEffect(() => {
     if (!userId || !queued || limitNotice) return;
@@ -186,6 +193,11 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
     }
   }
 
+  if (pose && !hasTrackedFingers(pose) && video && hasOnDeviceAnalysis()) {
+    const tag = store.listShots(sessionId).find((item) => item.shotNumber === shotNumber);
+    if (tag) return <OnDeviceComparisonScreen {...props} tag={tag} video={video} fallbackPose={pose} />;
+  }
+
   return (
     <>
       <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
@@ -223,13 +235,14 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
   );
 }
 
-function PoseComparison({ playerPose: fullPose, playerLabel }: {
-  playerPose: Pose; playerLabel: string;
+function PoseComparison({ playerPose: fullPose, playerLabel, updatingHands = false }: {
+  playerPose: Pose; playerLabel: string; updatingHands?: boolean;
 }) {
   const [reference, setReference] = useState(preferred);
   const [firstFrame, lastMotionFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
   const playerPose = useMemo(() => comparisonPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
   const referencePose = useMemo(() => comparisonPlayback(reference.pose, firstFrame), [reference, firstFrame]);
+  const hasHandDetail = useMemo(() => hasTrackedFingers(playerPose), [playerPose]);
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(playerPose.frameCount > 1);
   const [angle, setAngle] = useState(0.55);
@@ -279,7 +292,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
   }
 
   async function openAR() {
-    if (opening.current) return;
+    if (opening.current || updatingHands) return;
     opening.current = true;
     setOpeningAR(true);
     setArNotice(undefined);
@@ -321,10 +334,11 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
           pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
       <View style={styles.stageActions}>
-        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR} style={styles.action} />
+        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR || updatingHands} style={styles.action} />
         <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
       </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
+      {!updatingHands && !hasHandDetail ? <Text style={ui.body}>Hand details are unavailable for this shot.</Text> : null}
       {firstFrame === lastMotionFrame ? (
         <Notice>Only a still pose was tracked near this tag. Tag the ball release in a clip with the shooter in view to see motion.</Notice>
       ) : null}
@@ -441,7 +455,7 @@ function PosePanel({ label, detail, pose, frame, angle, tint }: {
             })}
             {joints.map((point, index) => {
               if (!point) return null;
-              const radius = index >= jointCount ? 1.4 : index === 10 ? 6 : 2.5;
+              const radius = index >= jointCount ? 1.8 : index === 10 ? 6 : index === 13 || index === 16 ? 3 : 2.5;
               return <View key={index} style={{
                 position: 'absolute', left: point[0] - radius, top: point[1] - radius,
                 width: 2 * radius, height: 2 * radius, borderRadius: radius, backgroundColor: tint,

@@ -14,10 +14,11 @@ const phaseLabel = {
   failed: 'Analysis incomplete',
 };
 
-export function ShotAnalysisProgress({ sessionId, tag, style }: {
+export function ShotAnalysisProgress({ sessionId, tag, style, trackingLabel }: {
   sessionId: string;
   tag?: { shotNumber: number; releaseMs: number };
   style?: StyleProp<ViewStyle>;
+  trackingLabel?: string;
 }) {
   const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
   const [now, setNow] = useState(Date.now);
@@ -43,7 +44,7 @@ export function ShotAnalysisProgress({ sessionId, tag, style }: {
   return (
     <View style={[styles.progress, style]}>
       <View style={styles.statusRow}>
-        <Text style={styles.status} accessibilityLiveRegion="polite">{phaseLabel[state.phase]}</Text>
+        <Text style={styles.status} accessibilityLiveRegion="polite">{state.phase === 'tracking' && trackingLabel ? trackingLabel : phaseLabel[state.phase]}</Text>
         <Text style={styles.detail}>
           {state.phase === 'failed' ? timing : timing ? `${percentage}% · ${timing}` : `${percentage}%`}
         </Text>
