@@ -2,7 +2,7 @@
   "expo": {
     "name": "Peek",
     "slug": "perspective",
-    "version": "0.2.6",
+    "version": "0.2.7",
     "icon": "./assets/peek/logo.png",
     "scheme": "perspective",
     "platforms": ["ios"],
@@ -11,7 +11,7 @@
     "ios": {
       "bundleIdentifier": "com.andrewww8.perspective",
       "supportsTablet": false,
-      "buildNumber": "8"
+      "buildNumber": "9"
     },
     "plugins": [
       ["expo-camera", {

@@ -494,6 +494,20 @@ describe('catalog asset warnings', () => {
       await app.close();
     }
   });
+
+  test('on-demand catalog validation leaves startup independent of catalog IO', async () => {
+    const path = join(dir, 'catalog', 'missing-on-start.json');
+    const logs = captureLogs();
+    const app = await buildApp({ catalogPath: path, mediaDir, logger: logs.logger, validateCatalogOnStartup: false });
+    try {
+      assert.equal((await app.inject({ url: '/health' })).statusCode, 200);
+      assert.equal(logs.lines.length, 0);
+      assert.equal((await app.inject({ url: '/v1/demos' })).statusCode, 500);
+      assert.ok(logs.lines.some((line) => line.msg === 'catalog unreadable'));
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe('closeWithin', () => {

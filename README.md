@@ -18,7 +18,7 @@ For a rehearsal that relaunches offline with the JavaScript bundle embedded, ins
 
 Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
 
-Open **NBA comparison** from the menu to play two reference shots side by side. For your own footage, mark the release in **Session details**, wait for **Shot analysis**, then tap **Compare with an NBA player** on that shot. Both views use the same release position, camera angle, and playhead. Tap **Change NBA player** to pick a reference. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
+Open **NBA comparison** from the menu and choose a tagged shot. Sign in and tap **Analyze this shot** if the recording still needs analysis. You can also open a completed **Shot analysis** from **Session details**. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session. **3D example → Compare two NBA examples** works without sign-in.
 
 ## Connect Vercel and Supabase
 

@@ -106,7 +106,7 @@ export class PracticeStore {
     );
   }
 
-  prepareCoachSession(id: string, userId: string) {
+  prepareAnalysis(id: string, userId: string, shotNumber?: number) {
     this.db.execSync('BEGIN IMMEDIATE;');
     try {
       const session = this.db.getFirstSync<{ owner: string | null; video: string | null }>(
@@ -118,8 +118,12 @@ export class PracticeStore {
       if (!session.owner) {
         if (!session.video) throw new Error('Choose a session with a video to attach.');
         this.db.runSync('UPDATE sessions SET cloud_user_id = ? WHERE id = ?', userId, id);
+      }
+      if (session.video) {
         this.db.runSync(
-          "UPDATE shots SET cloud_state = 'pending', cloud_outcome = outcome WHERE session_id = ? AND cloud_state IS NULL", id,
+          `UPDATE shots SET cloud_state = 'pending', cloud_outcome = outcome
+           WHERE session_id = ? AND cloud_state IS NULL AND (? IS NULL OR shot_number = ?)`,
+          id, shotNumber ?? null, shotNumber ?? null,
         );
       }
       this.db.execSync('COMMIT;');

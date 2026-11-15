@@ -4,16 +4,20 @@ import { randomUUID } from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AppState, PanResponder, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { accountFetch, apiUrl } from './api';
 import { accessToken } from './auth';
+import type { PracticeStore } from './database';
+import { localVideoUri } from './device-storage';
 import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
+import { clipTime, sessionTime } from './practice';
 import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Sheet, Title, ui } from './ui';
 
 type Reference = { player: string; shotsAveraged: number; pose: Pose };
-type ShotSource = { sessionId: string; shotNumber: number; userId: string | null };
+export type ComparisonShot = { sessionId: string; shotNumber: number };
+type Navigation = { backLabel: string; onBack: () => void };
 
 const references: Reference[] = require('../assets/peek-nba-poses.json');
 const nameAtlas: NameAtlas = require('../assets/peek-ar-name-atlas.json');
@@ -21,14 +25,15 @@ const nameAtlasImage: number = require('../assets/peek-ar-name-atlas.png');
 const preferred = references.find(({ player }) => player === 'Stephen Curry') ?? references[0]!;
 const example = references.find(({ player }) => player === 'Damian Lillard') ?? references[1]!;
 
-async function loadShotPose(source: ShotSource, signal: AbortSignal): Promise<Pose> {
-  const { userId, sessionId, shotNumber } = source;
-  if (!userId) throw new Error('Sign in to open your synced shot.');
+async function loadShotPose(shot: ComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
+  const { sessionId, shotNumber } = shot;
   const request = accountFetch(apiUrl, (renew) => accessToken(userId, renew));
   const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose', {
     signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]),
   });
   const body = await response.json() as { pose?: Pose; shotType?: string; message?: string };
+  if (response.status === 404 && syncing) return 'Syncing your shot…';
+  if (response.status === 409) return 'Waiting for shot analysis…';
   if (!response.ok) throw new Error(body.message || 'Could not load the 3D pose.');
   const pose = body.pose;
   if (body.shotType !== 'three_point' || !pose || pose.fps !== preferred.pose.fps ||
@@ -39,53 +44,143 @@ async function loadShotPose(source: ShotSource, signal: AbortSignal): Promise<Po
   return pose;
 }
 
-export function ComparisonScreen({ source, playerName, backLabel, onBack, onBrowseClips }: {
-  source?: ShotSource;
-  playerName?: string;
-  backLabel: string;
-  onBack: () => void;
+export function ComparisonShotPicker({ store, backLabel, onBack, onSelect, onBrowseClips }: Navigation & {
+  store: PracticeStore;
+  onSelect: (shot: ComparisonShot) => void;
   onBrowseClips: () => void;
 }) {
-  const [pose, setPose] = useState<Pose>();
-  const [notice, setNotice] = useState<string>();
-  const [attempt, setAttempt] = useState(0);
-  const sessionId = source?.sessionId;
-  const shotNumber = source?.shotNumber;
-  const userId = source?.userId ?? null;
-
-  useEffect(() => {
-    if (!sessionId || !shotNumber) return;
-    const controller = new AbortController();
-    setNotice(undefined);
-    setPose(undefined);
-    void loadShotPose({ sessionId, shotNumber, userId }, controller.signal).then((result) => {
-      if (!controller.signal.aborted) setPose(result);
-    }, (error) => {
-      if (!controller.signal.aborted) setNotice(message(error, 'The 3D pose could not be loaded.'));
-    });
-    return () => controller.abort();
-  }, [sessionId, shotNumber, userId, attempt]);
-
+  const sessions = store.listSessions().flatMap((session) => {
+    const shots = store.listShots(session.id);
+    return shots.length ? [{ session, shots }] : [];
+  });
   return (
     <>
-      <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
+      <ScreenHeader backLabel={backLabel} detail="NBA COMPARISON" onBack={onBack} />
       <Page>
-        <Title title="Compare shot" subtitle={source ? 'Shot ' + String(shotNumber) + ' · Catch-and-shoot three' : 'NBA reference shots · Three-pointers'} />
-        {source && !pose ? (
-          notice ? <Panel><Notice>{notice}</Notice><Button label="Try again" kind="secondary" onPress={() => setAttempt((old) => old + 1)} /></Panel>
-            : <Panel><Loading text="Opening your shot…" /></Panel>
-        ) : <PoseComparison shotPose={pose} playerName={playerName} onBrowseClips={onBrowseClips} />}
+        <Title title="Choose your shot" subtitle="Select a tagged shot to compare with an NBA player." />
+        {sessions.map(({ session, shots }) => (
+          <Panel key={session.id}>
+            <Text accessibilityRole="header" style={ui.title}>{sessionTime(session.createdAt)}</Text>
+            {shots.map(({ shotNumber, releaseMs }) => (
+              <Button key={shotNumber} label={`Shot ${shotNumber} · ${clipTime(releaseMs, true)}`} kind="secondary" arrow
+                onPress={() => onSelect({ sessionId: session.id, shotNumber })} />
+            ))}
+          </Panel>
+        ))}
+        {!sessions.length ? (
+          <Panel><Text style={ui.body}>Tag a release in a saved clip to compare your shot.</Text></Panel>
+        ) : null}
+        <Button label="Open Saved Clips" kind="secondary" arrow onPress={onBrowseClips} />
       </Page>
     </>
   );
 }
 
-function PoseComparison({ shotPose, playerName, onBrowseClips }: {
-  shotPose?: Pose; playerName?: string; onBrowseClips: () => void;
+export function ComparisonScreen({ shot, store, userId, playerName, backLabel, onBack, onChooseShot, onSignIn, onSync }: Navigation & {
+  shot: ComparisonShot;
+  store: PracticeStore;
+  userId: string | null;
+  playerName?: string;
+  onChooseShot: () => void;
+  onSignIn: () => void;
+  onSync: () => void;
+}) {
+  const [pose, setPose] = useState<Pose>();
+  const [notice, setNotice] = useState<string>();
+  const [loading, setLoading] = useState('Opening your shot…');
+  const [attempt, setAttempt] = useState(0);
+  const { sessionId, shotNumber } = shot;
+  const state = userId && store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber)?.state;
+  const queued = !!state && state !== 'unavailable';
+  const canAnalyze = !!localVideoUri(store.getSession(sessionId)?.videoPath ?? null);
+
+  useEffect(() => {
+    if (!userId || !queued) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setNotice(undefined);
+    setPose(undefined);
+    setLoading('Opening your shot…');
+    const load = async () => {
+      if (signal.aborted) return;
+      if (AppState.currentState === 'background') {
+        timer = setTimeout(load, 8_000);
+        return;
+      }
+      try {
+        const state = store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber)?.state;
+        if (state === 'unavailable') throw new Error('This recording could not be synced for analysis.');
+        const result = await loadShotPose({ sessionId, shotNumber }, userId, state === 'pending', signal);
+        if (signal.aborted) return;
+        if (typeof result === 'string') {
+          setLoading(result);
+          timer = setTimeout(load, 8_000);
+        } else setPose(result);
+      } catch (error) {
+        if (!signal.aborted) setNotice(message(error, 'The 3D pose could not be loaded.'));
+      }
+    };
+    void load();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [store, sessionId, shotNumber, userId, queued, attempt]);
+
+  function analyze() {
+    if (!userId) return;
+    setNotice(undefined);
+    try {
+      store.prepareAnalysis(sessionId, userId, shotNumber);
+      onSync();
+      setAttempt((value) => value + 1);
+    } catch (error) {
+      setNotice(message(error, 'The shot could not be queued for analysis.'));
+    }
+  }
+
+  return (
+    <>
+      <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
+      <Page>
+        <Title title="Compare shot" subtitle={`Shot ${shotNumber} · Catch-and-shoot three`} />
+        {!userId ? (
+          <Panel><Text style={ui.body}>Sign in to analyze and compare this shot.</Text><Button label="Sign in" onPress={onSignIn} /></Panel>
+        ) : pose ? (
+          <PoseComparison playerPose={pose} playerLabel={playerName ?? 'Your shot'} />
+        ) : queued ? (
+          <Panel>{notice ? <><Notice>{notice}</Notice><Button label="Try again" kind="secondary" onPress={() => setAttempt((value) => value + 1)} /></>
+            : <Loading text={loading} />}</Panel>
+        ) : (
+          <Panel>
+            {notice ? <Notice>{notice}</Notice> : null}
+            {canAnalyze && state !== 'unavailable' ? (
+              <><Text style={ui.body}>Send this recording for shot analysis to create your 3D comparison.</Text>
+                <Button label="Analyze this shot" onPress={analyze} /></>
+            ) : <Notice>Choose a shot with its original recording or a completed analysis.</Notice>}
+          </Panel>
+        )}
+        <Button label="Choose another shot" kind="secondary" arrow onPress={onChooseShot} />
+      </Page>
+    </>
+  );
+}
+
+export function ComparisonExample({ backLabel, onBack, onChooseShot }: Navigation & { onChooseShot: () => void }) {
+  return (
+    <>
+      <ScreenHeader backLabel={backLabel} detail="3D EXAMPLE" onBack={onBack} />
+      <Page>
+        <Title title="NBA comparison example" subtitle="Two NBA reference shots" />
+        <PoseComparison playerPose={example.pose} playerLabel={example.player} sample={example} />
+        <Button label="Choose your shot" kind="secondary" arrow onPress={onChooseShot} />
+      </Page>
+    </>
+  );
+}
+
+function PoseComparison({ playerPose, playerLabel, sample }: {
+  playerPose: Pose; playerLabel: string; sample?: Reference;
 }) {
   const [reference, setReference] = useState(preferred);
-  const playerPose = shotPose ?? example.pose;
-  const playerLabel = shotPose ? playerName ?? 'Your shot' : example.player;
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [angle, setAngle] = useState(0.55);
@@ -169,12 +264,12 @@ function PoseComparison({ shotPose, playerName, onBrowseClips }: {
   }
 
   const frameDeltaMs = Math.round((frame - playerPose.releaseIndex) * 1000 / playerPose.fps);
-  const chosenReference = references.filter(({ player }) => !!shotPose || player !== example.player);
+  const chosenReference = references.filter(({ player }) => player !== sample?.player);
 
   return (
     <>
       <View style={styles.stageRow} {...rotate.panHandlers}>
-        <PosePanel label={playerLabel} detail={shotPose ? handLabel(playerPose) : averageLabel(example)}
+        <PosePanel label={playerLabel} detail={sample ? averageLabel(sample) : handLabel(playerPose)}
           pose={playerPose} frame={frame} angle={angle} tint={colors.white} />
         <PosePanel label={reference.player} detail={averageLabel(reference)}
           pose={reference.pose} frame={frame} angle={angle} tint="#ffca0a" />
@@ -201,7 +296,6 @@ function PoseComparison({ shotPose, playerName, onBrowseClips }: {
           <Text style={ui.body}>Drag to rotate</Text>
         </View>
       </Panel>
-      <Button label={shotPose ? 'Choose another saved shot' : 'Compare a saved shot'} kind="secondary" arrow onPress={onBrowseClips} />
       <Panel>
         <Text accessibilityRole="header" style={ui.title}>Shooting form</Text>
         <View style={styles.metricsRow}>

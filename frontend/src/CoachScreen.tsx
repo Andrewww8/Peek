@@ -151,7 +151,7 @@ export function CoachScreen({
     }
     if (!owner) return;
     try {
-      store.prepareCoachSession(session.id, owner);
+      store.prepareAnalysis(session.id, owner);
       setRevision((n) => n + 1);
       onSync();
     } catch (error) {

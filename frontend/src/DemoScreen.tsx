@@ -122,7 +122,7 @@ export function DemoScreen({ store, backLabel, onBack, onCompare }: {
           <Text style={ui.heading} accessibilityRole="header">3D example</Text>
           <Text style={ui.body}>{DRILL_NAME}</Text>
         </View>
-        <Button label="Compare NBA shooting form" arrow onPress={onCompare} />
+        <Button label="Compare two NBA examples" arrow onPress={onCompare} />
         <Placeholder>
           {state === 'downloading' ? (
             <View style={styles.progressOuter}>

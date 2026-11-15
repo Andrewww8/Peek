@@ -5,13 +5,17 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { buildAppFromEnv } from '../src/env.js';
 
-// Built once per instance and reused across invocations.
-const ready = buildAppFromEnv(process.env, true).then(async (app) => {
-  await app.ready();
-  return app;
-});
+// Concurrent functions share startup. A failed cold start can be retried.
+let ready: ReturnType<typeof buildAppFromEnv> | undefined;
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  ready ??= buildAppFromEnv(process.env, true).then(async (app) => {
+    await app.ready();
+    return app;
+  }).catch((error) => {
+    ready = undefined;
+    throw error;
+  });
   const app = await ready;
   app.server.emit('request', req, res);
 }

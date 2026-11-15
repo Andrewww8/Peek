@@ -33,16 +33,17 @@ export function depsFromEnv(env: NodeJS.ProcessEnv) {
 export async function buildAppFromEnv(env: NodeJS.ProcessEnv, logger: FastifyServerOptions['logger'] = true): Promise<FastifyInstance> {
   const catalogPath = env.CATALOG_PATH ?? join(SERVER_ROOT, 'catalog', 'demos.json');
   const mediaDir = env.MEDIA_DIR ?? join(SERVER_ROOT, 'media');
+  const options = { catalogPath, mediaDir, logger, validateCatalogOnStartup: env.VERCEL !== '1' };
   if (isProduction(env)) {
     try {
-      return await buildApp({ catalogPath, mediaDir, logger, deps: createProductionDeps(env) });
+      return await buildApp({ ...options, deps: createProductionDeps(env) });
     } catch (err) {
       // Keep /health and /v1/demos up and make the misconfiguration visible there.
       const depsError = `clip storage is not configured: ${(err as Error).message}`;
-      const app = await buildApp({ catalogPath, mediaDir, logger, depsError });
+      const app = await buildApp({ ...options, depsError });
       app.log.error(depsError);
       return app;
     }
   }
-  return buildApp({ catalogPath, mediaDir, logger, deps: localDepsFromEnv(env) });
+  return buildApp({ ...options, deps: localDepsFromEnv(env) });
 }

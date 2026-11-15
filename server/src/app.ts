@@ -13,6 +13,8 @@ export interface AppOptions {
   mediaDir: string;
   /** `true` for the default logger; tests pass an options object with their own stream. */
   logger?: FastifyServerOptions['logger'];
+  /** The Vercel handler verifies catalog assets when serving the catalog. */
+  validateCatalogOnStartup?: boolean;
   /** Blob store, clip repo, auth and trimmer for the authenticated clip API. */
   deps?: Deps;
   /**
@@ -46,13 +48,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     return entries;
   }
 
-  app.addHook('onReady', async () => {
-    try {
-      await readCatalog();
-    } catch (err) {
-      app.log.error({ err }, 'CATALOG INVALID: /v1/demos answers 500 until demos.json is fixed');
-    }
-  });
+  if (opts.validateCatalogOnStartup !== false) {
+    app.addHook('onReady', async () => {
+      try {
+        await readCatalog();
+      } catch (err) {
+        app.log.error({ err }, 'CATALOG INVALID: /v1/demos answers 500 until demos.json is fixed');
+      }
+    });
+  }
 
   // 5xx errors (e.g. EACCES on a media file) carry the laptop's absolute file path. Log them, never send them.
   app.setErrorHandler((err, req, reply) => {

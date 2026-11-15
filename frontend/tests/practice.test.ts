@@ -128,15 +128,22 @@ test('attaching a guest clip queues its existing shots for only the active accou
   writeFileSync(path(pending.sourceUri), Buffer.alloc(pending.sizeBytes));
   const clip = saveRecording(pending, files, store);
   store.addShot(clip.id, 2300, 'made');
+  store.addShot(clip.id, 4100, 'missed');
   const account = randomUUID();
   const otherAccount = randomUUID();
 
   assert.equal(store.hasCloudWork(account), false);
-  store.prepareCoachSession(clip.id, account);
-  store.prepareCoachSession(clip.id, account);
+  store.prepareAnalysis(clip.id, account, 2);
+  store.prepareAnalysis(clip.id, account, 2);
+  assert.deepEqual(store.cloudShots(account, 'pending', clip.id), [
+    { sessionId: clip.id, shotNumber: 2, releaseMs: 4100, outcome: 'missed' },
+  ]);
+  store.prepareAnalysis(clip.id, account);
+  store.prepareAnalysis(clip.id, account);
   assert.deepEqual(store.cloudShots(account, 'pending', clip.id), [
     { sessionId: clip.id, shotNumber: 1, releaseMs: 2300, outcome: 'made' },
+    { sessionId: clip.id, shotNumber: 2, releaseMs: 4100, outcome: 'missed' },
   ]);
-  assert.throws(() => store.prepareCoachSession(clip.id, otherAccount), /different account/);
+  assert.throws(() => store.prepareAnalysis(clip.id, otherAccount), /different account/);
   assert.equal(store.hasCloudWork(otherAccount), false);
 });
