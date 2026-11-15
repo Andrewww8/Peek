@@ -1179,6 +1179,18 @@ def refine_limb_depth(p, ext):
     p[ok] = q; ext[ok] = e; return p, ext
 
 
+def level_camera(p, ext):
+    """Take out the camera's up/down tilt. A camera aimed slightly down makes everything lean towards it (aimed up: away), and the picture cannot
+    tell that apart from a real lean. The reference is the trunk at the release: around samples 27-33 the hips-to-chest line is taken to be upright
+    front-to-back, and the whole clip is tipped by that one angle (at most 20 degrees). Sideways lean and all motion are untouched; a shooter who really
+    fades at the release is drawn upright there. Input and output in the camera frame (x right, y down, z away)."""
+    v = p[27:34, 8] - p[27:34, 0]; v = v[~np.isnan(v).any(1)]
+    if len(v) == 0: return p, ext
+    v = np.median(v, 0); a = float(np.clip(np.arctan(-v[2] / min(v[1], -1e-6)), -np.radians(20), np.radians(20))); c, s_ = np.cos(a), np.sin(a)
+    Rx = np.array([[1, 0, 0], [0, c, -s_], [0, s_, c]])
+    return p @ Rx.T, ext @ Rx.T
+
+
 def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
     """Animated .glb: your skeleton (grey) and the player's average skeleton (orange) overlaid, release-aligned. Returns False if there is no average for that player."""
     avg = ref.get("averages", {}).get(player, {}).get(stype)
@@ -1193,7 +1205,7 @@ def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
                     a = int(np.floor(q)); b = min(a + 1, len(x) - 1); out[j] = x[a] * (1 - (q - a)) + x[b] * (q - a)
             return out
         p, ext, rise = shift(p), shift(ext), shift(rise)
-    rise = np.nan_to_num(rise); p, ext = refine_limb_depth(p, ext)
+    rise = np.nan_to_num(rise); p, ext = level_camera(*refine_limb_depth(p, ext))
     Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
     h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
     nan = lambda x: np.array([[[np.nan] * 3] * len(x[0] if x[0] is not None else x[-1]) if f is None else f for f in x], float)
