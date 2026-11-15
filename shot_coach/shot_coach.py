@@ -989,9 +989,11 @@ import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 const D=__DATA__,NT=46,REL=30,H=1.8,$=id=>document.getElementById(id);
+// where the bones of the model join, in the model's own units: hip and shoulder sockets, top of the sacrum, neck, sole of the foot
+const TR={hipX:0.085,shX:0.17,shY:0,shZ:-0.04,sacrum:0.07,neck:0.147,headFwd:0,sole:0.075};
 const canvas=$('cv'),scene=new THREE.Scene();scene.background=new THREE.Color(0x1a1a1a);
 scene.add(new THREE.AmbientLight(0xffffff,0.6));const dl=new THREE.DirectionalLight(0xffffff,0.8);dl.position.set(5,10,5);scene.add(dl);
-const camera=new THREE.PerspectiveCamera(75,1,0.1,1000);camera.up.set(0,0,1);camera.position.set(1.5,2.1,1.5);camera.lookAt(0,0,1);
+const camera=new THREE.PerspectiveCamera(75,1,0.1,1000);camera.up.set(0,0,1);camera.position.set(1.2,1.9,1.35);camera.lookAt(0,0,1);
 const controls=new OrbitControls(camera,canvas);controls.enableDamping=true;controls.dampingFactor=0.4;controls.rotateSpeed=1;controls.zoomSpeed=1.5;controls.minDistance=1;controls.maxDistance=8;controls.enablePan=false;controls.target.set(0,0,1);
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});renderer.setPixelRatio(devicePixelRatio);
 function size(){const w=canvas.clientWidth,h=canvas.clientHeight;if(w&&h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix()}}size();addEventListener('resize',size);
@@ -1002,26 +1004,36 @@ const draco=new DRACOLoader();draco.setDecoderPath('https://www.gstatic.com/drac
 const SEG=['pelvis','torso','head','l_uarm','r_uarm','l_larm','r_larm','l_hand','r_hand','l_thigh','r_thigh','l_shank','r_shank','l_foot','r_foot'];
 function build(gltf,S,mat){const src={};for(const c of gltf.scene.children)if(c.name)src[c.name]=c;S.mesh={};S.group=new THREE.Group();
  for(const n of SEG){if(!src[n])continue;const m=src[n].clone();m.traverse(c=>{if(c.isMesh)c.material=mat});m.matrixAutoUpdate=false;S.mesh[n]=m;S.group.add(m)}scene.add(S.group);
- S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);
- let lo=9;for(let i=S.v0;i<=Math.min(S.v0+12,S.v1);i++)for(const j of[3,6])lo=Math.min(lo,S.rise[i]-S.pose[i][j][1]);S.floor=lo-0.075/H;
- let leg=0,n=0;for(let i=S.v0;i<=S.v1;i++){const p=S.pose[i],d=(a,b)=>Math.hypot(p[a][0]-p[b][0],p[a][1]-p[b][1],p[a][2]-p[b][2]);leg+=d(1,2)+d(2,3)+d(4,5)+d(5,6);n+=2}
- S.g=leg/n*H/0.927}                                        // overall bone size from the leg length
-const V=()=>new THREE.Vector3(),X=V(),Y=V(),Z=V(),T=V(),M=new THREE.Matrix4(),UP=new THREE.Vector3(0,0,1);
-function place(mesh,origin,z,hint,s,fwd){if(!mesh)return;Z.copy(z).normalize();Y.crossVectors(Z,hint);if(Y.lengthSq()<1e-6)Y.copy(fwd);Y.normalize();X.crossVectors(Y,Z);
- M.makeBasis(T.copy(X).multiplyScalar(s),Y.clone().multiplyScalar(s),Z.clone().multiplyScalar(s));M.setPosition(origin);mesh.matrix.copy(M);mesh.matrixWorldNeedsUpdate=true}
-function pose(S,tt){const c=Math.max(S.v0,Math.min(S.v1,tt)),a=Math.floor(c),b=Math.min(a+1,S.v1),f=c-a,ry=S.rise[a]*(1-f)+S.rise[b]*f;
- const w=(A,B)=>A.map((p,i)=>new THREE.Vector3(-(p[0]*(1-f)+B[i][0]*f)*H,-(p[2]*(1-f)+B[i][2]*f)*H,(ry-(p[1]*(1-f)+B[i][1]*f)-S.floor)*H));
- const J=w(S.pose[a],S.pose[b]),E=S.ext[a]&&S.ext[b]?w(S.ext[a],S.ext[b]):null,g=S.g,m=S.mesh,sub=(p,q)=>V().subVectors(p,q),len=(p,q)=>p.distanceTo(q);
- const hipR=sub(J[1],J[4]).normalize(),shR=sub(J[14],J[11]).normalize(),up=sub(J[8],J[0]).normalize(),fwd=V().crossVectors(up,hipR).normalize(),cl=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
- const pel=J[0].clone().addScaledVector(up,0.04*g);place(m.pelvis,pel,up,hipR,g,fwd);
- place(m.torso,J[8],up,shR,cl((len(J[8],pel)-0.11*g)/0.361,0.75*g,1.35*g),fwd);
- const hz=sub(J[10],J[8]).normalize();place(m.head,J[10].clone().addScaledVector(hz,-0.102*g),hz,shR,g,fwd);
- for(const[s,sh,el,wr,tip]of[['r',14,15,16,1],['l',11,12,13,0]]){place(m[s+'_uarm'],J[sh],sub(J[sh],J[el]),shR,len(J[sh],J[el])/0.313,fwd);place(m[s+'_larm'],J[el],sub(J[el],J[wr]),shR,len(J[el],J[wr])/0.254,fwd);
-  if(E)place(m[s+'_hand'],J[wr],sub(J[wr],E[tip]),shR,cl(len(J[wr],E[tip])/0.158,0.7*g,1.3*g),fwd);else place(m[s+'_hand'],J[wr],sub(J[el],J[wr]),shR,g,fwd)}
- for(const[s,hp,kn,an,toe,heel]of[['r',1,2,3,7,11],['l',4,5,6,6,10]]){place(m[s+'_thigh'],J[hp],sub(J[hp],J[kn]),hipR,len(J[hp],J[kn])/0.438,fwd);place(m[s+'_shank'],J[kn],sub(J[kn],J[an]),hipR,len(J[kn],J[an])/0.488,fwd);
-  const f=m[s+'_foot'];if(f){Y.copy(E?sub(E[toe],E[heel]):fwd).normalize();X.crossVectors(Y,UP);if(X.lengthSq()<1e-6)X.copy(hipR);X.normalize();Z.crossVectors(X,Y);
-   M.makeBasis(X.clone().multiplyScalar(g),Y.clone().multiplyScalar(g),Z.clone().multiplyScalar(g));M.setPosition(J[an]);f.matrix.copy(M);f.matrixWorldNeedsUpdate=true}}
- S.group.visible=true}
+ S.v0=S.pose.findIndex(p=>p);S.v1=NT-1-[...S.pose].reverse().findIndex(p=>p);solve(S)}
+// Rigid skeleton: every bone keeps one length and one thickness for the whole clip, joints are chained from the pelvis outwards,
+// and a bone can only swing, never spin about its own length. Hands follow the forearm and feet stay flat, pointing where the shin faces.
+function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
+ for(let i=S.v0;i<=S.v1;i++)all[i]=S.pose[i].map(q=>V(-q[0]*H,-q[2]*H,(S.rise[i]-q[1])*H));
+ const med=f=>{const a=[];for(let i=S.v0;i<=S.v1;i++)a.push(f(all[i]));a.sort((x,y)=>x-y);return a[a.length>>1]},d=(a,b)=>med(J=>J[a].distanceTo(J[b]));
+ const Lth=(d(1,2)+d(4,5))/2,Lsh=(d(2,3)+d(5,6))/2,Lua=(d(14,15)+d(11,12))/2,Lfa=(d(15,16)+d(12,13))/2,Ltr=d(0,8);
+ const g=(Lth+Lsh)/0.927,st=Math.max(0.92*g,Math.min(1.2*g,(Ltr-TR.sacrum*g)/0.361)),k=(a,b)=>Math.max(0.85,Math.min(1.2,a/b/g))*g;
+ S.scale={pelvis:V(g,g,g),torso:V(st,st,st),head:V(g,g,g),uarm:V(g,g,k(Lua,0.313)),larm:V(g,g,k(Lfa,0.254)),hand:V(g,g,g),thigh:V(g,g,Lth/0.438),shank:V(g,g,Lsh/0.488),foot:V(g,g,g)};
+ const LEN={uarm:0.313*S.scale.uarm.z,larm:0.254*S.scale.larm.z,thigh:Lth,shank:Lsh},M4=new THREE.Matrix4();
+ const quat=(x,y,z)=>new THREE.Quaternion().setFromRotationMatrix(M4.makeBasis(x,y,z)),perp=(h,z,alt)=>{const x=h.clone().addScaledVector(z,-h.dot(z));if(x.lengthSq()<1e-4)x.copy(alt).addScaledVector(z,-alt.dot(z));return x.normalize()};
+ const bone=(down,hint,alt)=>{const z=down.clone().negate(),x=perp(hint,z,alt),y=V().crossVectors(z,x);return{x,y,z,q:quat(x,y,z)}};
+ const prev={};S.fr=[];
+ for(let i=S.v0;i<=S.v1;i++){const J=all[i],F={},dir=(a,b)=>V().subVectors(J[b],J[a]).normalize();
+  const up=dir(0,8),px=perp(V().subVectors(J[1],J[4]),up,V(1,0,0)),py=V().crossVectors(up,px),O=J[0].clone();F.pelvis={p:O,q:quat(px,py,up)};
+  const tz=dir(7,8).add(up).normalize(),tx=perp(V().subVectors(J[14],J[11]),tz,px),ty=V().crossVectors(tz,tx),T0=O.clone().addScaledVector(tz,TR.sacrum*g+0.361*st),tq=quat(tx,ty,tz);
+  F.torso={p:T0,q:tq};F.head={p:T0.clone().addScaledVector(tz,TR.neck*g).addScaledVector(ty,TR.headFwd*g),q:tq};
+  for(const[s,sg,sh,el,wr]of[['r',1,14,15,16],['l',-1,11,12,13]]){const P=T0.clone().addScaledVector(tx,sg*TR.shX*st).addScaledVector(tz,TR.shZ*st).addScaledVector(ty,TR.shY*st);
+   const u=bone(dir(sh,el),prev[s+'u']||tx,ty);prev[s+'u']=u.x;F[s+'_uarm']={p:P,q:u.q};const E=P.clone().addScaledVector(u.z,-LEN.uarm);
+   const l=bone(dir(el,wr),prev[s+'l']||u.x,u.y);prev[s+'l']=l.x;F[s+'_larm']={p:E,q:l.q};F[s+'_hand']={p:E.clone().addScaledVector(l.z,-LEN.larm),q:l.q}}
+  for(const[s,sg,hp,kn,an]of[['r',1,1,2,3],['l',-1,4,5,6]]){const P=O.clone().addScaledVector(px,sg*TR.hipX*g);
+   const t=bone(dir(hp,kn),px,py);F[s+'_thigh']={p:P,q:t.q};const K=P.clone().addScaledVector(t.z,-LEN.thigh);
+   const c=bone(dir(kn,an),t.x,t.y);F[s+'_shank']={p:K,q:c.q};const A=K.clone().addScaledVector(c.z,-LEN.shank);
+   let fy=V(c.y.x,c.y.y,0);if(fy.lengthSq()<1e-4)fy=V(py.x,py.y,0);fy.normalize();const fz=V(0,0,1);F[s+'_foot']={p:A,q:quat(V().crossVectors(fy,fz),fy,fz)}}
+  S.fr[i]=F}
+ let lo=1e9;for(let i=S.v0;i<=Math.min(S.v0+12,S.v1);i++)lo=Math.min(lo,S.fr[i].r_foot.p.z,S.fr[i].l_foot.p.z);lo-=TR.sole*g;
+ for(let i=S.v0;i<=S.v1;i++)for(const n in S.fr[i])S.fr[i][n].p.z-=lo}
+const P_=new THREE.Vector3(),Q_=new THREE.Quaternion();
+function pose(S,tt){const c=Math.max(S.v0,Math.min(S.v1,tt)),a=Math.floor(c),b=Math.min(a+1,S.v1),f=c-a,A=S.fr[a],B=S.fr[b];
+ for(const n in S.mesh){const m=S.mesh[n];P_.lerpVectors(A[n].p,B[n].p,f);Q_.slerpQuaternions(A[n].q,B[n].q,f);m.matrix.compose(P_,Q_,S.scale[n.replace(/^[lr]_/,'')]);m.matrixWorldNeedsUpdate=true}}
 let t=0,playing=true,last=0,ready=false;
 loader.parse(buf.buffer,'',gltf=>{build(gltf,D.you,new THREE.MeshLambertMaterial({color:0xcccccc}));build(gltf,D.player,new THREE.MeshLambertMaterial({color:0xffaa00,transparent:true,opacity:0.8}));draco.dispose();ready=true;$('msg').remove()},
  e=>{$('msg').textContent='Could not load the skeleton model.'});
@@ -1037,7 +1049,7 @@ addEventListener('keydown',e=>{if(e.target.tagName==='SELECT')return;if(e.code==
 function tick(ts){const dt=Math.min((ts-last)/1000,0.1);last=ts;if(playing&&ready){t+=dt*30*parseFloat($('speed').value);if(t>NT-1)t=0}
  if(ready){pose(D.you,t);pose(D.player,t)}knob.style.left=(t/(NT-1)*100)+'%';const s=(t-REL)/30;$('time').textContent=(s>=0?'+':'−')+Math.abs(s).toFixed(2)+' s';
  controls.update();renderer.render(scene,camera);requestAnimationFrame(tick)}
-window.__viewer={get t(){return t},set t(v){t=v},setPlay,camera,controls};requestAnimationFrame(ts=>{last=ts;tick(ts)});
+window.__viewer={get t(){return t},set t(v){t=v},setPlay,camera,controls,TR,D,solve};requestAnimationFrame(ts=>{last=ts;tick(ts)});
 </script></body></html>
 '''
 
