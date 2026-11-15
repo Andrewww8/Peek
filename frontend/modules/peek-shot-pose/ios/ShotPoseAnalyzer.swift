@@ -214,12 +214,12 @@ enum ShotPoseAnalyzer {
         let length = definition.1 * bodyHeight
         let planeLength = simd_length(offset)
         guard planeLength <= length * 1.5 else { return coordinates(nil) }
-        // As in Shot Coach, the camera gives the planar offset. Estimate the remaining
-        // depth from the expected segment length and the direction of the forearm.
-        let forearmDepth = wrist.z - (joints[wristIndex - 1].position?.z ?? wrist.z)
+        // Use less inferred depth when the forearm is nearly parallel to the image plane.
+        // Small changes in its direction should not move a fingertip across the wrist.
+        let forearm = wrist - (joints[wristIndex - 1].position ?? wrist)
+        let depthWeight = max(-1, min(1, forearm.z / max(1e-6, simd_length(forearm) * 0.35)))
         let depth = sqrt(max(0, length * length - planeLength * planeLength))
-        let directedDepth = forearmDepth > 0 ? depth : forearmDepth < 0 ? -depth : 0
-        return coordinates(wrist + SIMD3(offset.x, offset.y, directedDepth))
+        return coordinates(wrist + SIMD3(offset.x, offset.y, depth * depthWeight))
       }
     }
   }

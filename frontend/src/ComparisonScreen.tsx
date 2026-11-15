@@ -12,6 +12,7 @@ import { cloudIssueText } from './cloud-issue';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, needsShotAnalysisRefresh, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
+import { smoothPlayerHands } from './hand-playback';
 import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, groundedShotPlayback, hasTrackedFingers, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
@@ -240,7 +241,8 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
 }) {
   const [reference, setReference] = useState(preferred);
   const [firstFrame, lastMotionFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
-  const playerPose = useMemo(() => groundedShotPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
+  const playerPose = useMemo(() => smoothPlayerHands(groundedShotPlayback(fullPose, firstFrame), lastMotionFrame - firstFrame),
+    [fullPose, firstFrame, lastMotionFrame]);
   const referencePose = useMemo(() => comparisonPlayback(reference.pose, firstFrame), [reference, firstFrame]);
   const hasHandDetail = useMemo(() => hasTrackedFingers(playerPose), [playerPose]);
   const [frame, setFrame] = useState(0);

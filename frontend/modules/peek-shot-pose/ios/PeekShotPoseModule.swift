@@ -19,14 +19,14 @@ public final class PeekShotPoseModule: Module {
       }
     }
 
-    AsyncFunction("analyze") { (uri: String, releaseMs: Double, requestId: String?) async throws -> [String: [[String: Any]]] in
+    AsyncFunction("analyze") { (uri: String, releaseMs: Double, requestId: String?) async throws -> [String: Any] in
       guard #available(iOS 17.0, *) else {
         throw ShotPoseError.unsupportedSystem
       }
       let frames = try await ShotPoseAnalyzer.frames(uri: uri, releaseMs: releaseMs) { progress in
         self.reportProgress(requestId, operation: "analyze", progress: progress)
       }
-      return ["frames": frames]
+      return ["frames": frames, "trackingVersion": 5]
     }
   }
 
