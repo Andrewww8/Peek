@@ -972,6 +972,7 @@ def rig_skeleton(pose, ext, rise, hand, height):
     Every bone keeps one length and thickness for the whole clip and the joints are chained from the pelvis outwards, so a bone can only swing,
     never stretch or spin about its own length. The whole body gets one fixed turn about the vertical: square (at lift-off, the fastest rise of the hips before the release,
     the shoulder line faces the shot head on). Feet stay planted until lift-off; after it the measured rise of the hips drives the jump.
+    Knees always bend the way the hips face, an ankle is never closer to the middle than its own hip, and feet lie flat pointing forward and slightly out.
     Palms face each other; the guide hand runs straight on from its forearm and the shooting hand bends at the wrist with the measured flick."""
     P, E, rise = np.asarray(pose, float), np.asarray(ext, float), np.nan_to_num(np.asarray(rise, float))
     ok = ~np.isnan(P).any((1, 2)); v0 = int(np.argmax(ok)); v1 = int(len(ok) - 1 - np.argmax(ok[::-1])); eok = ~np.isnan(E).any((1, 2))
@@ -1018,11 +1019,14 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
         flick[i] = last
     sm = {i: sum(flick[j] * (3 - abs(j - i)) for j in range(i - 2, i + 3) if v0 <= j <= v1) / sum(3 - abs(j - i) for j in range(i - 2, i + 3) if v0 <= j <= v1) for i in fr}
 
+    SG = dict(r=1.0, l=-1.0); flat = lambda v: nrm(np.array([v[0], v[1], 0.0]))
+
+    def toes(F, s):                                                        # where a foot points: the way the hips face, turned out a little
+        return flat(F["_py"] + SG[s] * 0.17 * F["_px"])
+
     def set_leg(F, s):
-        q = F["_leg"][s]; tx_, ty_, _, tq_ = bone(nrm(q["K"] - q["P"]), F["_px"], F["_py"]); _, cy_, _, cq_ = bone(nrm(q["A"] - q["K"]), tx_, ty_)
-        fy = np.array([cy_[0], cy_[1], 0.0])
-        if fy @ fy < 1e-4: fy = np.array([F["_py"][0], F["_py"][1], 0.0])
-        fy = nrm(fy); F[s + "_thigh"] = [q["P"].copy(), tq_]; F[s + "_shank"] = [q["K"].copy(), cq_]; F[s + "_foot"] = [q["A"].copy(), quat(np.cross(fy, Z), fy, Z)]
+        q = F["_leg"][s]; tx_, ty_, _, tq_ = bone(nrm(q["K"] - q["P"]), F["_px"], F["_py"]); _, _, _, cq_ = bone(nrm(q["A"] - q["K"]), tx_, ty_)
+        fy = F["_toes"].get(s, toes(F, s)); F[s + "_thigh"] = [q["P"].copy(), tq_]; F[s + "_shank"] = [q["K"].copy(), cq_]; F[s + "_foot"] = [q["A"].copy(), quat(np.cross(fy, Z), fy, Z)]
     prev, FR = {}, {}
     for i in fr:
         J, F = J_all[i], {}; d = lambda a, b: nrm(J[b] - J[a])
@@ -1040,7 +1044,7 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
             h = hands[s]; m = hands[o]["p"] - h["p"]; m = m - h["z"] * (m @ h["z"])
             y = nrm(m) if np.linalg.norm(m) > 0.06 else (perp(prev[s + "h"], h["z"], h["x"]) if s + "h" in prev else h["x"] * (-1 if s == "r" else 1))
             prev[s + "h"] = y; F[s + "_hand"] = [h["p"], quat(np.cross(y, h["z"]), y, h["z"])]
-        F["_px"], F["_py"], F["_leg"] = px, py, {}
+        F["_px"], F["_py"], F["_leg"], F["_toes"] = px, py, {}, {}
         for s, sg, hp, kn, an in (("r", 1, 1, 2, 3), ("l", -1, 4, 5, 6)):
             Ph = O + px * sg * T["hipX"] * g; K = Ph + d(hp, kn) * LEN["thigh"]; A = K + d(kn, an) * LEN["shank"]; F["_leg"][s] = dict(P=Ph, K=K, A=A); set_leg(F, s)
         FR[i] = F
@@ -1052,12 +1056,14 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
         for s in "rl":
             for kk in "PKA": F["_leg"][s][kk] = F["_leg"][s][kk] + o
 
-    def reach(F, s, Tg):
+    def reach(F, s, Tg):                                                   # bend the leg so the ankle lands on Tg; the knee always points the way the hips face, slightly out
         q = F["_leg"][s]; a, b = LEN["thigh"], LEN["shank"]; v = Tg - q["P"]; dd = float(np.clip(np.linalg.norm(v), abs(a - b) + 1e-3, a + b - 1e-3)); al = nrm(v)
-        x = (a * a - b * b + dd * dd) / (2 * dd); h = np.sqrt(max(a * a - x * x, 0.0)); kd = q["K"] - q["P"]; kd = kd - al * (kd @ al)
-        if kd @ kd < 1e-6: kd = F["_py"] - al * (F["_py"] @ al)
+        x = (a * a - b * b + dd * dd) / (2 * dd); h = np.sqrt(max(a * a - x * x, 0.0)); kd = F["_py"] + SG[s] * 0.15 * F["_px"]; kd = kd - al * (kd @ al)
         q["K"] = q["P"] + al * x + nrm(kd) * h; q["A"] = q["P"] + al * dd; set_leg(F, s)
-    o, oL, Tg = np.zeros(3), np.zeros(3), {}
+
+    def apart(F, s, A):                                                    # an ankle is never closer to the middle than its own hip socket
+        side = flat(F["_px"]); lat = (A - F["pelvis"][0]) @ side; return A + side * (SG[s] * max(SG[s] * lat, T["hipX"] * g) - lat)
+    o, oL, Tg, Ty = np.zeros(3), np.zeros(3), {}, {}
     for i in range(lift, v0 - 1, -1):
         F = FR[i]; q = F["_leg"]; zm = min(q["r"]["A"][2], q["l"]["A"][2]); down = {s: q[s]["A"][2] - zm < 0.06 for s in "rl"}
         ds = [Tg[s] - q[s]["A"] for s in "rl" if down[s] and Tg.get(s) is not None]
@@ -1065,10 +1071,13 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
         if i == lift: oL = o.copy()
         move(F, o)
         for s in "rl":
-            if not down[s]: Tg[s] = None; continue
-            if Tg.get(s) is None: Tg[s] = np.array([q[s]["A"][0], q[s]["A"][1], sole])
-            reach(F, s, Tg[s])
-    for i in range(lift + 1, v1 + 1): move(FR[i], oL)
+            if not down[s]: Tg[s] = None; reach(F, s, apart(F, s, q[s]["A"])); continue
+            if Tg.get(s) is None:
+                Tg[s] = apart(F, s, q[s]["A"]); Tg[s][2] = sole; Ty[s] = toes(F, s)             # a planted foot keeps its spot and its direction
+            F["_toes"][s] = Ty[s]; reach(F, s, Tg[s])
+    for i in range(lift + 1, v1 + 1):
+        move(FR[i], oL)
+        for s in "rl": reach(FR[i], s, apart(FR[i], s, FR[i]["_leg"][s]["A"]))
     N = len(P); idx = np.clip(np.arange(N), v0, v1); pos, rot = {}, {}                          # frames outside the usable range hold the nearest pose
     for n_ in RIG_SEGMENTS:
         pos[n_] = np.array([FR[i][n_][0] for i in idx]); qq = np.array([FR[i][n_][1] for i in idx])
