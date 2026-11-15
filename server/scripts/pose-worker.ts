@@ -1,15 +1,14 @@
-import { execFile } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import { promisify } from 'node:util';
 import { MAX_INLINE_NPZ_BYTES, UUID } from '../src/deps.js';
 
-const run = promisify(execFile);
 const jobsPath = '/v1/internal/analysis/jobs';
 const analysisPath = '/v1/internal/analysis';
 const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -112,6 +111,115 @@ export async function processPoseBatch(api: URL, token: string, lift: Lift, sign
   return results;
 }
 
+interface ResidentLiftOptions {
+  python: string;
+  lifter: string;
+  coachPath: string;
+  env: NodeJS.ProcessEnv;
+  /** Per-job limit, as for a one-shot lift; a hung job kills the process and the next job restarts it. */
+  timeoutMs?: number;
+}
+
+/**
+ * Runs lift-shot.py once in its resident mode and sends it one job at a time, so Python, its
+ * imports and the pose models load once per worker instead of once per clip. A crash, a timeout
+ * or an abort ends the process; the next job starts a fresh one.
+ */
+export function createResidentLift({ python, lifter, coachPath, env, timeoutMs = 240_000 }: ResidentLiftOptions) {
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let started: Promise<void> | null = null;
+  let waiter: { resolve: (line: string) => void; reject: (error: Error) => void } | null = null;
+  let queue: Promise<unknown> = Promise.resolve();
+  let stderrTail = '';
+
+  const fail = (error: Error) => {
+    const w = waiter;
+    waiter = null;
+    w?.reject(error);
+  };
+  const nextLine = () => new Promise<string>((resolve, reject) => {
+    waiter = { resolve, reject };
+  });
+  const stop = () => {
+    const c = child;
+    child = null;
+    started = null;
+    c?.kill('SIGKILL');
+  };
+
+  function start() {
+    const c = spawn(python, [lifter, '--serve', coachPath], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    child = c;
+    stderrTail = '';
+    c.stderr.setEncoding('utf8');
+    c.stderr.on('data', (d: string) => {
+      stderrTail = (stderrTail + d).slice(-4_000);
+    });
+    // Events from a process that was already replaced must not touch the current job.
+    createInterface({ input: c.stdout }).on('line', (line) => {
+      if (child !== c) return;
+      const w = waiter;
+      waiter = null;
+      w?.resolve(line);
+    });
+    c.on('error', (error) => {
+      if (child !== c) return;
+      stop();
+      fail(error);
+    });
+    c.on('exit', (code, signal) => {
+      if (child !== c) return;
+      stop();
+      fail(new Error(`The pose lifter exited (${signal ?? code}). ${stderrTail.trim().split('\n').slice(-3).join(' ')}`.trim()));
+    });
+    c.stdin.on('error', () => {}); // a crash mid-write surfaces through 'exit'
+    return nextLine().then((line) => {
+      if (!(JSON.parse(line) as { ready?: boolean }).ready) throw new Error('The pose lifter did not start.');
+    });
+  }
+
+  function ready() {
+    started ??= start().catch((error: Error) => {
+      stop();
+      throw error;
+    });
+    return started;
+  }
+
+  async function runJob(video: string, releaseOffsetMs: number, output: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    const limit = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+    const onAbort = () => {
+      stop();
+      fail(limit.reason instanceof Error ? limit.reason : new Error('The pose lift was cancelled.'));
+    };
+    limit.addEventListener('abort', onAbort, { once: true });
+    try {
+      await ready();
+      limit.throwIfAborted();
+      const answer = nextLine();
+      child!.stdin.write(JSON.stringify({ video, release_offset_ms: releaseOffsetMs, output }) + '\n');
+      let reply: { ok?: boolean; error?: string };
+      try {
+        reply = JSON.parse(await answer) as typeof reply;
+      } catch (error) {
+        stop(); // an unreadable answer leaves the protocol out of step: start over
+        throw error;
+      }
+      if (!reply.ok) throw new Error(`The pose lift failed: ${reply.error ?? 'unknown error'}`);
+    } finally {
+      limit.removeEventListener('abort', onAbort);
+    }
+  }
+
+  const lift: Lift = (video, releaseOffsetMs, output, signal) => {
+    const job = queue.then(() => runJob(video, releaseOffsetMs, output, signal));
+    queue = job.catch(() => {});
+    return job;
+  };
+  return { lift, ready, close: stop };
+}
+
 async function main() {
   const coachDir = resolve(import.meta.dirname, '../../shot_coach');
   const {
@@ -142,24 +250,27 @@ async function main() {
   process.once('SIGTERM', () => controller.abort());
   const modelEnv = { ...process.env };
   delete modelEnv.CV_SERVICE_TOKEN;
-  const lift: Lift = async (video, releaseOffsetMs, output, signal) => {
-    await run(SHOT_COACH_PYTHON, [lifter, coachPath, video, String(releaseOffsetMs), output], {
-      env: modelEnv, signal, timeout: 240_000, maxBuffer: 256 * 1024,
-    });
-  };
+  const resident = createResidentLift({ python: SHOT_COACH_PYTHON, lifter, coachPath, env: modelEnv });
+  const { lift } = resident;
   const watch = process.argv.includes('--watch');
-  do {
-    try {
-      const results = await processPoseBatch(api, CV_SERVICE_TOKEN, lift, signal);
-      if (!watch || Object.values(results).some(Boolean)) console.log(results);
-      if (!watch && results.retry > 0) process.exitCode = 1;
-    } catch (error) {
-      if (signal.aborted) return;
-      if (!watch) throw error;
-      console.error((error as Error).message);
-    }
-    if (watch && !signal.aborted) await delay(15_000, undefined, { signal }).catch(() => {});
-  } while (watch && !signal.aborted);
+  // Load the models while the first poll is in flight. A failure here is retried by the first job.
+  if (watch) resident.ready().catch((error: Error) => console.error(error.message));
+  try {
+    do {
+      try {
+        const results = await processPoseBatch(api, CV_SERVICE_TOKEN, lift, signal);
+        if (!watch || Object.values(results).some(Boolean)) console.log(results);
+        if (!watch && results.retry > 0) process.exitCode = 1;
+      } catch (error) {
+        if (signal.aborted) return;
+        if (!watch) throw error;
+        console.error((error as Error).message);
+      }
+      if (watch && !signal.aborted) await delay(15_000, undefined, { signal }).catch(() => {});
+    } while (watch && !signal.aborted);
+  } finally {
+    resident.close();
+  }
 }
 
 if (import.meta.filename === process.argv[1]) {
