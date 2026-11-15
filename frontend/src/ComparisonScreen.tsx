@@ -3,7 +3,7 @@ import { Asset } from 'expo-asset';
 import { randomUUID } from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState, PanResponder, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { accountFetch, apiUrl } from './api';
@@ -27,6 +27,18 @@ const references: Reference[] = require('../assets/peek-nba-poses.json');
 const nameAtlas: NameAtlas = require('../assets/peek-ar-name-atlas.json');
 const nameAtlasImage: number = require('../assets/peek-ar-name-atlas.png');
 const preferred = references.find(({ player }) => player === 'Stephen Curry') ?? references[0]!;
+
+let nameAtlasBytes: Promise<Uint8Array> | undefined;
+
+async function loadNameAtlas() {
+  return nameAtlasBytes ??= Asset.fromModule(nameAtlasImage).downloadAsync().then(({ localUri }) => {
+    if (!localUri) throw new Error('The comparison labels could not be opened.');
+    return new File(localUri).bytes();
+  }).catch((error) => {
+    nameAtlasBytes = undefined;
+    throw error;
+  });
+}
 
 async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
   const { sessionId, shotNumber } = shot;
@@ -109,7 +121,8 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
         {result ? (
           <>
             {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} /> : null}
-            <PoseComparison key={result.version ?? 0} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} updatingPose={updatingPose} />
+            <PoseComparison key={sessionId + ':' + (tag ? `${tag.shotNumber}:${tag.releaseMs}` : 'auto')} playerPose={result.pose}
+              playerLabel={playerName ?? 'Your shot'} updatingPose={updatingPose} />
           </>
         ) : (
           <Panel>
@@ -234,10 +247,10 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(playerPose.frameCount > 1);
   const [angle, setAngle] = useState(0.55);
-  const [openingAR, setOpeningAR] = useState(false);
+  const [arRequested, setARRequested] = useState(false);
   const [arNotice, setArNotice] = useState<string>();
   const [picker, setPicker] = useState(false);
-  const opening = useRef(false);
+  const requested = useRef(false);
   const startAngle = useRef(angle);
   const liveAngle = useRef(angle);
   const playhead = useRef(frame);
@@ -249,6 +262,12 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
       setAngle(liveAngle.current);
     },
   }), []);
+
+  useLayoutEffect(() => {
+    playhead.current = 0;
+    setFrame(0);
+    setPlaying(playerPose.frameCount > 1);
+  }, [playerPose]);
 
   useEffect(() => {
     if (!playing) return;
@@ -266,7 +285,71 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
     };
     animation = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animation);
-  }, [playerPose.fps, playerPose.frameCount, playing]);
+  }, [playerPose, playing]);
+
+  useEffect(() => {
+    void loadNameAtlas().catch(() => { /* The request can try again if warming the atlas fails. */ });
+  }, []);
+
+  useEffect(() => {
+    if (!arRequested || updatingPose) return;
+    const request = new AbortController();
+    const { signal } = request;
+    async function prepareAndOpen() {
+      let staging: File | undefined;
+      let preview: File | undefined;
+      let opened = false;
+      try {
+        const png = await loadNameAtlas();
+        if (signal.aborted) return;
+        const bytes = comparisonUsdz(playerPose, referencePose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
+        const cache = new Directory(Paths.cache, 'peek-ar');
+        cache.create({ idempotent: true, intermediates: true });
+        const name = 'peek-comparison-' + randomUUID();
+        staging = new File(cache, name + '.partial');
+        staging.create();
+        await staging.write(bytes);
+        if (signal.aborted) return;
+        if (staging.size !== bytes.length) throw new Error('The AR comparison could not be saved.');
+        preview = new File(cache, name + '.usdz');
+        await staging.move(preview);
+        staging = undefined;
+        if (signal.aborted) return;
+        let ready = await preview.canPreview();
+        if (signal.aborted) return;
+        if (!ready) {
+          // Give a cold Quick Look check one more chance after the file is published.
+          await new Promise<void>((resolve) => {
+            const settle = () => {
+              clearTimeout(timer);
+              signal.removeEventListener('abort', settle);
+              resolve();
+            };
+            const timer = setTimeout(settle, 135);
+            signal.addEventListener('abort', settle, { once: true });
+          });
+          if (signal.aborted) return;
+          ready = await preview.canPreview();
+          if (signal.aborted) return;
+        }
+        if (!ready) throw new Error('Quick Look could not open this AR comparison.');
+        await preview.preview({ title: playerLabel + ' vs. ' + reference.player });
+        opened = true;
+      } catch (error) {
+        if (!signal.aborted) setArNotice(message(error, 'Could not open the comparison in AR.'));
+      } finally {
+        for (const file of [staging, opened ? undefined : preview]) {
+          try { if (file?.exists) file.delete(); } catch { /* iOS can clear the preview cache. */ }
+        }
+        if (!signal.aborted) {
+          requested.current = false;
+          setARRequested(false);
+        }
+      }
+    }
+    void prepareAndOpen();
+    return () => request.abort();
+  }, [arRequested, playerLabel, playerPose, reference.player, referencePose, updatingPose]);
 
   function seek(next: number) {
     setPlaying(false);
@@ -279,37 +362,11 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
     setAngle(next);
   }
 
-  async function openAR() {
-    if (opening.current || updatingPose) return;
-    opening.current = true;
-    setOpeningAR(true);
+  function openAR() {
+    if (requested.current) return;
+    requested.current = true;
     setArNotice(undefined);
-    let asset: File | undefined;
-    let opened = false;
-    try {
-      const atlas = await Asset.fromModule(nameAtlasImage).downloadAsync();
-      if (!atlas.localUri) throw new Error('The label artwork could not be opened.');
-      const png = await new File(atlas.localUri).bytes();
-      const bytes = comparisonUsdz(playerPose, referencePose, { atlas: nameAtlas, png, player: playerLabel, reference: reference.player });
-      const cache = new Directory(Paths.cache, 'peek-ar');
-      cache.create({ idempotent: true, intermediates: true });
-      asset = new File(cache, 'Peek Comparison ' + randomUUID() + '.usdz');
-      asset.create();
-      await asset.write(bytes);
-      if (asset.size !== bytes.length) {
-        throw new Error('The AR file could not be prepared. Tap View in AR to try again.');
-      }
-      await asset.preview({ title: playerLabel + ' vs. ' + reference.player });
-      opened = true;
-    } catch (error) {
-      setArNotice(message(error, 'Could not open the comparison in AR.'));
-    } finally {
-      if (!opened && asset?.exists) {
-        try { asset.delete(); } catch { /* Cached previews can be purged by iOS. */ }
-      }
-      opening.current = false;
-      setOpeningAR(false);
-    }
+    setARRequested(true);
   }
 
   const frameDeltaMs = Math.round((frame - playerPose.releaseIndex) * 1000 / playerPose.fps);
@@ -322,8 +379,8 @@ function PoseComparison({ playerPose: fullPose, playerLabel, updatingPose = fals
           pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
       </View>
       <View style={styles.stageActions}>
-        <Button label={openingAR ? 'Opening AR…' : 'View in AR'} arrow onPress={openAR} disabled={openingAR || updatingPose} style={styles.action} />
-        <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
+        <Button label={arRequested ? 'Preparing AR…' : 'View in AR'} arrow onPress={openAR} disabled={arRequested} style={styles.action} />
+        <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={arRequested} style={styles.action} />
       </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
       {firstFrame === lastMotionFrame ? (

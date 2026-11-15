@@ -19,6 +19,7 @@ function player(frameCount: number): Pose {
     row.splice(3 * 3, 3, 0.1, 0.57 - dip + jitter, 0);
     row.splice(6 * 3, 3, -0.1, 0.57 - dip + jitter, 0);
     row.splice(10 * 3, 3, jitter, -0.52, 0);
+    row.splice(12 * 3, 3, -0.14 + arms + jitter, -0.22, 0);
     row.splice(13 * 3, 3, -0.1 + arms + jitter, -0.38, 0);
     row.splice(16 * 3, 3, 0.1 + arms + jitter, -0.38, 0);
     return row;
@@ -74,6 +75,8 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
     point(frame, 19, [wrist[0] + 0.01, wrist[1] - 0.10, wrist[2]]);
   }
   source.joints.fill(null, 14 * coordinatesPerFrame, 15 * coordinatesPerFrame);
+  const missingWrist = 16 * coordinatesPerFrame + 13 * 3;
+  source.joints.fill(null, missingWrist, missingWrist + 3);
   const playback = comparisonPlayback(source, 3);
   const display = stabilizedShotPlayback(source, 3);
   assert.ok(posePoint(display, 14 - 3, 13), 'the body can bridge its measurement gap');
@@ -91,10 +94,39 @@ test('keeps on-device hands sparse and attached while the body fills gaps and ho
   const next = visiblePosePoint(comparisonPlayback(display), 32 - 3, 17);
   assert.equal(next, null, 'AR resampling must not resurrect a stale hand');
   const usd = new TextDecoder().decode(comparisonUsdz(display, display));
-  for (const [definition, nextDefinition] of [['Sphere "Finger_0"', 'def Sphere'], ['Cylinder "Bone_21_17"', 'def Xform']]) {
-    const track = usd.split('def ' + definition)[1]?.split(nextDefinition!)[0];
+  const primTrack = (definition: string) => usd.split('def ' + definition)[1]?.split(/\ndef (?:Sphere|Cylinder|Xform) /)[0] ?? '';
+  for (const definition of ['Sphere "Finger_0"', 'Cylinder "Bone_21_17"']) {
+    const track = primTrack(definition);
     // Quick Look versions that ignore the visibility track still see a near-zero scale.
-    assert.match(track ?? '', /float3 xformOp:scale.timeSamples = \{[^}]*29: \(0\.00010, 0\.00010, 0\.00010\)/);
+    assert.match(track, /float3 xformOp:scale.timeSamples = \{[^}]*29: \(0\.00010, 0\.00010, 0\.00010\)/);
+  }
+  for (const [definition, gap] of [
+    ['Sphere "Finger_0"', 11], ['Cylinder "Bone_21_17"', 11],
+    ['Sphere "Joint_13"', 13], ['Cylinder "Bone_12_13"', 13],
+  ] as const) {
+    const track = primTrack(definition);
+    const samples = (op: string) => {
+      const values = track.split(`xformOp:${op}.timeSamples = {\n`)[1]?.split('}')[0];
+      assert.ok(values, `${definition} has ${op} samples`);
+      return new Map(Array.from(values.matchAll(/^([\d.]+): (\([^\n]+\))/gm), ([, time, value]) => [Number(time), value]));
+    };
+    const scale = samples('scale');
+    const hidden = '(0.00010, 0.00010, 0.00010)';
+    assert.ok(scale.get(gap - 1));
+    assert.ok(scale.get(gap + 1));
+    assert.notEqual(scale.get(gap - 1), hidden);
+    assert.equal(scale.get(gap - 0.1), scale.get(gap - 1));
+    assert.equal(scale.get(gap - 0.05), hidden);
+    assert.equal(scale.get(gap), hidden);
+    assert.equal(scale.get(gap + 0.95), hidden);
+    assert.notEqual(scale.get(gap + 1), hidden);
+    for (const op of definition.startsWith('Cylinder') ? ['translate', 'orient'] : ['translate']) {
+      const pose = samples(op);
+      assert.equal(pose.get(gap - 0.1), pose.get(gap - 1));
+      assert.equal(pose.get(gap - 0.05), pose.get(gap - 1));
+      assert.equal(pose.get(gap), pose.get(gap - 1));
+      assert.equal(pose.get(gap + 0.95), pose.get(gap + 1));
+    }
   }
 });
 

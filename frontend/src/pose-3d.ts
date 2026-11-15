@@ -244,17 +244,51 @@ function tuple(elements: readonly number[]) {
   return '(' + elements.map((value) => value.toFixed(5)).join(', ') + ')';
 }
 
-function track(type: string, op: string, frames: readonly (readonly number[] | null)[], fallback: readonly number[]) {
-  const initial = frames.find((value) => value !== null) ?? fallback;
-  const samples = frames.map((value, index) => String(index) + ': ' + tuple(value ?? initial)).join(',\n');
+function keyedTrack(type: string, op: string, keys: readonly (readonly [number, readonly number[]])[], initial: readonly number[]) {
+  const samples = keys.map(([time, value]) => String(time) + ': ' + tuple(value)).join(',\n');
   return type + ' xformOp:' + op + ' = ' + tuple(initial)
     + '\n' + type + ' xformOp:' + op + '.timeSamples = {\n' + samples + '\n}';
+}
+
+function track(type: string, op: string, frames: readonly (readonly number[] | null)[], fallback: readonly number[]) {
+  const initial = frames.find((value) => value !== null) ?? fallback;
+  return keyedTrack(type, op, frames.map((value, index) => [index, value ?? initial]), initial);
 }
 
 function visibility(frames: readonly (unknown | null)[]) {
   if (!frames.includes(null)) return '';
   return 'token visibility.timeSamples = {\n' + frames.map((value, frame) =>
     String(frame) + ': "' + (value === null ? 'invisible' : 'inherited') + '"').join(',\n') + '\n}';
+}
+
+type HandTransform = { center: Vector; scale: Vector; rotation?: Rotation };
+
+function sparseHandTracks(frames: readonly (HandTransform | null)[], rotate: boolean) {
+  let last = frames.find((frame) => frame !== null);
+  if (!last) return [];
+  const hidden = (pose: HandTransform): HandTransform => ({ ...pose, scale: [0.0001, 0.0001, 0.0001] });
+  const keys: [number, HandTransform][] = [];
+  for (const [time, frame] of frames.entries()) {
+    const previous = frames[time - 1];
+    if (frame) {
+      if (time > 0 && !previous) keys.push([time - 0.05, hidden(frame)]);
+      last = frame;
+      keys.push([time, frame]);
+    } else {
+      // USD interpolates transforms between keys. Shrink at the last observed
+      // location and move to the next observation only while too small to see.
+      if (previous) keys.push([time - 0.1, previous], [time - 0.05, hidden(previous)]);
+      keys.push([time, hidden(last)]);
+    }
+  }
+  const initial = keys[0]![1];
+  const rotation = (transform: HandTransform): Rotation => transform.rotation ?? [1, 0, 0, 0];
+  return [
+    keyedTrack('double3', 'translate', keys.map(([time, value]) => [time, value.center]), initial.center),
+    ...(rotate ? [keyedTrack('quatf', 'orient', keys.map(([time, value]) => [time, rotation(value)]), rotation(initial))] : []),
+    keyedTrack('float3', 'scale', keys.map(([time, value]) => [time, value.scale]), initial.scale),
+    visibility(frames),
+  ];
 }
 
 function actor(id: string, pose: Pose, offset: number, tint: Vector) {
@@ -264,22 +298,22 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
   );
   const color = 'color3f[] primvars:displayColor = [' + tuple(tint) + ']';
   const parts = ['def Xform "' + id + '" {'];
-  const hiddenScale = [0.0001, 0.0001, 0.0001];
   for (let joint = 0; joint < posePointCount; joint++) {
     const positions = frames.map((sample) => sample[joint] ?? null);
     if (!positions.some(Boolean)) continue;
     const finger = joint >= jointCount;
-    const sparse = finger && positions.includes(null);
+    const sparse = (finger || joint === 13 || joint === 16) && positions.includes(null);
     const radius = finger ? joint < jointCount + 4 ? 0.011 : 0.007 : joint === 10 ? 0.056 : joint === 13 || joint === 16 ? 0.023 : 0.027;
     parts.push('def Sphere "' + (finger ? 'Finger_' + String(joint - jointCount) : 'Joint_' + String(joint)) + '" {',
       'double radius = ' + radius, color,
-      track('double3', 'translate', positions, [offset, 0, 0]), visibility(positions),
-      ...(sparse ? [track('float3', 'scale', positions.map((position) => position ? [1, 1, 1] : hiddenScale), [1, 1, 1])] : []),
+      ...(sparse
+        ? sparseHandTracks(positions.map((center) => center ? { center, scale: [1, 1, 1] } : null), false)
+        : [track('double3', 'translate', positions, [offset, 0, 0]), visibility(positions)]),
       'uniform token[] xformOpOrder = ["xformOp:translate"' + (sparse ? ', "xformOp:scale"' : '') + ']', '}');
   }
   for (const [from, to] of bones) {
     let previous: Rotation | undefined;
-    const data = frames.map((sample) => {
+    const data = frames.map((sample): HandTransform | null => {
       const a = sample[from], b = sample[to];
       if (!a || !b) return null;
       const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
@@ -293,12 +327,14 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
       return { center: midpoint(a, b), rotation, scale: [1, length / 2, 1] };
     });
     if (!data.some(Boolean)) continue;
-    const missingScale = to >= jointCount ? hiddenScale : null;
+    const sparse = (to >= jointCount || to === 13 || to === 16) && data.includes(null);
     parts.push('def Cylinder "Bone_' + String(from) + '_' + String(to) + '" {',
       'uniform token axis = "Y"', 'double radius = ' + (to >= jointCount ? '0.0055' : '0.016'), 'double height = 2', color,
-      track('double3', 'translate', data.map((item) => item?.center ?? null), [offset, 0, 0]),
-      track('quatf', 'orient', data.map((item) => item?.rotation ?? null), [1, 0, 0, 0]),
-      track('float3', 'scale', data.map((item) => item?.scale ?? missingScale), [1, 0, 1]), visibility(data),
+      ...(sparse ? sparseHandTracks(data, true) : [
+        track('double3', 'translate', data.map((item) => item?.center ?? null), [offset, 0, 0]),
+        track('quatf', 'orient', data.map((item) => item?.rotation ?? null), [1, 0, 0, 0]),
+        track('float3', 'scale', data.map((item) => item?.scale ?? null), [1, 0, 1]), visibility(data),
+      ]),
       'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]', '}');
   }
   parts.push('}');
