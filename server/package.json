@@ -8,6 +8,7 @@
     "sync-catalog": "tsx scripts/sync-catalog.ts",
     "test": "tsx --test \"src/**/*.test.ts\" \"scripts/**/*.test.ts\"",
     "cv-attach": "tsx scripts/cv-attach.ts",
+    "pose-worker": "tsx scripts/pose-worker.ts",
     "reference-ingest": "tsx scripts/reference-ingest.ts",
     "reference-review": "tsx scripts/reference-review.ts",
     "postinstall": "node scripts/fix-vendored-esm.mjs",

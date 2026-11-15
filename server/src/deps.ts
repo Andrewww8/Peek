@@ -20,6 +20,8 @@ export const CLIP_TTL_DAYS = 7;
 export const CLIP_TTL_MS = CLIP_TTL_DAYS * 24 * 3600_000;
 /** Largest CV npz the API reads for one shot clip. */
 export const MAX_NPZ_BYTES = 64 * 1024 * 1024;
+/** A single-player worker result fits in a small JSON body on Vercel. */
+export const MAX_INLINE_NPZ_BYTES = 512 * 1024;
 export const MAX_SHOTS_PER_REQUEST = 200;
 
 export const RECORDING_TYPES: Record<string, string> = { mov: 'video/quicktime', mp4: 'video/mp4', m4v: 'video/x-m4v' };
@@ -87,9 +89,11 @@ export interface ClipRepo {
   deleteSession(userId: string, sessionId: string): Promise<void>;
   /** Ordered by sessionId, then shotNumber. */
   list(userId: string, sessionId?: string): Promise<ClipRow[]>;
+  /** Oldest pending clips whose inputs are still within the retention window. */
+  listPending(cutoff: string, limit: number): Promise<ClipRow[]>;
   get(userId: string, sessionId: string, shotNumber: number): Promise<ClipRow | null>;
-  /** Writes analysis and status in one update. False when the row does not exist. */
-  setAnalysis(userId: string, sessionId: string, shotNumber: number, status: AnalysisStatus, analysis: unknown): Promise<boolean>;
+  /** Writes analysis and status together, optionally only from the given status. */
+  setAnalysis(userId: string, sessionId: string, shotNumber: number, status: AnalysisStatus, analysis: unknown, expected?: AnalysisStatus): Promise<boolean>;
   /** Sets the declared shooting hand on every clip of a session. */
   setShootingHand(userId: string, sessionId: string, hand: 'right' | 'left'): Promise<void>;
   /** Records that the clip mp4 and npz were deleted: clip_pathname = null, media_deleted_at = now. */

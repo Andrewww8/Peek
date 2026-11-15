@@ -113,16 +113,16 @@ export function createSupabaseClipRepo(db: SupabaseClient): ClipRepo {
       return r ? fromDb(r) : null;
     },
 
-    async setAnalysis(userId, sessionId, shotNumber, status, analysis) {
-      // One UPDATE writes both columns, so a reader never sees 'complete' without the analysis.
+    async setAnalysis(userId, sessionId, shotNumber, status, analysis, expected) {
+      let update = db
+        .from(TABLE)
+        .update({ analysis_status: status, analysis })
+        .eq('user_id', userId)
+        .eq('session_id', sessionId)
+        .eq('shot_number', shotNumber);
+      if (expected) update = update.eq('analysis_status', expected);
       const rows = check(
-        await db
-          .from(TABLE)
-          .update({ analysis_status: status, analysis })
-          .eq('user_id', userId)
-          .eq('session_id', sessionId)
-          .eq('shot_number', shotNumber)
-          .select('shot_number'),
+        await update.select('shot_number'),
       );
       return (rows ?? []).length > 0;
     },
@@ -147,6 +147,13 @@ export function createSupabaseClipRepo(db: SupabaseClient): ClipRepo {
       let q = db.from(TABLE).select('*').eq('user_id', userId);
       if (sessionId) q = q.eq('session_id', sessionId);
       const rows = check(await q.order('session_id').order('shot_number'));
+      return ((rows ?? []) as DbRow[]).map(fromDb);
+    },
+
+    async listPending(cutoff, limit) {
+      const rows = check(await db.from(TABLE).select('*').eq('analysis_status', 'pending')
+        .not('clip_pathname', 'is', null).gt('created_at', cutoff).order('created_at')
+        .order('user_id').order('session_id').order('shot_number').limit(limit));
       return ((rows ?? []) as DbRow[]).map(fromDb);
     },
   };

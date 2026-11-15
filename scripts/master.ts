@@ -114,14 +114,6 @@ await step('Server unit tests', async () => {
   return counts?.join(', ') ?? 'passed';
 });
 
-await step('Placeholder model export (until the Blender animation lands)', async () => {
-  const file = join(ROOT, 'server', 'media', 'three-point-follow-through-v1.usdz');
-  if (existsSync(file)) return 'export already present, left untouched';
-  const r = await sh(tsx, ['server/scripts/make-placeholder-usdz.ts', file]);
-  if (r.code) throw new Error(r.out);
-  return r.out.trim();
-});
-
 await step('Sync catalog sizeBytes with actual exports', async () => {
   const r = await sh(tsx, ['server/scripts/sync-catalog.ts']);
   if (r.code) throw new Error(r.out);
@@ -261,7 +253,7 @@ const acceptance = ACCEPTANCE.map(([item, scenarios]) => {
 });
 
 const manual = [
-  'Verify the placeholder (and later the finished catch-and-shoot animation) in Quick Look on the demo iPhone.',
+  'Download the reference pose and verify its animation in Quick Look on the demo iPhone.',
   'On an installed preview build: Wi-Fi off → quit → relaunch → record, reopen a session, play the 3D model.',
   'Sign in to the Supabase project used by Vercel and verify that a real iPhone recording produces private clips.',
 ];

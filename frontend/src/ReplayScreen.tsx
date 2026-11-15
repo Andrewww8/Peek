@@ -10,6 +10,7 @@ import { localVideoUri, recordingFiles } from './device-storage';
 import { clipTime, DRILL_NAME, PRACTICE_TIP, sessionDate, shotStats } from './practice';
 import type { Session, Shot, ShotOutcome } from './practice';
 import { removeRecording } from './recordings';
+import { ShotAnalysisPanel } from './ShotAnalysisPanel';
 import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, StatsGrid, Strip, ui } from './ui';
 
 type ShotEdit = { releaseMs: number; existing?: Shot };
@@ -33,6 +34,7 @@ export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChange
   const [notice, setNotice] = useState<string>();
   const video = localVideoUri(session.videoPath);
   const stats = shotStats(shots);
+  const cloudShotCount = cloudUserId ? store.sessionCloudShots(cloudUserId, session.id).length : 0;
 
   function editShot(selection: ShotEdit) {
     setEditorError(undefined);
@@ -111,6 +113,15 @@ export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChange
             </Pressable>
           ))}
         </Panel>
+        {cloudUserId && cloudShotCount > 0 ? (
+          <ShotAnalysisPanel
+            key={`${cloudUserId}:${session.id}`}
+            store={store}
+            sessionId={session.id}
+            userId={cloudUserId}
+            shotCount={cloudShotCount}
+          />
+        ) : null}
         {notice ? <Notice>{notice}</Notice> : null}
         {session.videoPath ? <Button label="Remove video" kind="danger" onPress={confirmRemove} /> : null}
       </Page>

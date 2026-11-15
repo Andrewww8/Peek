@@ -3,6 +3,7 @@ name: iOS frontend
 on:
   push:
     branches:
+      - main
       - frontend/ios-demo-*
 
 permissions:
@@ -47,7 +48,7 @@ jobs:
           device="$(xcrun simctl list devices available --json | jq -er '
             [.devices | to_entries[]
               | select(.key | contains(".iOS-"))
-              | .value[] | select(.name == "iPhone 17" and .isAvailable)]
+              | .value[] | select((.name | startswith("iPhone ")) and .isAvailable)]
             | last | .udid')"
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b

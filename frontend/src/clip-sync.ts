@@ -1,4 +1,4 @@
-import { apiOrigin, httpsUrl } from './api.ts';
+import { accountFetch, httpsUrl } from './api.ts';
 import type { PracticeStore } from './database.ts';
 
 type CloudShot = ReturnType<PracticeStore['cloudShots']>[number];
@@ -33,8 +33,7 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
   signal: AbortSignal;
   fetchApi?: typeof fetch;
 }) {
-  const origin = apiOrigin(baseUrl);
-  let refreshedToken: string | null = null;
+  const request = accountFetch(baseUrl, account.accessToken, fetchApi);
   let firstFailure: CloudResponseError | undefined;
 
   function defer(error: unknown) {
@@ -46,24 +45,12 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
   }
 
   async function apiCall(method: 'POST' | 'PATCH', path: string, body: unknown, timeout: number) {
-    const url = new URL(path, origin);
-    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(timeout)]);
-    const send = (token: string) => fetchApi(url.href, {
+    const response = await request(path, {
       method,
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      redirect: 'error',
-      signal: requestSignal,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
     });
-    const token = refreshedToken ?? await account.accessToken(false);
-    if (!token || requestSignal.aborted) throw new Error('Clip sync paused.');
-    let response = await send(token);
-    if (response.status === 401 && !refreshedToken) {
-      await response.body?.cancel();
-      refreshedToken = await account.accessToken(true);
-      if (!refreshedToken || requestSignal.aborted) throw new Error('Clip sync paused.');
-      response = await send(refreshedToken);
-    }
     if (!response.ok || method === 'PATCH') {
       const { ok, status } = response;
       await response.body?.cancel();

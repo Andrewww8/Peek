@@ -1,14 +1,14 @@
 [
   {
     "id": "three-point-follow-through",
-    "version": 1,
+    "version": 2,
     "shotType": "three_point",
     "cue": "Hold your finish until the ball reaches the rim.",
     "assets": [
       {
         "format": "usdz",
-        "sizeBytes": 761,
-        "url": "https://migapawvw9vtg8as.public.blob.vercel-storage.com/models/three-point-follow-through-v1.usdz"
+        "sizeBytes": 70657,
+        "url": "/media/three-point-follow-through-v2.usdz"
       }
     ]
   }

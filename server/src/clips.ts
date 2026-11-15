@@ -273,14 +273,16 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
   app.get<{ Querystring: { sessionId?: string } }>('/v1/clips', async (req) => {
     const q = req.query.sessionId;
     const sessionId = q === undefined ? undefined : sessionParam(q);
-    const rows = await clips.list(req.userId, sessionId);
+    const now = Date.now();
     // A clip whose 7-day TTL passed before CV ran is gone from Blob: record it as expired.
-    for (const r of rows) {
-      if (r.analysisStatus === 'pending' && Date.now() - Date.parse(r.createdAt) > CLIP_TTL_MS) {
-        await clips.setAnalysis(r.userId, r.sessionId, r.shotNumber, 'expired', null);
-        r.analysisStatus = 'expired';
+    const rows = (await Promise.all((await clips.list(req.userId, sessionId)).map(async (r) => {
+      if (r.analysisStatus === 'pending' && now - Date.parse(r.createdAt) > CLIP_TTL_MS) {
+        const expired = await clips.setAnalysis(r.userId, r.sessionId, r.shotNumber, 'expired', null, 'pending');
+        if (!expired) return clips.get(r.userId, r.sessionId, r.shotNumber);
+        return { ...r, analysisStatus: 'expired' as const };
       }
-    }
+      return r;
+    }))).filter((row) => row !== null);
     // Only clips still waiting for analysis have media; analyzed shots are kept as data only.
     const withMedia = rows.filter((r) => r.analysisStatus === 'pending' && r.clipPathname);
     const expiresAt = Date.now() + SIGNED_GET_TTL_MS;

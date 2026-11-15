@@ -16,3 +16,33 @@ export function apiOrigin(value: string) {
   }
   return url;
 }
+
+type AccessToken = (refresh: boolean) => Promise<string | null>;
+
+export function accountFetch(baseUrl: string, accessToken: AccessToken, fetchApi: typeof fetch = fetch) {
+  const origin = apiOrigin(baseUrl);
+  let refreshed: string | null = null;
+
+  return async (path: string, init: RequestInit) => {
+    const url = new URL(path, origin);
+    if (url.origin !== origin.origin) throw new Error('Invalid API destination.');
+    const headers = new Headers(init.headers);
+    if (!headers.has('Accept')) headers.set('Accept', 'application/json');
+    const send = (token: string) => {
+      init.signal?.throwIfAborted();
+      headers.set('Authorization', `Bearer ${token}`);
+      return fetchApi(url.href, { ...init, headers: new Headers(headers), redirect: 'error' });
+    };
+
+    const token = refreshed ?? await accessToken(false);
+    if (!token) throw new Error('Sign in to connect to the clip service.');
+    const response = await send(token);
+    if (response.status !== 401 || refreshed) return response;
+
+    await response.body?.cancel();
+    init.signal?.throwIfAborted();
+    refreshed = await accessToken(true);
+    if (!refreshed) throw new Error('Sign in to connect to the clip service.');
+    return send(refreshed);
+  };
+}

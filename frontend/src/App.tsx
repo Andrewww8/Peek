@@ -11,6 +11,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { AccountScreen } from './AccountScreen';
 import { storedSession, supabase } from './auth';
+import { CoachChat, CoachSessions } from './CoachScreen';
 import type { PracticeStore } from './database';
 import { DemoScreen } from './DemoScreen';
 import { loadPractice, localVideoUri } from './device-storage';
@@ -21,7 +22,7 @@ import { ReplayScreen } from './ReplayScreen';
 import { Button, colors, fonts, Loading, Notice, Page, Panel, StatsGrid, Strip, ui } from './ui';
 import { useClipSync } from './use-clip-sync';
 
-type Tab = 'practice' | 'saved';
+type Tab = 'practice' | 'saved' | 'coach';
 type Detail = { screen: 'record' } | { screen: 'replay'; session: Session };
 type StoreState = { store: PracticeStore } | { error: true } | null;
 
@@ -78,9 +79,11 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   const [detail, setDetail] = useState<Detail>();
   const [demo, setDemo] = useState(false);
   const [account, setAccount] = useState(false);
+  const [coachSelection, setCoachSelection] = useState<{ session: Session; userId: string | null }>();
   const [session, setSession] = useState<AuthSession | null>(null);
   const [authReady, setAuthReady] = useState(!supabase);
   const cloudUserId = session?.user.id ?? null;
+  const coachSession = coachSelection?.userId === cloudUserId ? coachSelection?.session : undefined;
   const scheduleClipSync = useClipSync(store, cloudUserId);
 
   useEffect(() => {
@@ -101,7 +104,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
     };
   }, []);
 
-  const tabName = tab === 'practice' ? 'Practice' : 'Saved clips';
+  const tabName = tab === 'practice' ? 'Practice' : tab === 'saved' ? 'Saved clips' : 'Coach';
   if (account) {
     return <AccountScreen session={session} ready={authReady} backLabel={demo ? '3D example' : tabName} onBack={() => setAccount(false)} />;
   }
@@ -123,6 +126,17 @@ function PracticeApp({ store }: { store: PracticeStore }) {
         onShotsChanged={scheduleClipSync}
         onBack={() => setDetail(undefined)}
         onViewDemo={() => setDemo(true)}
+      />
+    );
+  }
+  if (tab === 'coach' && coachSession && cloudUserId) {
+    return (
+      <CoachChat
+        key={`${cloudUserId}:${coachSession.id}`}
+        session={coachSession}
+        userId={cloudUserId}
+        onBack={() => setCoachSelection(undefined)}
+        onReplay={() => setDetail({ screen: 'replay', session: coachSession })}
       />
     );
   }
@@ -152,10 +166,17 @@ function PracticeApp({ store }: { store: PracticeStore }) {
           </Panel>
           <Button label="View 3D example" arrow kind="secondary" onPress={() => setDemo(true)} />
         </Page>
-      ) : <SavedClips store={store} onRecord={() => setTab('practice')} onReplay={(session) => setDetail({ screen: 'replay', session })} />}
+      ) : tab === 'saved' ? (
+        <SavedClips store={store} onRecord={() => setTab('practice')} onReplay={(session) => setDetail({ screen: 'replay', session })} />
+      ) : (
+        <CoachSessions store={store} userId={cloudUserId} onSignIn={() => setAccount(true)}
+          onRecord={() => setDetail({ screen: 'record' })}
+          onSelect={(session) => setCoachSelection({ session, userId: cloudUserId })} />
+      )}
       <View style={styles.tabs} accessibilityRole="tablist">
         <TabButton label="Practice" selected={tab === 'practice'} onPress={() => setTab('practice')} />
         <TabButton label="Saved Clips" selected={tab === 'saved'} onPress={() => setTab('saved')} />
+        <TabButton label="Coach" selected={tab === 'coach'} onPress={() => setTab('coach')} />
       </View>
     </>
   );

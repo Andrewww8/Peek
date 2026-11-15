@@ -1,17 +1,23 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { syncCloudClips } from '../frontend/src/clip-sync.ts';
+import { createSessionCoach } from '../frontend/src/coach.ts';
 import { PracticeStore } from '../frontend/src/database.ts';
+import { getShotAnalysis } from '../frontend/src/shot-analysis.ts';
+import { processPoseBatch } from '../server/scripts/pose-worker.js';
 import { buildApp } from '../server/src/app.js';
-import { createLocalDeps, signLocalToken } from '../server/src/local/index.js';
+import { SHOT, syntheticShot, writeNpz } from '../server/src/cv/test-pose.js';
+import { paths } from '../server/src/deps.js';
+import { LOCAL_CV_TOKEN, createLocalDeps, signLocalToken } from '../server/src/local/index.js';
 import { makeVideo } from '../server/src/test-video.js';
+import { ScriptedChatModel } from '../sim/coachModel.js';
 
-test('the iPhone queue uploads a recording, cuts private clips and syncs a later edit', async (t) => {
+test('the iPhone syncs private clips, receives shot analysis, and chats about the session', async (t) => {
   const temp = await mkdtemp(join(tmpdir(), 'perspective-frontend-cloud-'));
   t.after(() => rm(temp, { recursive: true, force: true }));
   const db = new DatabaseSync(join(temp, 'practice.sqlite'));
@@ -24,10 +30,16 @@ test('the iPhone queue uploads a recording, cuts private clips and syncs a later
       (db.prepare(sql).get(...params) as T | undefined) ?? null,
   });
   const secret = randomUUID();
+  const model = new ScriptedChatModel();
+  model.script = ({ human, messages }) => ({
+    text: human.startsWith('Follow-up') && messages.some((message) => message.text === 'Hold your finish.')
+      ? 'Keep your wrist relaxed.' : 'Hold your finish.',
+  });
+  const deps = createLocalDeps(temp, { jwtSecret: secret, inMemory: true, coachModel: () => model });
   const app = await buildApp({
     catalogPath: 'server/catalog/demos.json',
     mediaDir: 'server/media',
-    deps: createLocalDeps(temp, { jwtSecret: secret, inMemory: true }),
+    deps,
   });
   t.after(() => app.close());
   const localUrl = await app.listen({ host: '127.0.0.1', port: 0 });
@@ -48,7 +60,8 @@ test('the iPhone queue uploads a recording, cuts private clips and syncs a later
   const sessionId = randomUUID();
   const token = await signLocalToken(secret, user);
   const expired = await signLocalToken(secret, user, -1);
-  const otherUser = await signLocalToken(secret, randomUUID());
+  const otherUserId = randomUUID();
+  const otherUser = await signLocalToken(secret, otherUserId);
   const videoPath = join(temp, 'practice.mov');
   await makeVideo(videoPath, { seconds: 7, fps: 24, audio: false });
   const recording = await readFile(videoPath);
@@ -110,4 +123,50 @@ test('the iPhone queue uploads a recording, cuts private clips and syncs a later
   await run(async () => token);
   assert.equal((await list(token))[0]?.outcome, 'unmarked');
   assert.equal(store.hasCloudWork(user), false);
+
+  const workerUrl = new URL(localUrl);
+  const jobs = await fetch(new URL('/v1/internal/analysis/jobs', workerUrl), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(jobs.status, 401, 'a player JWT cannot read the internal work queue');
+  await jobs.body?.cancel();
+  assert.deepEqual(store.sessionCloudShots(otherUserId, sessionId), []);
+  assert.deepEqual(store.listCoachSessions(user).map(({ id }) => id), [sessionId]);
+  assert.deepEqual(store.listCoachSessions(otherUserId), []);
+
+  const analysis = () => getShotAnalysis(baseUrl, sessionId, async () => token, AbortSignal.timeout(5_000), fetchApi);
+  assert.equal((await analysis()).get(1)?.status, 'pending');
+  const pose = writeNpz([{ track: 1, series: syntheticShot() }]);
+  const batch = await processPoseBatch(workerUrl, LOCAL_CV_TOKEN, async (video, releaseMs, output) => {
+    const bytes = await readFile(video);
+    assert.equal(bytes.toString('ascii', 4, 8), 'ftyp');
+    assert.equal(releaseMs, 3000);
+    await writeFile(output, pose);
+  }, AbortSignal.timeout(15_000));
+  assert.deepEqual(batch, { complete: 2, failed: 0, skipped: 0, retry: 0 });
+  const read = await analysis();
+  assert.deepEqual([...read.keys()], [1, 2]);
+  assert.equal(read.get(1)?.status, 'complete');
+  assert.equal(read.get(1)?.usable, true);
+  assert.ok(Math.abs(read.get(1)!.elbowAngleDeg! - SHOT.elbowRelease) < 0.5);
+  assert.equal((await list(token))[0]?.url, null);
+  assert.deepEqual(await list(otherUser), []);
+  assert.equal(await deps.blob.head(paths.clip(user, sessionId, 1)), null);
+  assert.deepEqual(
+    await processPoseBatch(workerUrl, LOCAL_CV_TOKEN, async () => assert.fail('completed clips must leave the queue'), AbortSignal.timeout(5_000)),
+    { complete: 0, failed: 0, skipped: 0, retry: 0 },
+  );
+
+  const coach = createSessionCoach(baseUrl, sessionId, async () => token, fetchApi);
+  const alienCoach = createSessionCoach(baseUrl, sessionId, async () => otherUser, fetchApi);
+  const chatSignal = AbortSignal.timeout(15_000);
+  assert.deepEqual(await coach.history(chatSignal), []);
+  assert.equal((await coach.ask('How was my follow-through?', chatSignal, () => {})).text, 'Hold your finish.');
+  assert.equal((await coach.ask('Follow-up: what should I feel?', chatSignal, () => {})).text, 'Keep your wrist relaxed.');
+  assert.deepEqual((await coach.history(chatSignal)).map(({ role, text }) => [role, text]), [
+    ['user', 'How was my follow-through?'], ['assistant', 'Hold your finish.'],
+    ['user', 'Follow-up: what should I feel?'], ['assistant', 'Keep your wrist relaxed.'],
+  ]);
+  assert.deepEqual(await alienCoach.history(chatSignal), []);
+  await assert.rejects(alienCoach.ask('Show me that clip', chatSignal, () => {}), /No shot clips have synced/);
 });

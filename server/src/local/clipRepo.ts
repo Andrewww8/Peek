@@ -71,9 +71,9 @@ export function createLocalClipRepo(file?: string, now: () => Date = () => new D
       return r ? structuredClone(r) : null;
     },
 
-    async setAnalysis(userId, sessionId, shotNumber, status, analysis) {
+    async setAnalysis(userId, sessionId, shotNumber, status, analysis, expected) {
       const r = rows.get(key(userId, sessionId, shotNumber));
-      if (!r) return false;
+      if (!r || (expected && r.analysisStatus !== expected)) return false;
       // One assignment, like the single UPDATE in production.
       rows.set(key(userId, sessionId, shotNumber), { ...r, analysisStatus: status, analysis: structuredClone(analysis), updatedAt: now().toISOString() });
       await persist();
@@ -103,6 +103,14 @@ export function createLocalClipRepo(file?: string, now: () => Date = () => new D
 
     async list(userId, sessionId) {
       return sorted([...rows.values()].filter((r) => r.userId === userId && (!sessionId || r.sessionId === sessionId)).map((r) => structuredClone(r)));
+    },
+
+    async listPending(cutoff, limit) {
+      return [...rows.values()]
+        .filter((r) => r.analysisStatus === 'pending' && r.clipPathname && r.createdAt > cutoff)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .slice(0, limit)
+        .map((r) => structuredClone(r));
     },
   };
 }

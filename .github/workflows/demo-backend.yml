@@ -3,6 +3,7 @@ name: Demo backend and integration
 on:
   push:
     branches:
+      - main
       - frontend/ios-demo-v5-*
       - frontend/ios-demo-v6-*
 

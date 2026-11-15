@@ -160,6 +160,7 @@ vite.config.ts.timestamp-*
 /sim/.sandbox*/
 /server/media/*
 !/server/media/.gitkeep
+!/server/media/three-point-follow-through-v2.usdz
 *.part
 
 # Local practice footage, databases, and 3D working assets

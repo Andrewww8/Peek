@@ -28,7 +28,8 @@ Perspective is an iPhone sports coaching app starting with basketball. A player 
 | iPhone media | `expo-camera`, `expo-file-system`, `expo-video` | Capture, durable file storage, local replay, and model downloads. Open the animated USDZ with iOS Quick Look. |
 | iPhone database | `expo-sqlite` | Sessions, shot outcomes, downloaded model metadata, and the shot-clip upload queue. The phone is the source of truth for practice history; the cloud keeps a copy of each tagged shot's clip. |
 | iPhone auth | `@supabase/supabase-js` | Player sign-in. Signed-in players upload shot clips; signed out, the app is fully local. |
-| Cloud API | Vercel Functions (Node.js, Fluid compute), Fastify, TypeScript | Serve the demo catalog, issue upload URLs, cut shot clips with ffmpeg, and store clip metadata. Future computer-vision (CV) work runs here too. |
+| Cloud API | Vercel Functions (Node.js, Fluid compute), Fastify, TypeScript | Serve the demo catalog, issue upload URLs, cut shot clips with FFmpeg, authorize worker jobs, and store clip metadata and measurements. |
+| Local pose worker | Mac, Python 3.11, Shot Coach and PoseMamba | Download pending shots through private signed URLs, run pose inference, and return the extracted joints to the API. |
 | Cloud storage | Vercel Blob (models: public store; recordings and clips: private store), Supabase Postgres | Model exports, shot clips, and clip metadata for review and future CV. |
 | Cloud auth | Supabase Auth | The API verifies Supabase access tokens (JWT via the project's JWKS). |
 | 3D assets | Blender source files, with exports uploaded to Vercel Blob | Create or source a rigged avatar and animate the catch, release, and follow-through. Export one animated shot first. Keep Blender sources out of Blob and Git; upload only the mobile exports. |
@@ -110,7 +111,7 @@ Shot clips are **temporary inputs to analysis**. Only the data extracted from a 
 | --- | --- | --- |
 | Full recording | Private Blob `recordings/<user>/<session>/...` | Deleted once its clips are cut (2-day TTL as a backstop) |
 | Shot clip (4 s mp4) | Private Blob `clips/<user>/<session>/<n>.mp4` | Deleted as soon as its analysis completes (7-day TTL as a backstop) |
-| CV output (`.npz`) | Private Blob `analysis/<user>/<session>/<n>.npz` | Deleted in the same step, once the metrics are saved |
+| CV output (`.npz`) | Sent directly by the worker. The development `cv-attach` script uses a private Blob. | Discarded once the metrics are saved |
 | Extracted shot data | `shot_clips.analysis` (jsonb) | Kept permanently |
 
 - **The CV output format is NumPy `.npz`.** Sample file: `Perspective Project/_EuBHf42Zs8.npz`. Arrays:
@@ -128,7 +129,7 @@ Shot clips are **temporary inputs to analysis**. Only the data extracted from a 
   | `cuts` | (K) | Scene-cut frame indices |
 
   There is no ball tracking and there are no shot stats. All shooting metrics are computed by the API from the joints.
-- **Analysis.** The CV worker writes the npz to the `analysis/` path, then calls `POST /v1/internal/analysis` with `{ userId, sessionId, shotNumber, npzPathname }`, authenticated with `Authorization: Bearer <CV_SERVICE_TOKEN>`. The API then:
+- **Analysis.** The Mac worker calls `GET /v1/internal/analysis/jobs` for pending clips and their signed URLs. It returns the computed pose to `POST /v1/internal/analysis` with `{ userId, sessionId, shotNumber, npzBase64 }`. Both requests use `Authorization: Bearer <CV_SERVICE_TOKEN>`. The existing `cv-attach` script can pass an `npzPathname` for a file already in Blob. The API then:
   1. Picks the shooter track at the release frame, `round((releaseMs − startMs) · fps / 1000)`.
   2. Computes versioned metrics:
      - elbow angle at set point and at release
@@ -213,7 +214,7 @@ Mobile and API integration can start with a small placeholder model while the sh
 ## How the demo can grow
 
 - The API and model exports now run on Vercel (Functions and Blob). Consider moving the catalog into Postgres when the team needs a catalog editing workflow.
-- Computer-vision work (automated form analysis and shot tagging) runs on Vercel against the stored shot clips. `shot_clips.analysis_status` and `analysis` are reserved for it. Use Vercel Queues or Workflow for the analysis jobs. Use annotated footage for each drill to check that the app finds the right moments and that the visible movement supports the coaching cue.
+- Pose inference runs on the Mac. The hosted API tracks jobs through `shot_clips.analysis_status` and stores the derived form measurements in `shot_clips.analysis`. The iPhone currently tags releases manually.
 - The phone remains the source of truth for practice history; the cloud keeps shot clips for signed-in players. Full cross-device history would be a separate feature. Public distribution of recognizable NBA models depends on clearing the relevant likeness and source-footage rights.
 
 ## Potential skill and sport extensions

@@ -98,6 +98,14 @@ export class PracticeStore {
     );
   }
 
+  listCoachSessions(userId: string) {
+    return this.db.getAllSync<Session>(
+      `SELECT ${sessionColumns} FROM sessions WHERE cloud_user_id = ? AND EXISTS (
+         SELECT 1 FROM shots WHERE session_id = sessions.id AND cloud_state IN ('pending', 'synced', 'dirty')
+       ) ORDER BY created_at DESC, id DESC`, userId,
+    );
+  }
+
   saveSession(session: Session, cloudUserId: string | null = null) {
     this.db.runSync(
       `INSERT INTO sessions (id, created_at, shot_type, video_path, duration_ms, size_bytes, cloud_user_id)
@@ -156,6 +164,15 @@ export class PracticeStore {
     return !!this.db.getFirstSync(
       `SELECT 1 FROM shots JOIN sessions ON sessions.id = shots.session_id
        WHERE cloud_user_id = ? AND cloud_state IN ('pending', 'dirty') LIMIT 1`, userId,
+    );
+  }
+
+  sessionCloudShots(userId: string, sessionId: string) {
+    return this.db.getAllSync<{ shotNumber: number; state: CloudState }>(
+      `SELECT shot_number AS shotNumber, cloud_state AS state FROM shots
+       JOIN sessions ON sessions.id = shots.session_id
+       WHERE sessions.cloud_user_id = ? AND session_id = ? AND cloud_state IS NOT NULL
+       ORDER BY shot_number`, userId, sessionId,
     );
   }
 
