@@ -1,4 +1,5 @@
 import { describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { zipSync } from 'fflate';
@@ -8,7 +9,8 @@ import { NpzError, parseNpy, readNpz } from './npz.js';
 import { decodePose, encodePose, quantize, J } from './pose.js';
 import { SHOT, encodeNpy, joints3d, syntheticShot, to2d, writeNpz } from './test-pose.js';
 
-const SAMPLE = '/Users/danielvargas/Documents/Perspective Project/_EuBHf42Zs8.npz';
+// The sample CV output sits next to the repository checkout (PROJECT_CONTEXT.md); it is never committed.
+const SAMPLE = process.env.PERSPECTIVE_SAMPLE_NPZ || fileURLToPath(new URL('../../../../_EuBHf42Zs8.npz', import.meta.url));
 const haveSample = existsSync(SAMPLE);
 const W = { taggedReleaseFrame: SHOT.release, windowStart: 0, windowEnd: SHOT.frames - 1, cuts: [] as number[] };
 const near = (actual: number | null, expected: number, tol: number, what: string) =>

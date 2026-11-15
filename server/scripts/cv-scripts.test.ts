@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildApp } from '../src/app.js';
 import { SHOT, syntheticShot, writeNpz } from '../src/cv/test-pose.js';
 import { paths } from '../src/deps.js';
@@ -13,7 +14,8 @@ import { cvAttach } from './cv-attach.js';
 import { ingestReference } from './reference-ingest.js';
 import { reviewReference } from './reference-review.js';
 
-const SAMPLE = '/Users/danielvargas/Documents/Perspective Project/_EuBHf42Zs8.npz';
+// The sample CV output sits next to the repository checkout (PROJECT_CONTEXT.md); it is never committed.
+const SAMPLE = process.env.PERSPECTIVE_SAMPLE_NPZ || fileURLToPath(new URL('../../../_EuBHf42Zs8.npz', import.meta.url));
 const A = 'aaaaaaaa-0000-4000-8000-00000000000a';
 let dir: string;
 let deps: LocalDeps;
