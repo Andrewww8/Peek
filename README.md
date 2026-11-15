@@ -14,15 +14,19 @@ npm ci
 npm run ios -- --device
 ```
 
-For a rehearsal that relaunches offline with the JavaScript bundle embedded, install a Release build with `npm run ios -- --device --configuration Release`. Use a physical iPhone for recording and Quick Look. Recordings are silent, use the shooting-side camera, and stop after 30 seconds or when the file reaches its size cap.
+For a rehearsal that relaunches offline with the JavaScript bundle embedded, install a Release build with `npm run ios -- --device --configuration Release`. Use a physical iPhone for recording and Quick Look. Peek records silent video with the rear camera and stops after 30 seconds or when the file reaches its size cap.
 
-Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
+Open Peek and sign in or continue as a guest. In Coach, tap **+** to open **Camera** or **Upload clip**. The side menu slides and Coach’s attachment menu fades. Both transitions respect the iPhone’s Reduce Motion setting.
 
-Open a session in **Saved Clips** and tap **Compare your shot vs NBA** near the top of **Session details**. On iOS 17 or later, Peek estimates one release from the recorded shooting motion and tracks the 3D body pose on the iPhone. The comparison works without a release tag or a made or missed outcome. New recordings and imports start analysis after saving. The progress bar shows the current phase, percentage, elapsed time, and final duration. To compare a specific tagged attempt, open it under **Tagged shots**.
+For a Photos import, choose **Upload clip**, tap **Photos**, and review the video in Peek. Imports support MOV, MP4, and M4V clips up to 30 seconds and 20 MB. Tap **Yes, save** to create a session. When a camera recording needs confirmation, Peek asks **Are you sure this is the right footage?** In either review, **No, discard** leaves Saved Clips as it was.
 
-The shots play together through one second after release. Peek fills gaps between tracked poses so the white skeleton continues through the recorded follow-through. If the footage or tracking ends early, Peek holds the final tracked pose for the rest of the comparison. The bundled NBA references include measured motion through half a second after release and hold their final pose for the rest of the playback. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses of tagged shots show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
+Open **Saved clips** from the menu to replay sessions, mark shots, and review stats. In **Session details**, select **Left hand** or **Right hand** to set the shooting hand for that session. Peek remembers your choice and uses it in comparisons and Coach.
 
-On-device comparisons stabilize the body motion and show wrist and fingertip geometry where the recording supports it. The white skeleton stays grounded through the dip and landing. It shows lift when the video tracks both feet rising near release and descending again. Reopening an older saved recording refreshes its tracking at the original release time.
+Tap **Compare your shot vs NBA** in **Session details**. On iOS 17 or later, Peek estimates one release and tracks the 3D body pose on the iPhone. Analysis starts after saving. The progress bar shows the phase, percentage, and elapsed time. Comparisons can run before you mark an outcome or tag a release. To compare a specific tagged attempt, open it under **Tagged shots**. If automatic analysis can’t find the release, tag it in the replay.
+
+Both skeletons play on the same timeline through one second after release. When the footage or tracking ends early, the final pose holds until the comparison ends. The bundled NBA references include measured motion through half a second after release and hold their final pose for the remaining playback. Tap **Change NBA player** to pick a reference. **View in AR** opens the named white player and yellow NBA skeletons in Quick Look.
+
+Peek stabilizes the white skeleton and estimates missing wrist and finger positions from the moving arm for comparison and AR playback. The skeleton stays grounded through the dip and landing. It shows lift when the video tracks both feet rising near release and descending again.
 
 ## Connect Vercel and Supabase
 
@@ -53,9 +57,11 @@ Rebuild the iOS app after changing build-time values. If upgrading an existing l
 
 In Vercel, set the project root to `server/` and deploy `main`. Apply the SQL files in [server/supabase/migrations](server/supabase/migrations) in numeric order. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `BLOB_READ_WRITE_TOKEN` on Vercel. Vercel OIDC with `BLOB_STORE_ID` also works for private Blob. Set `SUPABASE_JWT_SECRET` only if the project still signs access tokens with the legacy HS256 secret.
 
-Recording, manual tags, replay, and guest comparisons work when signed out. For recordings made and tagged while signed in, the app queues shot clips in SQLite. It sends a Supabase bearer token to the API to request an upload grant, uploads the recording directly to private Blob storage with that grant, and asks the API to cut clips. New tags and edited outcomes sync while the app is active. Signing out pauses that account’s pending work. The server removes the full recording from Blob after it cuts the requested clips. Existing and guest practice stays on the phone. [Cloud API contract](PROJECT_CONTEXT.md#authenticated-endpoints-shot-clips)
+Recording, manual tags, replay, and guest comparisons work when signed out. For recordings made and tagged while signed in, the app queues shot clips in SQLite. It sends a Supabase bearer token to the API to request an upload grant, uploads the recording directly to private Blob storage with that grant, and asks the API to cut clips. New tags and edited outcomes sync while the app is active. Signing out pauses that account’s pending work. The server removes the full recording from Blob after it cuts the requested clips. Existing and guest recordings stay on the phone until you request cloud analysis for their tagged shots. [Cloud API contract](PROJECT_CONTEXT.md#authenticated-endpoints-shot-clips)
 
-For Coach chat, set `ANTHROPIC_API_KEY` and the Supabase pooled database URL `POSTGRES_URL` in Vercel. To seed the pro comparison templates, load the server environment locally and run `PERSPECTIVE_DEPS=production npm run reference-templates-ingest -w server` from the root. Attach a recording in Coach or tap **Ask Coach** from its session. Coach can use the attached clip’s on-device measurements while cloud analysis runs. For a tagged clip, check **Shot analysis** in Session details for cloud results or the reason a clip could not be processed.
+For Coach chat, set `ANTHROPIC_API_KEY` and the Supabase pooled database URL `POSTGRES_URL` in Vercel. Coach can load bundled Stephen Curry references for three-pointers and midrange shots when the database template library is empty. To seed the full pro template library, load the server environment locally and run `PERSPECTIVE_DEPS=production npm run reference-templates-ingest -w server` from the root.
+
+Attach a recording in Coach or tap **Ask Coach** from its session. Coach can compare the attached clip’s on-device measurements to Curry while cloud analysis runs. For a tagged clip, check **Shot analysis** in Session details for cloud results or the reason a clip could not be processed.
 
 ## Run pose inference on the Mac
 
@@ -98,9 +104,10 @@ npm run test:integration
 ## Rehearse on the demo iPhone
 
 1. Install a signed Release build and continue as a guest on a physical iPhone.
-2. Record a clip and tap **Stop and save**. Open its **Session details** and watch the analysis progress below **Compare your shot vs NBA**. Open the comparison when it finishes, without tagging an outcome or release.
-3. Watch the white skeleton and the NBA skeleton play side by side. Change the reference player and tap **View in AR** to open both named skeletons in Quick Look. Quit Peek, disable Wi-Fi and cellular data, and reopen the saved comparison.
-4. For the cloud portion, sign in with a confirmed test account, record and tag a shot, and leave the app open to sync. Check **Shot analysis** in Replay, then open the session from **Coach** and ask about follow-through. Use a second test account to verify that clips and chat history are isolated.
+2. Open the side menu and Coach’s **+** menu to check the slide and fade. Select a video from **Photos**, tap **No, discard** in Peek’s review, and check that Saved Clips stays the same.
+3. Record a shot and tap **Stop and save**. In **Session details**, set the shooting hand. Watch the analysis progress below **Compare your shot vs NBA**, then open the comparison as soon as it finishes.
+4. Change the reference player and tap **View in AR** to open both named skeletons in Quick Look. With the iPhone online, attach the saved clip in Coach and ask to compare it to Curry. Quit Peek, disable Wi-Fi and cellular data, and reopen the saved comparison.
+5. Reconnect and sign in with a confirmed test account for the cloud portion. Record and tag a shot, then leave the app open to sync. Check **Shot analysis** in Replay and ask Coach about follow-through. Use a second test account to verify that clips and chat history are isolated.
 
 ## Preview a pose track
 
