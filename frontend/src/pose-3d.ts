@@ -16,37 +16,22 @@ export type Pose = {
 
 export const jointCount = 17;
 export const coordinatesPerFrame = jointCount * 3;
-export const legacyFingerCount = 6;
-export const fingerCount = 8;
+export const fingerCount = 6;
 export const posePointCount = jointCount + fingerCount;
-export const handJoints = [[13, 21, 17], [16, 22, 18], [13, 23, 19], [16, 24, 20]] as const;
 export const bones = [
   [0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 6],
   [0, 7], [7, 8], [8, 9], [9, 10], [8, 11], [11, 12], [12, 13], [8, 14], [14, 15], [15, 16],
-  [13, 21], [16, 22], [21, 17], [22, 18], [13, 23], [16, 24], [23, 19], [24, 20],
+  [13, 21], [16, 22], [21, 17], [22, 18], [21, 19], [22, 20],
 ] as const;
 
-function poseFingerCount(pose: Pose): number {
-  if (pose.fingers?.length === pose.frameCount * fingerCount * 3) return fingerCount;
-  if (pose.fingers?.length === pose.frameCount * legacyFingerCount * 3) return legacyFingerCount;
-  return 0;
-}
-
-export function hasTrackedFingers(pose: Pose): boolean {
-  if (!poseFingerCount(pose)) return false;
-  return Array.from({ length: pose.frameCount }, (_, frame) => frame).some((frame) =>
-    handJoints.some(([wrist, knuckle]) => posePoint(pose, frame, wrist) && posePoint(pose, frame, knuckle)));
-}
-
 export function shotMotionWindow(pose: Pose): [first: number, last: number] {
-  const fingerWidth = poseFingerCount(pose) * 3;
   const sameFrame = (a: number, b: number) => {
     if ((pose.pelvisRise?.[a] ?? 0) !== (pose.pelvisRise?.[b] ?? 0)) return false;
     for (let coordinate = 0; coordinate < coordinatesPerFrame; coordinate++) {
       if (pose.joints[a * coordinatesPerFrame + coordinate] !== pose.joints[b * coordinatesPerFrame + coordinate]) return false;
     }
-    for (let coordinate = 0; coordinate < fingerWidth; coordinate++) {
-      if (pose.fingers?.[a * fingerWidth + coordinate] !== pose.fingers?.[b * fingerWidth + coordinate]) return false;
+    for (let coordinate = 0; coordinate < fingerCount * 3; coordinate++) {
+      if (pose.fingers?.[a * fingerCount * 3 + coordinate] !== pose.fingers?.[b * fingerCount * 3 + coordinate]) return false;
     }
     return true;
   };
@@ -60,7 +45,6 @@ export function shotMotionWindow(pose: Pose): [first: number, last: number] {
 
 export function comparisonPlayback(pose: Pose, first = 0): Pose {
   const frameCount = pose.releaseIndex + pose.fps - first + 1;
-  const fingerWidth = poseFingerCount(pose) * 3;
   const visible = Array.from({ length: Math.min(frameCount, Math.max(0, pose.frameCount - first)) }, (_, i) => first + i)
     .filter((frame) => bones.some(([a, b]) => b < jointCount && posePoint(pose, frame, a) && posePoint(pose, frame, b)));
   let next = 0;
@@ -75,12 +59,12 @@ export function comparisonPlayback(pose: Pose, first = 0): Pose {
     // After the final measured pose, keep it on screen while the comparison finishes.
     return [before, before, 0];
   });
-  const samples = (values: PoseSample[], width: number, maxGap = Infinity) => frames.flatMap(([before, after, fraction]) =>
+  const samples = (values: PoseSample[], width: number) => frames.flatMap(([before, after, fraction]) =>
     Array.from({ length: width }, (_, i) => {
       const start = values[before * width + i] ?? null;
       if (before === after) return start;
       const end = values[after * width + i] ?? null;
-      return start !== null && end !== null && after - before <= maxGap ? start + (end - start) * fraction : null;
+      return start !== null && end !== null ? start + (end - start) * fraction : null;
     }),
   );
   return {
@@ -88,7 +72,7 @@ export function comparisonPlayback(pose: Pose, first = 0): Pose {
     frameCount,
     releaseIndex: pose.releaseIndex - first,
     joints: samples(pose.joints, coordinatesPerFrame),
-    fingers: pose.fingers && fingerWidth ? samples(pose.fingers, fingerWidth, pose.fps / 5) : null,
+    fingers: pose.fingers && samples(pose.fingers, fingerCount * 3),
     jumpSamples: Array.isArray(pose.jumpSamples) ? pose.jumpSamples.slice(first, first + frameCount) : undefined,
     pelvisRise: pose.pelvisRise && samples(pose.pelvisRise, 1),
   };
@@ -162,24 +146,13 @@ export function poseGround(pose: Pose) {
 export function posePoint(pose: Pose, frame: number, joint: number): Vector | null {
   const finger = joint >= jointCount;
   const values = finger ? pose.fingers : pose.joints;
-  const count = finger ? poseFingerCount(pose) : jointCount;
-  const slot = finger ? joint - jointCount : joint;
-  if (slot >= count) return null;
-  const index = (frame * count + slot) * 3;
+  const index = finger ? (frame * fingerCount + joint - jointCount) * 3 : frame * coordinatesPerFrame + joint * 3;
   const x = values?.[index], y = values?.[index + 1], z = values?.[index + 2];
   return x == null || y == null || z == null ? null : [x, y, z];
 }
 
-export function visiblePosePoint(pose: Pose, frame: number, joint: number): Vector | null {
-  if (joint >= jointCount) {
-    const chain = handJoints.find(([, knuckle, tip]) => joint === knuckle || joint === tip);
-    if (!chain || !posePoint(pose, frame, chain[0]) || (joint === chain[2] && !posePoint(pose, frame, chain[1]))) return null;
-  }
-  return posePoint(pose, frame, joint);
-}
-
 function anchor(pose: Pose, frame: number, joint: number, ground: number, offset: number): Vector | null {
-  const point = visiblePosePoint(pose, frame, joint);
+  const point = posePoint(pose, frame, joint);
   if (!point) return null;
   const [x, y, z] = point;
   const heightInMeters = 1.75;
@@ -231,7 +204,7 @@ function actor(id: string, pose: Pose, offset: number, tint: Vector) {
     if (!positions.some(Boolean)) continue;
     const finger = joint >= jointCount;
     parts.push('def Sphere "' + (finger ? 'Finger_' + String(joint - jointCount) : 'Joint_' + String(joint)) + '" {',
-      'double radius = ' + (finger ? '0.010' : joint === 10 ? '0.056' : '0.027'), color,
+      'double radius = ' + (finger ? '0.013' : joint === 10 ? '0.056' : '0.027'), color,
       track('double3', 'translate', positions, [offset, 0, 0]), visibility(positions),
       'uniform token[] xformOpOrder = ["xformOp:translate"]', '}');
   }

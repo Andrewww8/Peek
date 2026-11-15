@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from 'expo';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import { guestPoseFromVision, type VisionFrame } from './guest-pose-motion';
-import { coordinatesPerFrame, legacyFingerCount, type Pose } from './pose-3d';
+import { coordinatesPerFrame, type Pose } from './pose-3d';
 
 type NativeProgress = { requestId: string; operation: 'detectRelease' | 'analyze'; progress: number };
 const native = requireOptionalNativeModule<{
@@ -23,10 +23,7 @@ export type ShotAnalysisState = {
 };
 
 const cache = new SQLiteStorage('peek-guest-analysis');
-const bodyOnlyAnalysisVersion = 2;
-const handAnalysisVersion = 3;
-const groundedAnalysisVersion = 4;
-const analysisVersion = 6;
+const analysisVersion = 7;
 const enforceGuestLimit = process.env.EXPO_PUBLIC_PEEK_GUEST_DAILY_LIMIT?.trim() === '5';
 const dailyLimit = 5;
 const usageKey = 'usage';
@@ -53,7 +50,9 @@ function readSavedAnalysis(key: string, tag?: ShotAnalysisTag): ShotAnalysisStat
     const result = 'phase' in saved ? saved.result : tag ? { pose: saved, releaseMs: tag.releaseMs } : undefined;
     if (!result || !Number.isFinite(result.releaseMs) ||
         result.pose.frameCount * coordinatesPerFrame !== result.pose.joints.length) return;
-    return 'phase' in saved ? saved : { phase: 'complete', progress: 1, result };
+    // Cached on-device poses from the hand-tracking builds can still provide a body preview.
+    const body = { ...result, pose: { ...result.pose, fingers: undefined } };
+    return 'phase' in saved ? { ...saved, result: body } : { phase: 'complete', progress: 1, result: body };
   } catch {
     // An unreadable pose can be computed again from the original recording.
   }
@@ -117,12 +116,7 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       const releaseMs = saved?.releaseMs ?? tag?.releaseMs ?? await native.detectRelease(uri, requestId);
       update(key, { phase: 'tracking', progress: scanShare, startedAt, result: saved });
       const { frames, trackingVersion } = await native.analyze(uri, releaseMs, requestId);
-      // Earlier native builds predate the tracking version in the response.
-      const supportsHands = frames.some(({ fingers }) => fingers?.length === legacyFingerCount * 3);
-      const supportsJumpTracking = frames.some(({ jumpSample }) => jumpSample?.length === 4);
-      const legacyVersion = supportsJumpTracking ? groundedAnalysisVersion : supportsHands ? handAnalysisVersion : bodyOnlyAnalysisVersion;
-      const version = trackingVersion ?? legacyVersion;
-      const result = { pose: guestPoseFromVision(frames), releaseMs, version };
+      const result = { pose: guestPoseFromVision(frames), releaseMs, version: trackingVersion };
       const state: ShotAnalysisState = { phase: 'complete', progress: 1, result, startedAt, finishedAt: Date.now() };
       const writes: [string, string][] = [[key, JSON.stringify(state)]];
       // Keep counting during unlimited mode so a rollback uses the same daily history.
