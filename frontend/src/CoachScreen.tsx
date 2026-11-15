@@ -29,6 +29,8 @@ const prompts = [
 
 const caption = (text: string) => text.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
 
+type CoachSubmission = { text: string; retryDraft?: string; edited: boolean };
+
 export function CoachScreen({
   store, userId, conversationId, session, question, onChangeQuestion, onMenu, onNewChat, onRecord, onPickClip,
   onRemoveClip, onReview, onSignIn, onGuestConnect, onSync, guestLimit, onRecent, visible, resumeAfterSignIn, onResume,
@@ -62,13 +64,13 @@ export function CoachScreen({
   const [status, setStatus] = useState('Looking at your shot…');
   const [notice, setNotice] = useState<string>();
   const [connecting, setConnecting] = useState(false);
-  const [queued, setQueued] = useState<string>();
+  const [queued, setQueued] = useState<CoachSubmission>();
   const [submitted, setSubmitted] = useState('');
   const [attachOpen, setAttachOpen] = useState(false);
   const [, setRevision] = useState(0);
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const activeTurn = useRef<AbortController>(null);
-  const connectingRef = useRef(false);
+  const submission = useRef<CoachSubmission>(null);
   const sessionId = session?.id ?? conversationId;
   const cloud = userId && session ? store.sessionCloudShots(userId, session.id) : [];
   const syncing = cloud.some(({ state }) => state === 'pending');
@@ -121,29 +123,44 @@ export function CoachScreen({
     if (!visible) setAttachOpen(false);
   }, [visible]);
 
+  useEffect(() => () => { submission.current = null; }, []);
+
+  function finishSubmission(turn: CoachSubmission, retry = false) {
+    if (submission.current !== turn) return;
+    submission.current = null;
+    setQueued(undefined);
+    setSubmitted('');
+    if (retry && !turn.edited && turn.retryDraft !== undefined) onChangeQuestion(turn.retryDraft);
+  }
+
   async function send(value: string) {
     const text = value.trim();
-    if (!text || activeTurn.current || connectingRef.current) return;
+    if (!text || submission.current) return;
+    const fromDraft = value === question;
+    const turn = { text, retryDraft: fromDraft || !question ? value : undefined, edited: false };
+    submission.current = turn;
     setNotice(undefined);
     setAttachOpen(false);
-    Keyboard.dismiss();
-    onChangeQuestion(text);
+    if (fromDraft) onChangeQuestion('');
     setSubmitted(text);
     let owner = userId;
     if (!userId) {
-      connectingRef.current = true;
       setConnecting(true);
       try {
         owner = await onGuestConnect();
       } catch (error) {
         setNotice(message(error, 'Could not start Coach in guest mode.'));
+        finishSubmission(turn, true);
         return;
       } finally {
         setConnecting(false);
-        connectingRef.current = false;
       }
     }
-    if (!owner) return;
+    if (submission.current !== turn) return;
+    if (!owner) {
+      finishSubmission(turn, true);
+      return;
+    }
     if (session && tagged) {
       try {
         store.prepareAnalysis(session.id, owner);
@@ -154,14 +171,15 @@ export function CoachScreen({
       }
     }
     if (client && history) {
-      void deliver(text);
+      void deliver(turn);
     } else {
-      setQueued(text);
+      setQueued(turn);
     }
   }
 
-  async function deliver(text: string) {
-    if (!userId || !client || !history || activeTurn.current) return;
+  async function deliver(turn: CoachSubmission) {
+    if (!userId || !client || !history || activeTurn.current || submission.current !== turn) return;
+    const { text } = turn;
     setQueued(undefined);
     setNotice(undefined);
     const request = new AbortController();
@@ -175,6 +193,7 @@ export function CoachScreen({
     setStatus(onDeviceShot || ready ? 'Looking at your shot…' : 'Thinking…');
     setPending(text);
     setWriting('');
+    let retry = false;
     try {
       const reply = await client.ask(text, request.signal, (update) => {
         if (request.signal.aborted) return;
@@ -186,8 +205,6 @@ export function CoachScreen({
       if (request.signal.aborted) return;
       const next = [...history, { id: null, text, role: 'user', createdAt: new Date().toISOString() } satisfies CoachMessage, reply];
       setHistory(next);
-      setSubmitted('');
-      onChangeQuestion('');
       const first = next.find(({ role }) => role === 'user')?.text ?? text;
       onRecent(userId, {
         sessionId,
@@ -196,17 +213,21 @@ export function CoachScreen({
         updatedAt: Date.now(),
       });
     } catch (error) {
-      if (!request.signal.aborted) setNotice(message(error, 'Could not reach Coach. Try again.'));
+      if (!request.signal.aborted) {
+        retry = true;
+        setNotice(message(error, 'Could not reach Coach. Try again.'));
+      }
     } finally {
       if (activeTurn.current === request) activeTurn.current = null;
-      if (!request.signal.aborted) {
+      if (submission.current === turn) {
         setPending('');
         setWriting('');
+        finishSubmission(turn, retry);
       }
     }
   }
 
-  const deliverQueued = useEffectEvent((text: string) => void deliver(text));
+  const deliverQueued = useEffectEvent((turn: CoachSubmission) => void deliver(turn));
   useEffect(() => {
     if (visible && client && history && queued) deliverQueued(queued);
   }, [visible, client, history, queued]);
@@ -224,6 +245,7 @@ export function CoachScreen({
   }
 
   const messages = history ?? [];
+  const busy = !!pending || connecting || !!queued;
   const firstQuestion = messages.find(({ role }) => role === 'user');
   const hasMessages = !!(messages.length || pending || submitted);
   const attached = !!session && !messages.length && !pending && !submitted;
@@ -311,7 +333,8 @@ export function CoachScreen({
               <View style={styles.attachPreview}>
                 <ClipCover compact duration={session.durationMs} removed={videoRemoved}
                   label="Review attached clip" onPress={() => onReview(session)} />
-                <IconButton icon="remove" label="Remove attachment" style={styles.remove} disabled={connecting} onPress={() => {
+                <IconButton icon="remove" label="Remove attachment" style={styles.remove} disabled={busy} onPress={() => {
+                  if (submission.current) return;
                   setNotice(undefined);
                   setQueued(undefined);
                   setSubmitted('');
@@ -324,19 +347,19 @@ export function CoachScreen({
           <View style={styles.inputRow}>
             <IconButton icon={attachOpen ? 'closeAccent' : 'plus'} label={attachOpen ? 'Close attachments' : 'Add clip'}
               onPress={() => {
+                if (submission.current) return;
                 Keyboard.dismiss();
                 setAttachOpen(!attachOpen);
-              }} disabled={!!pending || connecting} style={[styles.round, styles.attach]} />
+              }} disabled={busy} style={[styles.round, styles.attach]} />
             <TextInput style={styles.input} placeholder="Ask Coach about your shot…" placeholderTextColor={colors.muted}
-              accessibilityLabel="Ask Coach about your shot" multiline editable={!pending && !connecting} value={question}
+              accessibilityLabel="Ask Coach about your shot" multiline value={question}
               maxLength={maxCoachQuestionLength} onChangeText={(text) => {
-                setQueued(undefined);
-                setSubmitted('');
+                if (submission.current) submission.current.edited = true;
                 onChangeQuestion(text);
               }}
               onFocus={() => setAttachOpen(false)} />
             <IconButton icon="send" label="Send to Coach" onPress={() => void send(question)}
-              disabled={!question.trim() || !!pending || connecting || !!queued || !!client && !history}
+              disabled={!question.trim() || busy || !!client && !history}
               style={[styles.round, question.trim() ? styles.sendActive : styles.attach]} />
           </View>
         </View>
