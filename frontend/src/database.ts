@@ -73,7 +73,7 @@ export class PracticeStore {
     db.execSync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 2000;');
     const version = db.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
     if (version > SCHEMA_VERSION) {
-      throw new Error('This practice history requires a newer version of Perspective.');
+      throw new Error('This practice history requires a newer version of Peek.');
     }
     if (version < SCHEMA_VERSION) {
       db.execSync('BEGIN IMMEDIATE;');
@@ -104,6 +104,29 @@ export class PracticeStore {
          SELECT 1 FROM shots WHERE session_id = sessions.id AND cloud_state IN ('pending', 'synced', 'dirty')
        ) ORDER BY created_at DESC, id DESC`, userId,
     );
+  }
+
+  prepareCoachSession(id: string, userId: string) {
+    this.db.execSync('BEGIN IMMEDIATE;');
+    try {
+      const session = this.db.getFirstSync<{ owner: string | null; video: string | null }>(
+        'SELECT cloud_user_id AS owner, video_path AS video FROM sessions WHERE id = ?', id,
+      );
+      if (!session || (session.owner && session.owner !== userId)) {
+        throw new Error('This session belongs to a different account.');
+      }
+      if (!session.owner) {
+        if (!session.video) throw new Error('Choose a session with a video to attach.');
+        this.db.runSync('UPDATE sessions SET cloud_user_id = ? WHERE id = ?', userId, id);
+        this.db.runSync(
+          "UPDATE shots SET cloud_state = 'pending', cloud_outcome = outcome WHERE session_id = ? AND cloud_state IS NULL", id,
+        );
+      }
+      this.db.execSync('COMMIT;');
+    } catch (error) {
+      this.db.execSync('ROLLBACK;');
+      throw error;
+    }
   }
 
   saveSession(session: Session, cloudUserId: string | null = null) {

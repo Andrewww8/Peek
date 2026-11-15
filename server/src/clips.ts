@@ -10,6 +10,8 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { coachRoutes } from './coach/routes.js';
+import { recompute, type ShotAnalysis } from './cv/metrics.js';
+import { poseView } from './cv/pose-view.js';
 import {
   AuthError,
   CLIP_TTL_DAYS,
@@ -269,6 +271,27 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
   });
 
   coachRoutes(app, { coach: deps?.coach, clips, sessionParam });
+
+  app.get<{ Params: { sessionId: string; shotNumber: string } }>('/v1/sessions/:sessionId/shots/:shotNumber/pose', async (req, reply) => {
+    const sessionId = sessionParam(req.params.sessionId);
+    const shotNumber = shotNumberParam(req.params.shotNumber);
+    const row = await clips.get(req.userId, sessionId, shotNumber);
+    if (!row) throw new ApiError(404, 'clip_not_found', 'No synced clip was found for this shot.');
+    if (row.analysisStatus === 'pending') {
+      throw new ApiError(409, 'analysis_pending', 'Pose analysis is still running for this shot.');
+    }
+    const analysis = row.analysis as Partial<ShotAnalysis> | null;
+    if (row.analysisStatus !== 'complete' || !analysis?.quality?.usable) {
+      throw new ApiError(422, 'pose_unavailable', 'This shot does not have a usable 3D pose.');
+    }
+    let comparison = analysis.comparison;
+    if (comparison === undefined && analysis.pose && analysis.input) {
+      comparison = recompute({ pose: analysis.pose, input: analysis.input }).comparison;
+    }
+    if (!comparison) throw new ApiError(422, 'pose_unavailable', 'The shot needs a clearer view of the shooter through release.');
+    reply.header('Cache-Control', 'private, no-store');
+    return { shotType: row.shotType, pose: poseView(comparison.series, comparison.metrics) };
+  });
 
   app.get<{ Querystring: { sessionId?: string } }>('/v1/clips', async (req) => {
     const q = req.query.sessionId;

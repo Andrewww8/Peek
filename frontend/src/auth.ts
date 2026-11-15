@@ -3,6 +3,7 @@ import type { Session } from '@supabase/supabase-js';
 import { AESEncryptionKey, aesDecryptAsync, aesEncryptAsync, AESSealedData } from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
+import type { RecentChat } from './coach';
 
 const storage = new SQLiteStorage('perspective-auth');
 const keychain = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY };
@@ -94,6 +95,7 @@ function createAuthClient() {
         autoRefreshToken: true,
         persistSession: true,
         detectSessionInUrl: false,
+        flowType: 'pkce',
         lock: processLock,
       },
     });
@@ -114,6 +116,64 @@ function validAnonKey(value: string | undefined) {
 }
 
 export const supabase = createAuthClient();
+export const passwordResetUrl = 'perspective://reset-password';
+
+export async function startGuestSession() {
+  if (!supabase) throw new Error('Coach sign-in is unavailable in this build.');
+  const { data, error } = await supabase.auth.signInAnonymously();
+  if (error?.code === 'anonymous_provider_disabled') {
+    throw new Error('Guest Coach is disabled on this server. Sign in to send your clip.');
+  }
+  if (error) throw error;
+  if (!data.session?.user.is_anonymous) throw new Error('A guest Coach session could not be started.');
+  return data.session.user.id;
+}
+
+export function passwordRecoveryCode(url: string) {
+  try {
+    const target = new URL(url);
+    if (target.protocol !== 'perspective:' || target.host !== 'reset-password' || target.username ||
+        target.password || (target.pathname && target.pathname !== '/')) return undefined;
+    return target.searchParams.get('code') || null;
+  } catch {
+    return undefined;
+  }
+}
+
+export type SavedAccount = { id: string; name: string; email: string; lastUsed: number };
+
+export function accountName(user: Session['user']) {
+  const name: unknown = user.user_metadata?.display_name ?? user.user_metadata?.full_name ?? user.user_metadata?.name;
+  return typeof name === 'string' && name.trim() ? name.trim() : user.email?.split('@')[0] || 'Player';
+}
+
+const savedAccountsKey = 'peek.saved-accounts';
+
+export async function savedAccounts(): Promise<SavedAccount[]> {
+  const data = await encryptedStorage.getItem(savedAccountsKey);
+  try {
+    return data ? JSON.parse(data) as SavedAccount[] : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function rememberAccount(user: Session['user']) {
+  if (!user.email) return;
+  const existing = await savedAccounts();
+  const accounts = [{ id: user.id, name: accountName(user), email: user.email, lastUsed: Date.now() }];
+  accounts.push(...existing.filter(({ id }) => id !== user.id).slice(0, 9));
+  await encryptedStorage.setItem(savedAccountsKey, JSON.stringify(accounts));
+}
+
+export async function loadRecentChats(userId: string): Promise<RecentChat[]> {
+  const value = await encryptedStorage.getItem('peek.chats.' + userId);
+  return value ? JSON.parse(value) as RecentChat[] : [];
+}
+
+export function saveRecentChats(userId: string, recent: RecentChat[]) {
+  return encryptedStorage.setItem('peek.chats.' + userId, JSON.stringify(recent));
+}
 
 export function storedSession() {
   return savedSession;

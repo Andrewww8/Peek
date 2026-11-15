@@ -47,3 +47,12 @@ export function sessionDate(milliseconds: number) {
     timeStyle: 'short',
   }).format(milliseconds);
 }
+
+export function sessionDay(milliseconds: number) {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(milliseconds);
+}
+
+export function sessionTime(milliseconds: number) {
+  const time = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(milliseconds);
+  return sessionDay(milliseconds) + ' · ' + time;
+}

@@ -120,3 +120,23 @@ test('uses a no-attempts percentage when every tag is unmarked and formats relea
   assert.equal(clipTime(14_987, true), '0:14.9');
   assert.equal(clipTime(0), '0:00');
 });
+
+test('attaching a guest clip queues its existing shots for only the active account', (t) => {
+  const { open, files, path } = environment(t);
+  const { store } = open();
+  const pending = draft();
+  writeFileSync(path(pending.sourceUri), Buffer.alloc(pending.sizeBytes));
+  const clip = saveRecording(pending, files, store);
+  store.addShot(clip.id, 2300, 'made');
+  const account = randomUUID();
+  const otherAccount = randomUUID();
+
+  assert.equal(store.hasCloudWork(account), false);
+  store.prepareCoachSession(clip.id, account);
+  store.prepareCoachSession(clip.id, account);
+  assert.deepEqual(store.cloudShots(account, 'pending', clip.id), [
+    { sessionId: clip.id, shotNumber: 1, releaseMs: 2300, outcome: 'made' },
+  ]);
+  assert.throws(() => store.prepareCoachSession(clip.id, otherAccount), /different account/);
+  assert.equal(store.hasCloudWork(otherAccount), false);
+});

@@ -6,8 +6,8 @@
  * USDZ = uncompressed ZIP whose file data starts on 64-byte boundaries.
  */
 import { writeFile, mkdir } from 'node:fs/promises';
-import { crc32 } from 'node:zlib';
 import { join } from 'node:path';
+import { buildUsdz as buildArchive } from '../../mobile/src/core/usdz.js';
 
 const USDA = `#usda 1.0
 (
@@ -40,60 +40,7 @@ def Xform "Placeholder" (
 `;
 
 export function buildUsdz(files: { name: string; data: Buffer }[]): Buffer {
-  const locals: Buffer[] = [];
-  const centrals: Buffer[] = [];
-  let offset = 0;
-  for (const f of files) {
-    const name = Buffer.from(f.name, 'utf8');
-    const crc = crc32(f.data);
-    const base = 30 + name.length + 4; // header + name + extra-field header
-    const pad = (64 - ((offset + base) % 64)) % 64;
-    const extra = Buffer.alloc(4 + pad);
-    extra.writeUInt16LE(0x1986, 0); // same padding field id Apple's usdzip uses
-    extra.writeUInt16LE(pad, 2);
-
-    const lh = Buffer.alloc(30);
-    lh.writeUInt32LE(0x04034b50, 0);
-    lh.writeUInt16LE(20, 4); // version needed
-    lh.writeUInt16LE(0, 6); // flags
-    lh.writeUInt16LE(0, 8); // stored
-    lh.writeUInt32LE(0, 10); // time/date
-    lh.writeUInt32LE(crc, 14);
-    lh.writeUInt32LE(f.data.length, 18);
-    lh.writeUInt32LE(f.data.length, 22);
-    lh.writeUInt16LE(name.length, 26);
-    lh.writeUInt16LE(extra.length, 28);
-    locals.push(lh, name, extra, f.data);
-
-    const ch = Buffer.alloc(46);
-    ch.writeUInt32LE(0x02014b50, 0);
-    ch.writeUInt16LE(20, 4);
-    ch.writeUInt16LE(20, 6);
-    ch.writeUInt16LE(0, 8);
-    ch.writeUInt16LE(0, 10);
-    ch.writeUInt32LE(0, 12);
-    ch.writeUInt32LE(crc, 16);
-    ch.writeUInt32LE(f.data.length, 20);
-    ch.writeUInt32LE(f.data.length, 24);
-    ch.writeUInt16LE(name.length, 28);
-    ch.writeUInt16LE(0, 30); // extra
-    ch.writeUInt16LE(0, 32); // comment
-    ch.writeUInt16LE(0, 34); // disk
-    ch.writeUInt16LE(0, 36); // internal attrs
-    ch.writeUInt32LE(0, 38); // external attrs
-    ch.writeUInt32LE(offset, 42);
-    centrals.push(ch, name);
-
-    offset += lh.length + name.length + extra.length + f.data.length;
-  }
-  const central = Buffer.concat(centrals);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(files.length, 8);
-  eocd.writeUInt16LE(files.length, 10);
-  eocd.writeUInt32LE(central.length, 12);
-  eocd.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, central, eocd]);
+  return Buffer.from(buildArchive(files));
 }
 
 export function placeholderUsdz(): Buffer {

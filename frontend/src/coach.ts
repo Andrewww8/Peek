@@ -3,6 +3,7 @@ import { SseParser } from '../../mobile/src/core/coach.ts';
 import { accountFetch } from './api.ts';
 
 export const maxCoachQuestionLength = 2000;
+export type RecentChat = { sessionId: string; title: string; reply: string; updatedAt: number };
 
 export function createSessionCoach(
   baseUrl: string, sessionId: string, token: (refresh: boolean) => Promise<string | null>, fetchApi?: typeof fetch,
@@ -25,9 +26,10 @@ export function createSessionCoach(
       const response = await request({ signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
       await check(response);
       const { messages } = await response.json() as { messages: CoachMessage[] };
+      if (!Array.isArray(messages)) throw new Error('Coach returned an invalid conversation.');
       return messages;
     },
-    async ask(message: string, signal: AbortSignal, onStatus: (message: string) => void) {
+    async ask(message: string, signal: AbortSignal, onStatus: (message: string) => void, onToken?: (token: string) => void) {
       const response = await request({
         method: 'POST',
         headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
@@ -43,8 +45,8 @@ export function createSessionCoach(
           const { done, value } = await reader.read();
           if (done) break;
           for (const { event, data } of parser.push(value)) {
-            if (event === 'token') continue;
             const update = JSON.parse(data) as { messageId?: string; text?: string; message?: string };
+            if (event === 'token' && update.text) onToken?.(update.text);
             if (event === 'tool_status' && update.message) onStatus(update.message);
             if (event === 'error') throw new Error(update.message || 'The coach could not answer right now.');
             if (event === 'done' && update.text?.trim()) {

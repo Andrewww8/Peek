@@ -22,11 +22,12 @@ function summary(state: ReturnType<PracticeStore['sessionCloudShots']>[number]['
   }
 }
 
-export function ShotAnalysisPanel({ store, sessionId, userId, shotCount }: {
+export function ShotAnalysisPanel({ store, sessionId, userId, shotCount, onCompare }: {
   store: PracticeStore;
   sessionId: string;
   userId: string;
   shotCount: number;
+  onCompare: (shotNumber: number) => void;
 }) {
   const [results, setResults] = useState(new Map<number, ShotAnalysis>());
   const [refresh, setRefresh] = useState(0);
@@ -72,9 +73,12 @@ export function ShotAnalysisPanel({ store, sessionId, userId, shotCount }: {
       <Text accessibilityRole="header" style={ui.title}>Shot analysis</Text>
       {error ? <Text accessibilityRole="alert" style={ui.body}>Couldn’t refresh shot analysis.</Text> : null}
       {store.sessionCloudShots(userId, sessionId).map(({ shotNumber, state }) => (
-        <View key={shotNumber}>
+        <View key={shotNumber} style={ui.group}>
           <Text style={ui.text}>Shot {shotNumber}</Text>
           <Text style={ui.body}>{summary(state, results.get(shotNumber))}</Text>
+          {results.get(shotNumber)?.usable ? (
+            <Button label="Compare with an NBA player" kind="secondary" arrow onPress={() => onCompare(shotNumber)} />
+          ) : null}
         </View>
       ))}
       <Button label={loading ? 'Checking analysis…' : 'Refresh analysis'} kind="secondary" disabled={loading} onPress={() => setRefresh((value) => value + 1)} />

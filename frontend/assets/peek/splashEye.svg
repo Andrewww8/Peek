@@ -1,0 +1,15 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="87" height="87" viewBox="0 0 87 87" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Eye">
+<g clip-path="url(#clip0_0_12)">
+<rect width="87" height="87" rx="43.5" fill="white"/>
+<circle id="Pupil" cx="28" cy="42" r="21" fill="#B32821"/>
+<rect id="Lid top" y="-45.5" width="87" height="43.5" fill="#B32821"/>
+<rect id="Lid bottom" y="89" width="87" height="43.5" fill="#B32821"/>
+</g>
+</g>
+<defs>
+<clipPath id="clip0_0_12">
+<rect width="87" height="87" rx="43.5" fill="white"/>
+</clipPath>
+</defs>
+</svg>

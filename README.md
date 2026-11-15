@@ -1,6 +1,6 @@
-# Perspective
+# Peek
 
-Perspective is an iPhone app for coaching yourself in any sport. The first demo covers one basketball drill, the catch-and-shoot three-pointer.
+Peek is an iPhone app for coaching yourself in any sport. The first demo covers one basketball drill, the catch-and-shoot three-pointer.
 
 Use `frontend/` for the iPhone app, `server/` for the Fastify API, and `shot_coach/` for the Python pose and 3D comparison CLI. The `mobile/` package contains the phone core used by the backend simulator. See [the project context](PROJECT_CONTEXT.md) for the API contract and demo scope.
 
@@ -16,9 +16,13 @@ npm run ios -- --device
 
 For a rehearsal that relaunches offline with the JavaScript bundle embedded, install a Release build with `npm run ios -- --device --configuration Release`. Use a physical iPhone for recording and Quick Look. Recordings are silent, use the shooting-side camera, and stop after 30 seconds or when the file reaches its size cap.
 
+Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
+
+Open **NBA comparison** from the menu to play two reference shots side by side. For your own footage, mark the release in **Session details**, wait for **Shot analysis**, then tap **Compare with an NBA player** on that shot. Both views use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with the first skeleton in white and the NBA reference in yellow.
+
 ## Connect Vercel and Supabase
 
-The mobile app defaults to the [Perspective Vercel API](https://perspective-api-eta.vercel.app/health). Copy `frontend/.env.example` to `frontend/.env.local` and set these build-time values:
+The mobile app defaults to the [deployed Peek API](https://perspective-api-eta.vercel.app/health). Copy `frontend/.env.example` to `frontend/.env.local` and set these build-time values:
 
 | Variable | Value |
 | --- | --- |
@@ -28,13 +32,17 @@ The mobile app defaults to the [Perspective Vercel API](https://perspective-api-
 
 The Expo variables are bundled into the app. Supabase secret keys, service-role keys, JWT secrets, and Blob credentials belong in Vercel's server environment. Enable the email provider in Supabase. For new-account confirmation in the app, include `{{ .Token }}` as the verification code in the Confirm signup template. Supabase's default email service only sends to project team addresses. Use custom SMTP for other recipients. [Supabase email templates](https://supabase.com/docs/guides/auth/auth-email-templates) · [Supabase SMTP configuration](https://supabase.com/docs/guides/auth/auth-smtp)
 
-Rebuild the iOS app after changing build-time values. If upgrading an existing local native project, run `npx expo prebuild --platform ios` from `frontend` before the build to add the SecureStore module.
+For password recovery, add `perspective://reset-password` to Supabase's additional redirect URLs. Open the reset email on the same iPhone that requested it. [Supabase native deep linking](https://supabase.com/docs/guides/auth/native-mobile-deep-linking)
+
+Guest Coach uses Supabase anonymous sessions. Enable anonymous sign-ins in the app's Supabase project to offer that path. A signed-in account can use Coach and shot analysis with email sign-in. [Supabase anonymous sign-ins](https://supabase.com/docs/guides/auth/auth-anonymous)
+
+Rebuild the iOS app after changing build-time values. If upgrading an existing local native project, run `npx expo prebuild --platform ios` from `frontend` to update its native modules and permissions.
 
 In Vercel, set the project root to `server/` and deploy `main`. Apply the SQL files in [server/supabase/migrations](server/supabase/migrations) in numeric order. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `BLOB_READ_WRITE_TOKEN` on Vercel. Vercel OIDC with `BLOB_STORE_ID` also works for private Blob. Set `SUPABASE_JWT_SECRET` only if the project still signs access tokens with the legacy HS256 secret.
 
 The app requests the public `GET /v1/demos?shotType=three_point` catalog and opens downloaded USDZs in Quick Look. Recording, manual tags, replay, and downloaded models work when signed out. For recordings made and tagged while signed in, the app queues shot clips in SQLite. It sends a Supabase bearer token to the API to request an upload grant, uploads the recording directly to private Blob storage with that grant, and asks the API to cut clips. New tags and edited outcomes sync while the app is active. Signing out pauses that account’s pending work. The server removes the full recording from Blob after it cuts the requested clips. Existing and guest practice stays on the phone. [Cloud API contract](PROJECT_CONTEXT.md#authenticated-endpoints-shot-clips)
 
-For Coach chat, set `ANTHROPIC_API_KEY` and the Supabase pooled database URL `POSTGRES_URL` in Vercel. To seed the pro comparison templates, load the server environment locally and run `PERSPECTIVE_DEPS=production npm run reference-templates-ingest -w server` from the root. In the app, sign in, record and tag a shot, let it sync, then select its session from the Coach tab. Wait for pose analysis before asking about shot mechanics.
+For Coach chat, set `ANTHROPIC_API_KEY` and the Supabase pooled database URL `POSTGRES_URL` in Vercel. To seed the pro comparison templates, load the server environment locally and run `PERSPECTIVE_DEPS=production npm run reference-templates-ingest -w server` from the root. In the app, sign in and attach a recording in Coach or tap **Ask Coach** from its session. Mark a shot at release in replay so it can sync. Check pose analysis in the session before asking about shot mechanics.
 
 ## Run pose inference on the Mac
 
@@ -49,6 +57,8 @@ npm run pose-worker -w server -- --watch
 ```
 
 The worker checks for pending clips every 15 seconds after processing a batch. Omit `--watch` to process one batch. For a local Fastify server, use `http://127.0.0.1:3001` and its local CV token. Set the same `CV_SERVICE_TOKEN` in Vercel and the Mac worker. If your Python environment is elsewhere, set `SHOT_COACH_PYTHON` to its interpreter.
+
+After replacing the supplied NBA templates, run `node --import tsx server/scripts/export-peek-reference-poses.ts` from the repository root to regenerate the iPhone's bundled three-point reference poses.
 
 ## Verify
 

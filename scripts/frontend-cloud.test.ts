@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { unzipSync } from 'fflate';
 import { syncCloudClips } from '../frontend/src/clip-sync.ts';
 import { createSessionCoach } from '../frontend/src/coach.ts';
 import { PracticeStore } from '../frontend/src/database.ts';
+import { comparisonUsdz, type Pose } from '../frontend/src/pose-3d.ts';
 import { getShotAnalysis } from '../frontend/src/shot-analysis.ts';
 import { processPoseBatch } from '../server/scripts/pose-worker.js';
 import { buildApp } from '../server/src/app.js';
@@ -135,7 +137,10 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
   assert.deepEqual(store.listCoachSessions(otherUserId), []);
 
   const analysis = () => getShotAnalysis(baseUrl, sessionId, async () => token, AbortSignal.timeout(5_000), fetchApi);
+  const posePath = '/v1/sessions/' + sessionId + '/shots/1/pose';
+  const readPose = (bearer: string) => fetch(localUrl + posePath, { headers: { Authorization: 'Bearer ' + bearer } });
   assert.equal((await analysis()).get(1)?.status, 'pending');
+  assert.equal((await readPose(token)).status, 409);
   const pose = writeNpz([{ track: 1, series: syntheticShot() }]);
   const batch = await processPoseBatch(workerUrl, LOCAL_CV_TOKEN, async (video, releaseMs, output) => {
     const bytes = await readFile(video);
@@ -149,6 +154,28 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
   assert.equal(read.get(1)?.status, 'complete');
   assert.equal(read.get(1)?.usable, true);
   assert.ok(Math.abs(read.get(1)!.elbowAngleDeg! - SHOT.elbowRelease) < 0.5);
+  const playerPoseResponse = await readPose(token);
+  assert.equal(playerPoseResponse.status, 200);
+  assert.equal(playerPoseResponse.headers.get('cache-control'), 'private, no-store');
+  const { pose: playerPose } = await playerPoseResponse.json() as { pose: Pose };
+  const library = JSON.parse(await readFile('frontend/assets/peek-nba-poses.json', 'utf8')) as {
+    player: string; pose: typeof playerPose;
+  }[];
+  assert.equal(library.length, 10);
+  const curry = library.find(({ player }) => player === 'Stephen Curry');
+  const lillard = library.find(({ player }) => player === 'Damian Lillard');
+  assert.ok(curry && lillard);
+  assert.deepEqual([playerPose.fps, playerPose.frameCount, playerPose.releaseIndex],
+    [curry.pose.fps, curry.pose.frameCount, curry.pose.releaseIndex]);
+  assert.equal(playerPose.joints.length, 37 * 17 * 3);
+  assert.notDeepEqual(playerPose.joints, curry.pose.joints);
+  assert.notDeepEqual(curry.pose.joints, lillard.pose.joints);
+  assert.equal((await readPose(otherUser)).status, 404);
+  const ar = unzipSync(comparisonUsdz(playerPose, curry.pose));
+  const scene = new TextDecoder().decode(ar['PeekComparison.usda']);
+  assert.match(scene, /def Xform "Player"[\s\S]+primvars:displayColor = \[\(1\.00000, 1\.00000, 1\.00000\)\]/);
+  assert.match(scene, /def Xform "NBAReference"[\s\S]+primvars:displayColor = \[\(1\.00000, 0\.79000, 0\.04000\)\]/);
+  assert.match(scene, /xformOp:orient\.timeSamples/);
   assert.equal((await list(token))[0]?.url, null);
   assert.deepEqual(await list(otherUser), []);
   assert.equal(await deps.blob.head(paths.clip(user, sessionId, 1)), null);
@@ -161,7 +188,9 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
   const alienCoach = createSessionCoach(baseUrl, sessionId, async () => otherUser, fetchApi);
   const chatSignal = AbortSignal.timeout(15_000);
   assert.deepEqual(await coach.history(chatSignal), []);
-  assert.equal((await coach.ask('How was my follow-through?', chatSignal, () => {})).text, 'Hold your finish.');
+  const tokens: string[] = [];
+  assert.equal((await coach.ask('How was my follow-through?', chatSignal, () => {}, (piece) => tokens.push(piece))).text, 'Hold your finish.');
+  assert.equal(tokens.join(''), 'Hold your finish.');
   assert.equal((await coach.ask('Follow-up: what should I feel?', chatSignal, () => {})).text, 'Keep your wrist relaxed.');
   assert.deepEqual((await coach.history(chatSignal)).map(({ role, text }) => [role, text]), [
     ['user', 'How was my follow-through?'], ['assistant', 'Hold your finish.'],

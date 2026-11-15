@@ -11,10 +11,11 @@ import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, Scr
 
 type DownloadState = 'idle' | 'checking' | 'downloading' | 'opening';
 
-export function DemoScreen({ store, backLabel, onBack }: {
+export function DemoScreen({ store, backLabel, onBack, onCompare }: {
   store: PracticeStore;
   backLabel: string;
   onBack: () => void;
+  onCompare: () => void;
 }) {
   const [saved, setSaved] = useState<SavedDemo | null>(() => cachedDemo(store, demoFiles));
   const [available, setAvailable] = useState<CatalogDemo>();
@@ -121,6 +122,7 @@ export function DemoScreen({ store, backLabel, onBack }: {
           <Text style={ui.heading} accessibilityRole="header">3D example</Text>
           <Text style={ui.body}>{DRILL_NAME}</Text>
         </View>
+        <Button label="Compare NBA shooting form" arrow onPress={onCompare} />
         <Placeholder>
           {state === 'downloading' ? (
             <View style={styles.progressOuter}>

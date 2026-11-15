@@ -2,18 +2,20 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { randomUUID } from 'expo-crypto';
 import { isDevice } from 'expo-device';
 import { Paths } from 'expo-file-system';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { PracticeStore } from './database';
 import { inspectRecording, recordingFiles } from './device-storage';
-import { clipTime, DRILL_NAME, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES } from './practice';
+import { RecordingDot } from './PeekMotion';
+import { clipTime, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES } from './practice';
 import type { Session } from './practice';
 import { RECORDING_FREE_BYTES, saveRecording } from './recordings';
 import type { RecordingDraft } from './recordings';
-import { Button, colors, Loading, message, Notice, Page, Panel, Placeholder, ScreenHeader, ui } from './ui';
+import { Button, colors, gradients, IconButton, Loading, message, Notice, ui } from './ui';
 
-type Phase = 'idle' | 'recording' | 'stopping' | 'saving' | 'saveFailed';
+type Phase = 'idle' | 'starting' | 'recording' | 'stopping' | 'saving' | 'saveFailed';
 type PendingClip = { uri: string; id: string; createdAt: number; cloudUserId: string | null; draft?: RecordingDraft };
 
 export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
@@ -25,14 +27,16 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
   const [permission, requestPermission, refreshPermission] = useCameraPermissions();
   const [phase, setPhase] = useState<Phase>('idle');
   const [cameraKey, setCameraKey] = useState(0);
-  const [ready, setReady] = useState(false);
   const [cameraError, setCameraError] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [notice, setNotice] = useState<string>();
   const [askingPermission, setAskingPermission] = useState(false);
   const camera = useRef<CameraView>(null);
+  const ready = useRef(false);
   const currentPhase = useRef<Phase>('idle');
   const pending = useRef<PendingClip>(null);
+  const captureStarted = useRef(false);
+  const stopOnStart = useRef(false);
 
   function transition(next: Phase) {
     currentPhase.current = next;
@@ -43,9 +47,14 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
     const listener = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         void refreshPermission().catch(() => undefined);
-      } else if (state === 'background' && currentPhase.current === 'recording') {
-        transition('stopping');
-        camera.current?.stopRecording();
+      } else if (state === 'background') {
+        if (currentPhase.current === 'recording') {
+          transition('stopping');
+          camera.current?.stopRecording();
+        } else if (currentPhase.current === 'starting') {
+          if (captureStarted.current) stopOnStart.current = true;
+          else transition('idle');
+        }
       }
     });
     return () => listener.remove();
@@ -58,7 +67,7 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
       if (permission?.canAskAgain) await requestPermission();
       else await Linking.openSettings();
     } catch {
-      setNotice('Open iPhone Settings and allow camera access for Perspective.');
+      setNotice('Open iPhone Settings and allow camera access for Peek.');
     } finally {
       setAskingPermission(false);
     }
@@ -80,25 +89,29 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
     }
   }
 
-  async function start() {
-    const activeCamera = camera.current;
-    if (!ready || !activeCamera || currentPhase.current !== 'idle') return;
-
+  function requestRecording() {
+    if (currentPhase.current !== 'idle') return;
     setNotice(undefined);
     if (Paths.availableDiskSpace < RECORDING_FREE_BYTES) {
       setNotice('Free at least 32 MB on this iPhone before recording.');
       return;
     }
-
     setElapsed(0);
+    transition('starting');
+    if (ready.current) void start();
+  }
+
+  async function start() {
+    const activeCamera = camera.current;
+    if (!activeCamera || currentPhase.current !== 'starting' || captureStarted.current) return;
+    captureStarted.current = true;
     const createdAt = Date.now();
-    transition('recording');
     try {
       const result = await activeCamera.recordAsync({
         codec: 'avc1',
         maxDuration: RECORD_LIMIT_SECONDS,
         maxFileSize: RECORD_MAX_BYTES,
-        progressUpdateInterval: 0.25,
+        progressUpdateInterval: 0.1,
       });
       if (!result?.uri) throw new Error('No clip was recorded.');
       pending.current = { uri: result.uri, id: randomUUID(), createdAt, cloudUserId };
@@ -106,6 +119,24 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
     } catch {
       transition('idle');
       setNotice('Recording stopped before a clip could be saved. Try recording again.');
+    } finally {
+      captureStarted.current = false;
+      stopOnStart.current = false;
+    }
+  }
+
+  function onProgress(duration: number) {
+    if (currentPhase.current === 'starting' && duration > 0) {
+      if (stopOnStart.current) {
+        transition('stopping');
+        camera.current?.stopRecording();
+      } else {
+        transition('recording');
+      }
+    }
+    if (currentPhase.current === 'recording') {
+      const wholeSeconds = Math.floor(duration);
+      setElapsed((previous) => previous === wholeSeconds ? previous : wholeSeconds);
     }
   }
 
@@ -126,18 +157,14 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
   }
 
   const canShowCamera = isDevice && permission?.granted && !cameraError;
-  const busy = phase === 'recording' || phase === 'stopping' || phase === 'saving';
+  const busy = phase === 'starting' || phase === 'recording' || phase === 'stopping' || phase === 'saving';
+  const recording = phase === 'recording' || phase === 'stopping';
 
   return (
-    <>
-      <ScreenHeader backLabel="Practice" detail="720P" onBack={goBack} backDisabled={busy} />
-      <Page>
-        <View>
-          <Text style={ui.heading} accessibilityRole="header">Record practice</Text>
-          <Text style={ui.body}>{DRILL_NAME}</Text>
-        </View>
+    <View style={styles.screen}>
+      <LinearGradient colors={gradients.camera} locations={[0, 0.72, 1]} style={styles.preview}>
         {canShowCamera ? (
-          <View style={styles.preview}>
+          <>
             <CameraView
               key={cameraKey}
               ref={camera}
@@ -145,35 +172,45 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
               facing="back"
               mode="video"
               mute
-              responsiveOrientationWhenOrientationLocked
               videoQuality="720p"
               videoBitrate={4_000_000}
-              onCameraReady={() => setReady(true)}
-              onMountError={() => {
-                setReady(false);
-                setCameraError(true);
+              videoStabilizationMode="off"
+              onCameraReady={() => {
+                ready.current = true;
+                if (currentPhase.current === 'starting') void start();
               }}
-              onRecordingProgress={({ duration }) => setElapsed(duration)}
+              onMountError={() => {
+                ready.current = false;
+                setCameraError(true);
+                if (currentPhase.current === 'starting' && !captureStarted.current) transition('idle');
+              }}
+              onRecordingProgress={({ duration }) => onProgress(duration)}
             />
-            <View pointerEvents="none" style={styles.overlay}>
-              <View style={styles.previewTop}>
-                <Text style={styles.cameraTag}>SHOOTING SIDE</Text>
-                <Text style={styles.timer}>{clipTime(elapsed * 1000)} / 0:30</Text>
-              </View>
+            <View pointerEvents="none" style={styles.guide}>
+              <View style={styles.frame} />
+              <Text style={styles.guideText}>Keep the player and ball in frame</Text>
             </View>
-          </View>
+          </>
         ) : (
-          <Placeholder>
+          <View style={styles.cameraMessage}>
             {!isDevice ? <Text style={ui.text}>Recording requires a physical iPhone.</Text> : null}
             {isDevice && !permission ? <Loading text="Checking camera access…" /> : null}
             {isDevice && permission && !permission.granted ? <Text style={ui.text}>Camera access is required to record.</Text> : null}
             {isDevice && permission?.granted && cameraError ? <Text style={ui.text}>The camera could not start.</Text> : null}
-          </Placeholder>
+          </View>
         )}
-        <Panel>
-          <Text style={ui.title}>Keep the phone still</Text>
-          <Text style={ui.body}>Set up on your shooting side. Keep your full body and the ball in frame through release.</Text>
-        </Panel>
+        <View style={styles.previewTop}>
+          <IconButton icon="close" label="Close camera" onPress={goBack} disabled={busy} style={styles.cameraClose} />
+          <View style={styles.timerPosition} pointerEvents="none">
+            <View style={[styles.pill, recording && styles.activePill]}>
+              {recording ? <RecordingDot /> : null}
+              <Text style={ui.time}>{clipTime(elapsed * 1000)}</Text>
+            </View>
+          </View>
+          <View style={styles.pill}><Text style={[ui.mono, styles.quality]}>720P · 30S</Text></View>
+        </View>
+      </LinearGradient>
+      <View style={styles.actions}>
         {notice ? <Notice>{notice}</Notice> : null}
         {phase === 'idle' && isDevice && permission && !permission.granted ? (
           <Button label={permission.canAskAgain ? 'Allow camera access' : 'Open Settings'} onPress={allowCamera} disabled={askingPermission} />
@@ -186,22 +223,22 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
           }} />
         ) : null}
         {phase === 'idle' && canShowCamera ? (
-          <Shutter label={ready ? 'Start recording' : 'Starting camera…'} onPress={start} disabled={!ready} />
+          <Shutter label="Start recording" onPress={requestRecording} />
         ) : null}
-        {phase === 'recording' ? <Shutter label="Stop and save" onPress={stop} recording disabled={elapsed === 0} /> : null}
+        {phase === 'starting' ? <Shutter label="Starting recording" onPress={requestRecording} disabled recording /> : null}
+        {phase === 'recording' ? <Shutter label="Stop and save" onPress={stop} recording /> : null}
         {phase === 'stopping' ? <Loading text="Finishing recording…" /> : null}
         {phase === 'saving' ? <Loading text="Saving to this iPhone…" /> : null}
         {phase === 'saveFailed' ? <Button label="Retry save" onPress={savePending} /> : null}
-        {phase === 'idle' ? <Text style={styles.footnote}>30-second limit · Saves to this iPhone · Silent video</Text> : null}
-      </Page>
-    </>
+      </View>
+    </View>
   );
 }
 
 function Shutter({ label, onPress, disabled, recording = false }: {
   label: string;
   onPress: () => void;
-  disabled: boolean;
+  disabled?: boolean;
   recording?: boolean;
 }) {
   return (
@@ -214,21 +251,27 @@ function Shutter({ label, onPress, disabled, recording = false }: {
       style={({ pressed }) => [styles.shutterButton, (disabled || pressed) && styles.disabled]}
     >
       <View style={styles.shutterRing}><View style={[styles.shutterFill, recording && styles.stopFill]} /></View>
-      <Text style={ui.title}>{label}</Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  preview: { aspectRatio: 1.08, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.media },
-  overlay: { ...StyleSheet.absoluteFill, padding: 12 },
-  previewTop: { ...ui.row, alignItems: 'flex-start' },
-  cameraTag: { ...ui.mono, color: colors.text, backgroundColor: colors.surface, paddingVertical: 5, paddingHorizontal: 8, borderRadius: 5 },
-  timer: { ...ui.time, color: colors.text, backgroundColor: colors.media, paddingVertical: 5, paddingHorizontal: 8, borderRadius: 5 },
-  shutterButton: { alignItems: 'center', gap: 8, minHeight: 44, paddingVertical: 7 },
-  shutterRing: { width: 64, height: 64, borderRadius: 32, borderColor: colors.text, borderWidth: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
-  shutterFill: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#BA4435' },
-  stopFill: { width: 27, height: 27, borderRadius: 5 },
+  screen: { flex: 1, paddingHorizontal: 8 },
+  preview: { flex: 1, minHeight: 160, borderRadius: 28, overflow: 'hidden' },
+  previewTop: { ...ui.row, padding: 16 },
+  cameraClose: { backgroundColor: '#0d0d0ddd', minWidth: 40, minHeight: 40, borderRadius: 20 },
+  timerPosition: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
+  pill: { backgroundColor: '#0d0d0ddd', borderRadius: 20, paddingHorizontal: 10, minHeight: 27, flexDirection: 'row', alignItems: 'center', gap: 5 },
+  activePill: { backgroundColor: colors.selected },
+  quality: { color: colors.text },
+  guide: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', gap: 12, paddingTop: 40 },
+  frame: { width: '67%', height: '67%', borderWidth: 1.5, borderColor: '#f7f3ed77', borderRadius: 18, borderStyle: 'dashed' },
+  guideText: { ...ui.body, fontSize: 12, color: colors.text, textShadowColor: '#000', textShadowRadius: 5 },
+  cameraMessage: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', padding: 32 },
+  actions: { justifyContent: 'center', minHeight: 116, paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
+  shutterButton: { alignSelf: 'center', borderRadius: 40 },
+  shutterRing: { width: 80, height: 80, borderRadius: 40, borderColor: colors.text, borderWidth: 4, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
+  shutterFill: { width: 62, height: 62, borderRadius: 31, backgroundColor: colors.accent },
+  stopFill: { width: 30, height: 30, borderRadius: 7 },
   disabled: { opacity: 0.55 },
-  footnote: { ...ui.body, fontSize: 13, textAlign: 'center' },
 });

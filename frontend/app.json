@@ -1,23 +1,30 @@
 {
   "expo": {
-    "name": "Perspective",
+    "name": "Peek",
     "slug": "perspective",
-    "version": "0.1.0",
+    "version": "0.2.4",
+    "icon": "./assets/peek/logo.png",
     "scheme": "perspective",
     "platforms": ["ios"],
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "ios": {
       "bundleIdentifier": "com.andrewww8.perspective",
-      "supportsTablet": false
+      "supportsTablet": false,
+      "buildNumber": "6"
     },
     "plugins": [
       ["expo-camera", {
-        "cameraPermission": "Perspective uses the camera to record your basketball practice.",
+        "cameraPermission": "Peek uses the camera to record your basketball practice.",
         "recordAudioAndroid": false,
         "microphonePermission": false
       }],
-      ["expo-secure-store", { "faceIDPermission": false }]
+      ["expo-secure-store", { "faceIDPermission": false }],
+      ["expo-image-picker", {
+        "photosPermission": "Peek lets you choose a basketball practice video from your photo library.",
+        "cameraPermission": "Peek uses the camera to record your basketball practice.",
+        "microphonePermission": false
+      }]
     ]
   }
 }
