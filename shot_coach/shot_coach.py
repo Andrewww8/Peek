@@ -978,8 +978,16 @@ def rig_skeleton(pose, ext, rise, hand, height):
     ok = ~np.isnan(P).any((1, 2)); v0 = int(np.argmax(ok)); v1 = int(len(ok) - 1 - np.argmax(ok[::-1])); eok = ~np.isnan(E).any((1, 2))
     from scipy.ndimage import gaussian_filter1d                          # a light pass over time: an average shot steps where fewer shots contribute, and a single
     P = P.copy(); E = E.copy()                                           # clip keeps a little frame-to-frame noise; both read as twitches on a rigid skeleton
-    P[v0:v1 + 1] = gaussian_filter1d(P[v0:v1 + 1], 1.2, axis=0, mode="nearest"); rise[v0:v1 + 1] = gaussian_filter1d(rise[v0:v1 + 1], 1.5, mode="nearest")
-    if eok.sum() > 4: E[eok] = gaussian_filter1d(E[eok], 1.2, axis=0, mode="nearest")
+    n_ok = v1 - v0 + 1; edge = np.clip(1 - np.minimum(np.arange(n_ok), np.arange(n_ok)[::-1]) / 6.0, 0, 1)        # 1 at the first and last frame, 0 from six frames in
+
+    def glide(x, sigma):                                                  # smoothing that carries on at the end speed instead of braking to a stop at the clip's edges
+        n = int(np.ceil(3 * sigma)); k = min(4, len(x) - 1); v0_, v1_ = (x[k] - x[0]) / k, (x[-1] - x[-1 - k]) / k; r = np.arange(1, n + 1).reshape((-1,) + (1,) * (x.ndim - 1))
+        return gaussian_filter1d(np.concatenate([x[0] - v0_ * r[::-1], x, x[-1] + v1_ * r]), sigma, axis=0, mode="nearest")[n:-n]
+
+    def calm(x, w):                                                       # light everywhere, heavier at the ends where filters and averages are least reliable
+        a = glide(x, 1.2); b = glide(x, 3.0); w = w.reshape((-1,) + (1,) * (x.ndim - 1)); return a * (1 - w) + b * w
+    P[v0:v1 + 1] = calm(P[v0:v1 + 1], edge); rise[v0:v1 + 1] = calm(rise[v0:v1 + 1], edge)
+    if eok.sum() > 4: E[eok] = calm(E[eok], edge[eok[v0:v1 + 1]] if eok[v0:v1 + 1].sum() == eok.sum() else np.zeros(int(eok.sum())))
     out = _rig_solve(P, E, eok, rise, hand, 1.8, v0, v1)
     return _rig_solve(P, E, eok, rise, hand, 1.8 * height / out["stand"], v0, v1)
 
@@ -1041,10 +1049,17 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
     for i in fr:
         J, F = J_all[i], {}
 
-        def d(a, b):                                                       # direction of a bone; where an averaged pose has all but collapsed it, keep the last good one
-            v = J[b] - J[a]; n_ = float(np.linalg.norm(v))
-            if n_ < 0.4 * BONE.get((a, b), 0.0) and (a, b) in last_dir: return last_dir[(a, b)]
-            last_dir[(a, b)] = v / max(n_, 1e-12); return last_dir[(a, b)]
+        def d(a, b):
+            """Direction of a bone. A limb bone whose measured length is far from its usual one (an averaged pose can collapse or stretch it, and its
+            direction is then close to meaningless) may only turn slowly; a bone of normal length may turn as fast as a real arm does."""
+            v = J[b] - J[a]; n_ = float(np.linalg.norm(v)); t = v / max(n_, 1e-12)
+            if (a, b) in BONE and (a, b) in last_dir:
+                trust = 1 - float(np.clip((abs(n_ / BONE[(a, b)] - 1) - 0.2) / 0.35, 0, 1)); step = np.radians(8 + 42 * trust)        # most it may turn this frame
+                o = last_dir[(a, b)]; ang = float(np.arccos(np.clip(o @ t, -1, 1)))
+                if ang > step:
+                    ax = np.cross(o, t); ax = ax / np.linalg.norm(ax) if np.linalg.norm(ax) > 1e-9 else perp(np.array([1.0, 0, 0]), o, np.array([0, 1.0, 0]))
+                    t = Rotation.from_rotvec(ax * step).apply(o)
+            last_dir[(a, b)] = t; return t
         up = d(0, 8); px = perp(J[1] - J[4], up, np.array([1.0, 0, 0])); py = np.cross(up, px); O = J[0].copy(); F["pelvis"] = [O, quat(px, py, up)]
         tz = nrm(d(7, 8) + up); tx = perp(J[14] - J[11], tz, px); ty = np.cross(tz, tx); T0 = O + tz * (T["sacrum"] * g + T["torso"] * st); tq = quat(tx, ty, tz)
         F["torso"] = [T0, tq]; F["head"] = [T0 + tz * T["neck"] * g, tq]; hands = {}
@@ -1072,7 +1087,8 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
             for kk in "PKA": F["_leg"][s][kk] = F["_leg"][s][kk] + o
 
     def reach(F, s, Tg):                                                   # bend the leg so the ankle lands on Tg; the knee always points the way the hips face, slightly out
-        q = F["_leg"][s]; a, b = LEN["thigh"], LEN["shank"]; v = Tg - q["P"]; dd = float(np.clip(np.linalg.norm(v), abs(a - b) + 1e-3, a + b - 1e-3)); al = nrm(v)
+        q = F["_leg"][s]; a, b = LEN["thigh"], LEN["shank"]; v = Tg - q["P"]; full = a + b; n_ = float(np.linalg.norm(v)); al = nrm(v)
+        u = n_ / full; dd = float(np.clip(full * (u if u <= 0.9 else 0.9 + 0.085 * (1 - np.exp(-(u - 0.9) / 0.085))), abs(a - b) + 1e-3, 0.985 * full))   # eases towards 98.5% of full length: a knee locked dead straight snaps
         x = (a * a - b * b + dd * dd) / (2 * dd); h = np.sqrt(max(a * a - x * x, 0.0)); kd = F["_py"] + SG[s] * 0.15 * F["_px"]; kd = kd - al * (kd @ al)
         q["K"] = q["P"] + al * x + nrm(kd) * h; q["A"] = q["P"] + al * dd; set_leg(F, s)
 
@@ -1098,7 +1114,8 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
     shift = gaussian_filter1d(np.array([o_raw[i] for i in fr]), 2.0, axis=0, mode="nearest")                 # 2. the body glides; it never jumps when a foot lifts or lands
     for k, i in enumerate(fr): move(FR[i], shift[k])
     for s_ in "rl":                                                        # 3. ankles: planted ones stay put, free ones ease into and out of the planted spot
-        free = np.array([apart(FR[i], s_, FR[i]["_leg"][s_]["A"]) for i in fr]); fixed = np.array([s_ in tgt[i] for i in fr]); A = free.copy()
+        free = gaussian_filter1d(np.array([apart(FR[i], s_, FR[i]["_leg"][s_]["A"]) for i in fr]), 2.5, axis=0, mode="nearest")
+        fixed = np.array([s_ in tgt[i] for i in fr]); A = free.copy()
         for k in np.where(fixed)[0]:                                       # in the last frames before lift-off the heel may come up; the foot still does not slide
             A[k] = tgt[fr[k]][s_]; A[k][2] = sole + float(np.clip((fr[k] - (lift - 6)) / 6.0, 0, 1)) * max(0.0, free[k][2] - sole)
         for k in np.where(~fixed)[0]:
@@ -1107,7 +1124,12 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
                 while 0 <= j < len(A) and not fixed[j] and abs(j - k) < 10: j += step
                 if 0 <= j < len(A) and fixed[j]:
                     w = max(0.0, 1.0 - abs(j - k) / 10.0); A[k] = A[k] + (A[j] - free[j]) * w * w * (3 - 2 * w)
-        for _ in range(4):
+        A = np.where(fixed[:, None], A, gaussian_filter1d(A, 1.5, axis=0, mode="nearest"))
+        for k in np.where(~fixed)[0]:                                      # a foot does not leave or reach the ground at full speed: it eases over five frames
+            near = [j for j in range(max(k - 5, 0), min(k + 6, len(A))) if fixed[j]]
+            if near and int(fr[k]) <= lift:
+                j = min(near, key=lambda j_: abs(j_ - k)); u_ = abs(j - k) / 6.0; A[k] = A[j] + (A[k] - A[j]) * (u_ * u_ * (3 - 2 * u_))
+        for _ in range(8):
             B = A.copy(); B[1:-1] = 0.25 * A[:-2] + 0.5 * A[1:-1] + 0.25 * A[2:]; A = np.where(fixed[:, None], A, B)
         for k, i in enumerate(fr):
             if s_ in toe[i]: FR[i]["_toes"][s_] = toe[i][s_]
@@ -1117,6 +1139,11 @@ def _rig_solve(P, E, eok, rise, hand, H, v0, v1):
         pos[n_] = np.array([FR[i][n_][0] for i in idx]); qq = np.array([FR[i][n_][1] for i in idx])
         for j in range(1, N):
             if qq[j] @ qq[j - 1] < 0: qq[j] = -qq[j]                                             # keep the rotation continuous for interpolation
+        if n_.endswith("hand") and N > 37:                                                       # late follow-through: the hand rides its forearm as it was 0.2 s after the release
+            fa = Rotation.from_quat(np.array([FR[i][n_[0] + "_larm"][1] for i in idx])); rel = fa.inv() * Rotation.from_quat(qq); hold = rel[36]
+            for j in range(37, N):
+                w = min(1.0, (j - 36) / 4.0); qj = (fa[j] * hold * Rotation.from_rotvec((hold.inv() * rel[j]).as_rotvec() * (1 - w))).as_quat()
+                qq[j] = qj if qj @ qq[j - 1] >= 0 else -qj
         if n_.split("_")[-1] in ("hand", "foot", "head"):                                        # end bones carry nothing, so their turning can be smoothed freely
             qq = gaussian_filter1d(qq, 3.0 if n_.endswith("hand") else 1.5, axis=0, mode="nearest"); qq = qq / np.linalg.norm(qq, axis=1, keepdims=True)
         rot[n_] = qq
