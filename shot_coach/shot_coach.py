@@ -1157,7 +1157,7 @@ def write_3d(path, p, ext, rise, r, hand, ref, player, stype):
     h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
     nan = lambda x: np.array([[[np.nan] * 3] * len(x[0] if x[0] is not None else x[-1]) if f is None else f for f in x], float)
     you = rig_skeleton(p, ext, rise, hand, h); pro = rig_skeleton(nan(avg["pose"]), nan(avg["ext"]), avg["rise"], avg.get("hand", "R"), h)
-    write_glb(path, [("You", you, (0.8, 0.8, 0.8, 1.0)), (player, pro, (1.0, 0.667, 0.0, 0.8))])
+    write_glb(path, [("You", you, (0.604, 0.604, 0.604, 1.0)), (player, pro, (1.0, 0.402, 0.0, 0.8))])     # #cccccc and #ffaa00 (glTF colours are linear)
     return True
 
 
