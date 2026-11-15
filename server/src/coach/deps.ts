@@ -83,6 +83,12 @@ export interface ReferenceRepo {
 export type ModelRole = 'coach' | 'analyst';
 
 export interface CoachDeps {
+  /**
+   * Loads what `createModel` and `checkpointer` need (LangChain, the Anthropic SDK, the
+   * checkpointer), so that a cold start serving other routes skips them. The coach routes
+   * await it before using either.
+   */
+  prepare?: () => Promise<void>;
   createModel: (role: ModelRole) => BaseChatModel;
   modelName: string;
   checkpointer: BaseCheckpointSaver;

@@ -2,52 +2,10 @@
  * Production coach dependencies: Anthropic model, Postgres checkpointer on the
  * Supabase pooled URL, and the coach_usage / reference tables (migrations 0002, 0003).
  */
-import type { RunnableConfig } from '@langchain/core/runnables';
-import type { CheckpointListOptions } from '@langchain/langgraph-checkpoint';
-import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { anthropicModelFactory } from '../coach/agent.js';
+import { lazyAnthropicModelFactory } from '../coach/lazy-model.js';
 import { COACH_DAILY_LIMIT, COACH_MODEL, COACH_RECURSION_LIMIT, type CoachDeps, type CoachUsageRepo, type ReferenceClipRow, type ReferenceRepo, type ReferenceShotRow, type TemplateRow } from '../coach/deps.js';
-import { createPostgresPool } from './postgres.js';
-
-/**
- * PostgresSaver that runs `setup()` (creating its own tables) once, on first use.
- * A small pool: on serverless each instance keeps at most 2 connections to the pooler.
- */
-export class LazyPostgresSaver extends PostgresSaver {
-  private ready: Promise<void> | null = null;
-  private ensure() {
-    this.ready ??= this.setup().catch((err) => {
-      this.ready = null;
-      throw err;
-    });
-    return this.ready;
-  }
-  override async getTuple(config: RunnableConfig) {
-    await this.ensure();
-    return super.getTuple(config);
-  }
-  override async *list(config: RunnableConfig, options?: CheckpointListOptions) {
-    await this.ensure();
-    yield* super.list(config, options);
-  }
-  override async put(...args: Parameters<PostgresSaver['put']>) {
-    await this.ensure();
-    return super.put(...args);
-  }
-  override async putWrites(...args: Parameters<PostgresSaver['putWrites']>) {
-    await this.ensure();
-    return super.putWrites(...args);
-  }
-  override async deleteThread(threadId: string) {
-    await this.ensure();
-    return super.deleteThread(threadId);
-  }
-}
-
-export function createPostgresCheckpointer(url: string): LazyPostgresSaver {
-  return new LazyPostgresSaver(createPostgresPool(url));
-}
+import type { LazyPostgresSaver } from './checkpointer.js';
 
 function check<T>(res: { data: T; error: { message: string; code?: string } | null }, what: string): T {
   if (res.error) throw new Error(`${what}: ${res.error.message}${res.error.code ? ` (${res.error.code})` : ''}`);
@@ -191,10 +149,29 @@ export function missingCoachEnv(env: NodeJS.ProcessEnv): string[] {
 }
 
 export function createProductionCoach(env: NodeJS.ProcessEnv, db: SupabaseClient, references: ReferenceRepo): CoachDeps {
+  // The model and the Postgres checkpointer load on the first coach request (see CoachDeps.prepare).
+  const model = lazyAnthropicModelFactory(env.ANTHROPIC_API_KEY!);
+  let saver: LazyPostgresSaver | undefined;
+  let loading: Promise<void> | undefined;
   return {
-    createModel: anthropicModelFactory(env.ANTHROPIC_API_KEY!),
+    prepare() {
+      loading ??= Promise.all([model.prepare!(), import('./checkpointer.js')]).then(
+        ([, { createPostgresCheckpointer }]) => {
+          saver ??= createPostgresCheckpointer(env.POSTGRES_URL!);
+        },
+        (error) => {
+          loading = undefined;
+          throw error;
+        },
+      );
+      return loading;
+    },
+    createModel: model.createModel,
     modelName: COACH_MODEL,
-    checkpointer: createPostgresCheckpointer(env.POSTGRES_URL!),
+    get checkpointer() {
+      if (!saver) throw new Error('the coach checkpointer is not loaded yet: await prepare() first');
+      return saver;
+    },
     usage: createSupabaseUsageRepo(db),
     references,
     dailyLimit: Number(env.COACH_DAILY_LIMIT) || COACH_DAILY_LIMIT,

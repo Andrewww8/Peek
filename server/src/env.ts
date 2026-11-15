@@ -7,7 +7,7 @@ import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 import { buildApp } from './app.js';
 import { createLocalDeps } from './local/index.js';
 import { createProductionDeps } from './prod/index.js';
-import { anthropicModelFactory } from './coach/agent.js';
+import { lazyAnthropicModelFactory } from './coach/lazy-model.js';
 import { guestDailyLimitFromEnv } from './coach/deps.js';
 
 export const SERVER_ROOT = join(import.meta.dirname, '..');
@@ -19,10 +19,12 @@ export function isProduction(env: NodeJS.ProcessEnv): boolean {
 
 /** Local stand-ins; the coach uses the real Anthropic model only when ANTHROPIC_API_KEY is set. */
 export function localDepsFromEnv(env: NodeJS.ProcessEnv) {
+  const model = env.ANTHROPIC_API_KEY ? lazyAnthropicModelFactory(env.ANTHROPIC_API_KEY) : undefined;
   return createLocalDeps(env.LOCAL_DATA_DIR ?? join(SERVER_ROOT, '.local'), {
     jwtSecret: env.LOCAL_JWT_SECRET || DEFAULT_LOCAL_JWT_SECRET,
     cvToken: env.CV_SERVICE_TOKEN || undefined,
-    coachModel: env.ANTHROPIC_API_KEY ? anthropicModelFactory(env.ANTHROPIC_API_KEY) : undefined,
+    coachModel: model?.createModel,
+    coachModelPrepare: model?.prepare,
     guestDailyLimit: guestDailyLimitFromEnv(env.PEEK_GUEST_DAILY_LIMIT),
   });
 }

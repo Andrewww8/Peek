@@ -11,12 +11,24 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { AIMessage, HumanMessage, isAIMessage, isHumanMessage, type BaseMessage } from '@langchain/core/messages';
+import type { AIMessage, BaseMessage } from '@langchain/core/messages';
 import { ApiError } from '../clips.js';
 import type { ClipRepo } from '../deps.js';
-import { createCoachAgent, skillFiles, type CoachAgent } from './agent.js';
+import type { CoachAgent } from './agent.js';
 import { COACH_MAX_MESSAGE_CHARS, GUEST_LIMIT_MESSAGE, type CoachDeps, type GuestDailyLimit, type TurnUsage } from './deps.js';
-import { onDeviceShotSchema, toolStatus } from './tools.js';
+
+/**
+ * LangChain, deepagents and the coach's tools load on the first coach request, so a cold start
+ * that serves any other route does not pay for them.
+ */
+let runtime: Promise<[typeof import('./agent.js'), typeof import('./tools.js'), typeof import('@langchain/core/messages')]> | undefined;
+function loadRuntime() {
+  runtime ??= Promise.all([import('./agent.js'), import('./tools.js'), import('@langchain/core/messages')]).catch((error) => {
+    runtime = undefined;
+    throw error;
+  });
+  return runtime;
+}
 
 const threadId = (userId: string, sessionId: string) => `${userId}:${sessionId}`;
 const utcDay = () => new Date().toISOString().slice(0, 10);
@@ -37,7 +49,12 @@ const createdAtOf = (m: BaseMessage) => {
 export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; clips: ClipRepo; guestDailyLimit: GuestDailyLimit; sessionParam: (v: unknown) => string }) {
   const { coach, clips, guestDailyLimit, sessionParam } = opts;
   let agent: CoachAgent | null = null;
-  const getAgent = () => (agent ??= createCoachAgent(coach!, clips));
+  const getAgent = async (c: CoachDeps) => {
+    if (agent) return agent;
+    await c.prepare?.();
+    const [{ createCoachAgent }] = await loadRuntime();
+    return (agent ??= createCoachAgent(c, clips));
+  };
   const need = () => {
     if (!coach) throw new ApiError(503, 'not_configured', 'the AI coach is not configured');
     return coach;
@@ -45,6 +62,7 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
 
   app.post<{ Params: { sessionId: string } }>('/v1/sessions/:sessionId/coach/messages', async (req, reply) => {
     const c = need();
+    const [{ skillFiles }, { onDeviceShotSchema, toolStatus }, { HumanMessage, isAIMessage }] = await loadRuntime();
     const sessionId = sessionParam(req.params.sessionId);
     const body = req.body as { message?: unknown; onDeviceShot?: unknown } | null;
     const message = typeof body?.message === 'string' ? body.message.trim() : '';
@@ -70,7 +88,7 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
       configurable: { thread_id: threadId(userId, sessionId) },
       context: { userId, sessionId, onDeviceShot: localShot.data },
     };
-    const a = getAgent();
+    const a = await getAgent(c);
     reply.hijack();
     const res = reply.raw;
     res.writeHead(200, {
@@ -142,9 +160,10 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
   });
 
   app.get<{ Params: { sessionId: string } }>('/v1/sessions/:sessionId/coach/messages', async (req) => {
-    need();
+    const c = need();
+    const [, , { isAIMessage, isHumanMessage }] = await loadRuntime();
     const sessionId = sessionParam(req.params.sessionId);
-    const state: any = await getAgent().getState({ configurable: { thread_id: threadId(req.userId, sessionId) } } as any);
+    const state: any = await (await getAgent(c)).getState({ configurable: { thread_id: threadId(req.userId, sessionId) } } as any);
     const messages = ((state?.values as { messages?: BaseMessage[] } | undefined)?.messages ?? [])
       .filter((m) => isHumanMessage(m) || (isAIMessage(m) && !(m as AIMessage).tool_calls?.length && textOf(m)))
       .map((m) => ({ id: m.id ?? null, role: isHumanMessage(m) ? 'user' : 'assistant', text: textOf(m), createdAt: createdAtOf(m) }));
@@ -154,6 +173,7 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
   app.delete<{ Params: { sessionId: string } }>('/v1/sessions/:sessionId/coach', async (req, reply) => {
     const c = need();
     const sessionId = sessionParam(req.params.sessionId);
+    await c.prepare?.();
     await c.checkpointer.deleteThread(threadId(req.userId, sessionId));
     return reply.code(204).send();
   });

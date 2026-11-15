@@ -12,7 +12,7 @@ import { createFfmpegTrimmer } from '../ffmpeg.js';
 import { SUPABASE_AUDIENCE, createJwtVerifier } from '../jwt.js';
 import { createLocalBlobStore, type LocalBlobStore } from './blobStore.js';
 import { createLocalClipRepo } from './clipRepo.js';
-import { MemorySaver } from '@langchain/langgraph';
+import type { MemorySaver } from '@langchain/langgraph';
 import { COACH_DAILY_LIMIT, COACH_MODEL, COACH_RECURSION_LIMIT, type CoachDeps, type GuestDailyLimit } from '../coach/deps.js';
 import { createLocalReferenceRepo, createLocalUsageRepo } from './coachRepos.js';
 
@@ -33,6 +33,8 @@ export interface LocalDepsOptions {
    * Omitted: the coach answers 503 not_configured.
    */
   coachModel?: CoachDeps['createModel'];
+  /** Awaited before the coach first uses `coachModel` (a model factory that loads lazily). */
+  coachModelPrepare?: () => Promise<void>;
   coachDailyLimit?: number;
   guestDailyLimit?: GuestDailyLimit;
   coachRecursionLimit?: number;
@@ -57,10 +59,28 @@ export function createLocalDeps(dir: string, opts: LocalDepsOptions): LocalDeps 
   const blob = createLocalBlobStore(join(dir, 'blobs'), blobKey);
   const references = createLocalReferenceRepo(opts.inMemory ? undefined : join(dir, 'reference.json'));
   const usage = createLocalUsageRepo(opts.inMemory ? undefined : join(dir, 'coach_usage.json'));
+  // LangGraph's in-memory checkpointer loads on the first coach request (see CoachDeps.prepare).
+  let saver: MemorySaver | undefined;
+  let loading: Promise<void> | undefined;
   const coach: CoachDeps | undefined = opts.coachModel && {
+    prepare() {
+      loading ??= Promise.all([opts.coachModelPrepare?.(), import('@langchain/langgraph')]).then(
+        ([, { MemorySaver }]) => {
+          saver ??= new MemorySaver();
+        },
+        (error) => {
+          loading = undefined;
+          throw error;
+        },
+      );
+      return loading;
+    },
     createModel: opts.coachModel,
     modelName: COACH_MODEL,
-    checkpointer: new MemorySaver(),
+    get checkpointer() {
+      if (!saver) throw new Error('the coach checkpointer is not loaded yet: await prepare() first');
+      return saver;
+    },
     usage,
     references,
     dailyLimit: opts.coachDailyLimit ?? COACH_DAILY_LIMIT,

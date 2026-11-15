@@ -372,10 +372,11 @@ describe('coach and CV env', () => {
 
   test('with ANTHROPIC_API_KEY, POSTGRES_URL and CV_SERVICE_TOKEN the coach and the CV route are configured, without connecting', async () => {
     const { createProductionDeps } = await import('./prod/index.js');
-    const { LazyPostgresSaver } = await import('./prod/coach.js');
+    const { LazyPostgresSaver } = await import('./prod/checkpointer.js');
     const deps = createProductionDeps({ ...base, ANTHROPIC_API_KEY: 'sk-test', POSTGRES_URL: 'postgres://u:p@aws-0.pooler.supabase.com:6543/postgres?sslmode=require&supa=base-pooler.x', CV_SERVICE_TOKEN: 'cv' });
     assert.equal(deps.cvToken, 'cv');
     assert.ok(deps.coach);
+    await deps.coach.prepare?.(); // the coach's LangChain modules load on first use
     assert.equal(deps.coach.modelName, 'claude-sonnet-5-5');
     assert.ok(deps.coach.checkpointer instanceof LazyPostgresSaver);
     assert.equal(deps.coach.dailyLimit, 50);
