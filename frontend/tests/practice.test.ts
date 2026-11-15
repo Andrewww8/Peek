@@ -5,7 +5,7 @@ import test from 'node:test';
 
 import { clipTime, shotStats } from '../src/practice.ts';
 import { recoverRecordings, removeRecording, saveConfirmedRecording, saveRecording } from '../src/recordings.ts';
-import type { RecordingDraft } from '../src/recordings.ts';
+import type { FootageDecision, RecordingDraft } from '../src/recordings.ts';
 import { environment } from './fixture.ts';
 
 function draft(): RecordingDraft {
@@ -39,7 +39,7 @@ test('recovers a moved clip after a database write failure and app restart', (t)
   assert.throws(() => saveRecording(pending, files, {
     getSession: (id) => connection.store.getSession(id),
     saveSession: () => { throw new Error('disk busy'); },
-    clearVideo: (id) => connection.store.clearVideo(id),
+    isRecordingDiscarded: (id) => connection.store.isRecordingDiscarded(id),
   }), /disk busy/);
   assert.equal(connection.store.getSession(pending.id), null);
   assert.equal(files.listVideos().length, 1);
@@ -64,7 +64,7 @@ test('retries a completed practice save without moving the clip twice or duplica
       if (interrupted) throw new Error('write not completed');
       store.saveSession(session);
     },
-    clearVideo: (id: string) => store.clearVideo(id),
+    isRecordingDiscarded: (id: string) => store.isRecordingDiscarded(id),
   };
   assert.throws(() => saveRecording(pending, files, entries), /write not completed/);
   interrupted = false;
@@ -90,13 +90,13 @@ test('keeps unconfirmed footage outside saved sessions and accepts an explicitly
   const pending = draft();
   writeFileSync(path(pending.sourceUri), Buffer.alloc(pending.sizeBytes));
 
-  let answer!: (confirmed: boolean) => void;
-  const confirmation = new Promise<boolean>((resolve) => { answer = resolve; });
+  let answer!: (decision: FootageDecision) => void;
+  const confirmation = new Promise<FootageDecision>((resolve) => { answer = resolve; });
   const saving = saveConfirmedRecording(pending, files, connection.store, () => confirmation);
   assert.deepEqual(connection.store.listSessions(), []);
   assert.deepEqual(files.listVideos(), []);
   assert.equal(files.size(pending.sourceUri), pending.sizeBytes);
-  answer(false);
+  answer('discard');
   assert.equal(await saving, null);
   connection.close();
 
@@ -105,10 +105,37 @@ test('keeps unconfirmed footage outside saved sessions and accepts an explicitly
   assert.deepEqual(store.listSessions(), []);
   assert.deepEqual(files.listVideos(), []);
 
-  const saved = await saveConfirmedRecording(pending, files, store, async () => true);
+  assert.throws(() => saveRecording(pending, files, store), /discarded/);
+  const accepted = { ...pending, id: randomUUID() };
+  const saved = await saveConfirmedRecording(accepted, files, store, async () => 'save');
   assert.ok(saved?.videoPath);
   assert.equal(files.size(saved.videoPath), pending.sizeBytes);
   assert.deepEqual(store.listSessions(), [saved]);
+});
+
+test('discards the exact saved row and prevents recovery when its video cannot be removed', async (t) => {
+  const { open, files, path } = environment(t);
+  const connection = open();
+  const pending = draft();
+  const other = { ...draft(), sourceUri: 'another.mov' };
+  for (const item of [pending, other]) writeFileSync(path(item.sourceUri), Buffer.alloc(item.sizeBytes));
+  const persisted = saveRecording(pending, files, connection.store);
+  const kept = saveRecording(other, files, connection.store);
+  assert.ok(persisted.videoPath);
+
+  const unavailableFiles = { ...files, remove: () => { throw new Error('File is busy'); } };
+  assert.equal(await saveConfirmedRecording(pending, unavailableFiles, connection.store, async () => 'discard'), null);
+  assert.equal(connection.store.getSession(pending.id), null);
+  assert.ok(files.size(persisted.videoPath));
+  connection.close();
+
+  const { store } = open();
+  store.saveSession(persisted);
+  recoverRecordings(unavailableFiles, store);
+  assert.deepEqual(store.listSessions(), [kept]);
+  recoverRecordings(files, store);
+  assert.equal(files.size(persisted.videoPath), 0);
+  assert.deepEqual(store.listSessions(), [kept]);
 });
 
 test('stores ordered release timestamps, recomputes after edits, and keeps stats after removing video', (t) => {

@@ -76,7 +76,11 @@ const shootingHandSchema = `
   ALTER TABLE sessions ADD COLUMN shooting_hand TEXT CHECK (shooting_hand IN ('left', 'right'));
 `;
 
-const SCHEMA_VERSION = 4;
+const discardedRecordingSchema = `
+  CREATE TABLE discarded_recordings (id TEXT PRIMARY KEY NOT NULL);
+`;
+
+const SCHEMA_VERSION = 5;
 
 export class PracticeStore {
   private db: PracticeDatabase;
@@ -94,7 +98,8 @@ export class PracticeStore {
         if (version < 1) db.execSync(schema);
         if (version < 2) db.execSync(cloudSchema);
         if (version < 3) db.execSync(cloudIssueSchema);
-        db.execSync(shootingHandSchema);
+        if (version < 4) db.execSync(shootingHandSchema);
+        db.execSync(discardedRecordingSchema);
         db.execSync(`PRAGMA user_version = ${SCHEMA_VERSION}; COMMIT;`);
       } catch (error) {
         db.execSync('ROLLBACK;');
@@ -162,10 +167,27 @@ export class PracticeStore {
   saveSession(session: Session, cloudUserId: string | null = null) {
     this.db.runSync(
       `INSERT INTO sessions (id, created_at, shot_type, video_path, duration_ms, size_bytes, cloud_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+       SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM discarded_recordings WHERE id = ?)
+       ON CONFLICT(id) DO NOTHING`,
       session.id, session.createdAt, session.shotType, session.videoPath,
-      session.durationMs, session.sizeBytes, cloudUserId,
+      session.durationMs, session.sizeBytes, cloudUserId, session.id,
     );
+  }
+
+  isRecordingDiscarded(id: string) {
+    return !!this.db.getFirstSync('SELECT 1 FROM discarded_recordings WHERE id = ?', id);
+  }
+
+  discardSession(id: string) {
+    this.db.execSync('BEGIN IMMEDIATE;');
+    try {
+      this.db.runSync('INSERT INTO discarded_recordings (id) VALUES (?) ON CONFLICT(id) DO NOTHING', id);
+      this.db.runSync('DELETE FROM sessions WHERE id = ?', id);
+      this.db.execSync('COMMIT;');
+    } catch (error) {
+      this.db.execSync('ROLLBACK;');
+      throw error;
+    }
   }
 
   clearVideo(id: string) {

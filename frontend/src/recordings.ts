@@ -11,6 +11,8 @@ export type RecordingDraft = Omit<Session, 'shotType' | 'videoPath'> & {
   extension: string;
 };
 
+export type FootageDecision = 'save' | 'discard';
+
 type RecordingFiles = {
   listVideos(): string[];
   size(location: string): number;
@@ -21,7 +23,7 @@ type RecordingFiles = {
 type Sessions = {
   getSession(id: string): Session | null;
   saveSession(session: Session, cloudUserId?: string | null): void;
-  clearVideo(id: string): void;
+  isRecordingDiscarded(id: string): boolean;
 };
 
 function recordingPath(draft: RecordingDraft) {
@@ -31,6 +33,7 @@ function recordingPath(draft: RecordingDraft) {
 }
 
 export function saveRecording(draft: RecordingDraft, files: RecordingFiles, sessions: Sessions, cloudUserId: string | null = null) {
+  if (sessions.isRecordingDiscarded(draft.id)) throw new Error('This recording was discarded.');
   const existing = sessions.getSession(draft.id);
   if (existing) return existing;
 
@@ -50,15 +53,23 @@ export function saveRecording(draft: RecordingDraft, files: RecordingFiles, sess
     sizeBytes: draft.sizeBytes,
   };
   sessions.saveSession(session, cloudUserId);
-  return session;
+  const saved = sessions.getSession(draft.id);
+  if (!saved) throw new Error('This recording could not be saved.');
+  return saved;
+}
+
+function removeDiscardedFile(path: string, files: RecordingFiles) {
+  try { files.remove(path); } catch { /* Recovery retries cleanup for discarded recording IDs. */ }
 }
 
 export async function saveConfirmedRecording(
-  draft: RecordingDraft, files: RecordingFiles, sessions: Sessions,
-  confirm: () => Promise<boolean>, cloudUserId: string | null = null,
+  draft: RecordingDraft, files: RecordingFiles, sessions: Sessions & { discardSession(id: string): void },
+  confirm: () => Promise<FootageDecision>, cloudUserId: string | null = null,
 ) {
-  if (!await confirm()) return null;
-  return saveRecording(draft, files, sessions, cloudUserId);
+  if (await confirm() === 'save') return saveRecording(draft, files, sessions, cloudUserId);
+  sessions.discardSession(draft.id);
+  removeDiscardedFile(recordingPath(draft), files);
+  return null;
 }
 
 export function recoverRecordings(files: RecordingFiles, sessions: Sessions) {
@@ -67,9 +78,13 @@ export function recoverRecordings(files: RecordingFiles, sessions: Sessions) {
     if (!match) continue;
 
     const [, id, createdAt, durationMs] = match;
-    if (!id || !createdAt || !durationMs || sessions.getSession(id)) continue;
-
+    if (!id || !createdAt || !durationMs) continue;
     const videoPath = `${videoDirectory}/${filename}`;
+    if (sessions.isRecordingDiscarded(id)) {
+      removeDiscardedFile(videoPath, files);
+      continue;
+    }
+    if (sessions.getSession(id)) continue;
     const sizeBytes = files.size(videoPath);
     const date = Number(createdAt);
     const duration = Number(durationMs);
@@ -82,7 +97,7 @@ export function recoverRecordings(files: RecordingFiles, sessions: Sessions) {
   }
 }
 
-export function removeRecording(session: Session, files: RecordingFiles, sessions: Sessions) {
+export function removeRecording(session: Session, files: RecordingFiles, sessions: { clearVideo(id: string): void }) {
   if (session.videoPath) files.remove(session.videoPath);
   sessions.clearVideo(session.id);
 }

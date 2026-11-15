@@ -13,12 +13,12 @@ import { clipTime, RECORD_LIMIT_SECONDS, RECORD_MAX_BYTES } from './practice';
 import type { Session } from './practice';
 import { confirmRecordingFootage } from './recording-review';
 import { RECORDING_FREE_BYTES, saveConfirmedRecording } from './recordings';
-import type { RecordingDraft } from './recordings';
+import type { FootageDecision, RecordingDraft } from './recordings';
 import { RecordingSaveProgress } from './ShotAnalysisProgress';
 import { Button, colors, gradients, IconButton, Loading, message, Notice, ui } from './ui';
 
 type Phase = 'idle' | 'starting' | 'recording' | 'stopping' | 'checking' | 'saving' | 'saveFailed';
-type PendingClip = { uri: string; id: string; createdAt: number; cloudUserId: string | null; draft?: RecordingDraft; accepted?: boolean };
+type PendingClip = { uri: string; id: string; createdAt: number; cloudUserId: string | null; draft?: RecordingDraft; decision?: FootageDecision };
 
 export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
   store: PracticeStore;
@@ -78,14 +78,14 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
   async function savePending() {
     const clip = pending.current;
     if (!clip || currentPhase.current === 'checking' || currentPhase.current === 'saving') return;
-    transition(clip.accepted ? 'saving' : 'checking');
+    transition(clip.decision === 'save' ? 'saving' : 'checking');
     setNotice(undefined);
     try {
       clip.draft ??= await inspectRecording(clip.uri, clip.id, clip.createdAt);
       const session = await saveConfirmedRecording(clip.draft, recordingFiles, store, async () => {
-        clip.accepted ??= await confirmRecordingFootage(clip.uri);
-        if (clip.accepted) transition('saving');
-        return clip.accepted;
+        clip.decision ??= await confirmRecordingFootage(clip.uri);
+        if (clip.decision === 'save') transition('saving');
+        return clip.decision;
       }, clip.cloudUserId);
       pending.current = null;
       if (!session) {
@@ -98,7 +98,7 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
       }
       onSaved(session);
     } catch (error) {
-      setNotice(message(error, 'The clip could not be saved.'));
+      setNotice(message(error, clip.decision === 'discard' ? 'The discard could not be completed.' : 'The clip could not be saved.'));
       transition('saveFailed');
     }
   }
@@ -244,7 +244,7 @@ export function RecordScreen({ store, cloudUserId, onBack, onSaved }: {
         {phase === 'stopping' ? <Loading text="Finishing recording…" /> : null}
         {phase === 'checking' ? <RecordingSaveProgress label="Checking for a shot…" /> : null}
         {phase === 'saving' ? <RecordingSaveProgress /> : null}
-        {phase === 'saveFailed' ? <Button label="Retry save" onPress={savePending} /> : null}
+        {phase === 'saveFailed' ? <Button label={pending.current?.decision === 'discard' ? 'Retry discard' : 'Retry save'} onPress={savePending} /> : null}
       </View>
     </View>
   );

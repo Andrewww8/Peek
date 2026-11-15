@@ -134,12 +134,15 @@ export function ClipPicker({ store, userId, onSelect, onImported, onCancel }: {
       if (draft.durationMs > RECORD_LIMIT_SECONDS * 1000) throw new Error('Choose a video up to 30 seconds long.');
       setPhase('checking');
       const saved = await saveConfirmedRecording(draft, recordingFiles, store, async () => {
-        if (!await confirmRecordingFootage(draft.sourceUri)) return false;
-        saving = true;
-        setPhase('saving');
-        return true;
+        const decision = await confirmRecordingFootage(draft.sourceUri);
+        if (decision === 'save') {
+          saving = true;
+          setPhase('saving');
+        }
+        return decision;
       }, userId);
       if (saved) onImported(saved);
+      else setNotice('Video discarded.');
     } catch (error) {
       setNotice(message(error, 'The video could not be imported.'));
     } finally {
