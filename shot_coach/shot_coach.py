@@ -1023,9 +1023,9 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
  const LEN={uarm:0.313*S.scale.uarm.z,larm:0.254*S.scale.larm.z,thigh:Lth,shank:Lsh},M4=new THREE.Matrix4();
  const quat=(x,y,z)=>new THREE.Quaternion().setFromRotationMatrix(M4.makeBasis(x,y,z)),perp=(h,z,alt)=>{const x=h.clone().addScaledVector(z,-h.dot(z));if(x.lengthSq()<1e-4)x.copy(alt).addScaledVector(z,-alt.dot(z));return x.normalize()};
  const bone=(down,hint,alt)=>{const z=down.clone().negate(),x=perp(hint,z,alt),y=V().crossVectors(z,x);return{x,y,z,q:quat(x,y,z)}};
- // wrist flick of the shooting (right) hand: how far the fingertip is bent forward-and-down from the forearm line (+) or cocked back (-), smoothed over time
- const flick=[];for(let i=S.v0;i<=S.v1;i++){const J=all[i],e=S.ext[i];flick[i]=null;if(!e)continue;const tip=W(e[1],i);
-  const f=V().subVectors(J[16],J[15]).normalize(),dd=tip.sub(J[16]).normalize(),fw=V().crossVectors(V().subVectors(J[8],J[0]).normalize(),V().subVectors(J[1],J[4]).normalize()).normalize();
+ // wrist flick of the shooting hand: how far the fingertip is bent forward-and-down from the forearm line (+) or cocked back (-), smoothed over time
+ const SH=S.hand==='L'?{s:'l',tip:0,el:12,wr:13}:{s:'r',tip:1,el:15,wr:16},flick=[];for(let i=S.v0;i<=S.v1;i++){const J=all[i],e=S.ext[i];flick[i]=null;if(!e)continue;const tip=W(e[SH.tip],i);
+  const f=V().subVectors(J[SH.wr],J[SH.el]).normalize(),dd=tip.sub(J[SH.wr]).normalize(),fw=V().crossVectors(V().subVectors(J[8],J[0]).normalize(),V().subVectors(J[1],J[4]).normalize()).normalize();
   const n=perp(fw.add(V(0,0,-0.5)),f,V(0,0,-1));flick[i]=Math.max(-1.3,Math.min(1.3,Math.atan2(dd.dot(n),dd.dot(f))))}
  for(let i=S.v0,last=0;i<=S.v1;i++){if(flick[i]===null)flick[i]=last;last=flick[i]}
  const sm=flick.slice();for(let i=S.v0;i<=S.v1;i++){let a=0,w=0;for(let k=-2;k<=2;k++){const j=i+k;if(j>=S.v0&&j<=S.v1){const ww=3-Math.abs(k);a+=flick[j]*ww;w+=ww}}sm[i]=a/w}
@@ -1036,7 +1036,7 @@ function solve(S){const V=(x,y,z)=>new THREE.Vector3(x,y,z),all=[];
   F.torso={p:T0,q:tq};F.head={p:T0.clone().addScaledVector(tz,TR.neck*g).addScaledVector(ty,TR.headFwd*g),q:tq};
   for(const[s,sg,sh,el,wr]of[['r',1,14,15,16],['l',-1,11,12,13]]){const P=T0.clone().addScaledVector(tx,sg*TR.shX*st).addScaledVector(tz,TR.shZ*st).addScaledVector(ty,TR.shY*st);
    const u=bone(dir(sh,el),prev[s+'u']||tx,ty);prev[s+'u']=u.x;F[s+'_uarm']={p:P,q:u.q};const E=P.clone().addScaledVector(u.z,-LEN.uarm);
-   const l=bone(dir(el,wr),prev[s+'l']||u.x,u.y);prev[s+'l']=l.x;F[s+'_larm']={p:E,q:l.q};let hz=l.z;if(s==='r'){const f=l.z.clone().negate(),n=perp(ty.clone().add(V(0,0,-0.5)),f,V(0,0,-1));hz=f.multiplyScalar(Math.cos(sm[i])).addScaledVector(n,Math.sin(sm[i])).normalize().negate()}
+   const l=bone(dir(el,wr),prev[s+'l']||u.x,u.y);prev[s+'l']=l.x;F[s+'_larm']={p:E,q:l.q};let hz=l.z;if(s===SH.s){const f=l.z.clone().negate(),n=perp(ty.clone().add(V(0,0,-0.5)),f,V(0,0,-1));hz=f.multiplyScalar(Math.cos(sm[i])).addScaledVector(n,Math.sin(sm[i])).normalize().negate()}
    F[s+'_hand']={p:E.clone().addScaledVector(l.z,-LEN.larm),z:hz,x:l.x}}
   for(const[s,o]of[['r','l'],['l','r']]){const h=F[s+'_hand'],m=V().subVectors(F[o+'_hand'].p,h.p);m.addScaledVector(h.z,-m.dot(h.z));   // palms face each other
    const y=m.length()>0.06?m.normalize():(prev[s+'h']?perp(prev[s+'h'],h.z,h.x):h.x.clone().multiplyScalar(s==='r'?-1:1));prev[s+'h']=y;h.q=quat(V().crossVectors(y,h.z),y,h.z)}
@@ -1093,17 +1093,14 @@ def write_viewer(path, p, ext, rise, r, hand, ref, player, stype, res, shot):
             return out
         p, ext, rise = shift(p), shift(ext), shift(rise)
     rise = np.nan_to_num(rise)
-    if hand == "L":                                                        # mirror a left-handed shooter so both shoot with the same hand
-        p[..., 0] *= -1; p = p[:, [0, 4, 5, 6, 1, 2, 3, 7, 8, 9, 10, 14, 15, 16, 11, 12, 13]]
-        ext[..., 0] *= -1; ext = ext[:, [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10]]
     Rm = canon_rot(p[18:31]); p, ext = p @ Rm.T, ext @ Rm.T
     lst = lambda x: [None if np.isnan(f).any() else np.round(f, 3).tolist() for f in x]
     kind = "three" if stype == "three" else "mid-range"
     with open(os.path.join(ROOT, "assets", "skeleton.glb"), "rb") as fh:
         glb = base64.b64encode(fh.read()).decode()
     h = PLAYER_HEIGHT_CM.get(player, 193) / 100                                            # both skeletons are drawn at the player's height
-    data = dict(you=dict(label="You, " + shot["name"] + (" (mirrored)" if hand == "L" else ""), pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist(), height=h),
-                player=dict(label=f"{player}, average {kind} shot" + (" (mirrored)" if avg.get("hand") == "L" else ""), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"], height=h), glb=glb)
+    data = dict(you=dict(label="You, " + shot["name"], hand=hand, pose=lst(p), ext=lst(ext), rise=np.round(rise, 3).tolist(), height=h),
+                player=dict(label=f"{player}, average {kind} shot", hand=avg.get("hand", "R"), pose=avg["pose"], ext=avg["ext"], rise=avg["rise"], height=h), glb=glb)
     with open(path, "w") as fh:
         fh.write(VIEWER_HTML.replace("__TITLE__", f"You vs {player}").replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
     return True

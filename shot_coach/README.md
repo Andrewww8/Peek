@@ -61,7 +61,7 @@ All in `outputs/`:
 - The same name with `.html`: the 3D viewer. Your skeleton (grey) is overlaid on the player's average shot (orange), with you scaled to the player's height, both facing the same way and lined up at the release.
   - `similar` shows you against the closest player; `difference` shows you against the player you chose.
   - Drag to rotate, scroll to zoom, space to play or pause, arrow keys to step a frame. The dashed line on the bar is the release.
-  - A left-handed shooter is mirrored so both skeletons shoot with the same hand; the legend says so.
+  - Each skeleton shoots with its real hand, so a left-hander against a right-hander will not line up arm for arm.
 - `<video name>.mp4`: only with `--clip`.
 
 The report is also printed.
