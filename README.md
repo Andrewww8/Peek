@@ -18,7 +18,7 @@ For a rehearsal that relaunches offline with the JavaScript bundle embedded, ins
 
 Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
 
-Open **NBA comparison** from the menu and choose a tagged shot. You can also tap **Compare your shot vs NBA** near the top of a saved clip’s **Session details**. Tap **Analyze as guest** to estimate the shot’s 3D body pose from the saved video directly on an iPhone running iOS 17 or later. Tap **Analyze this shot** if you’re signed in and the recording still needs cloud analysis. The shots play together when the comparison opens. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session. **3D example → Compare two NBA examples** works without a recording.
+Open a session in **Saved Clips** and tap **Compare your shot vs NBA** near the top of **Session details**. When there are several tags, choose the shot you want. For a session without tags, mark the release of a shot in its video. Tap **Analyze as guest** to estimate the shot’s 3D body pose from the saved video directly on an iPhone running iOS 17 or later. Tap **Analyze this shot** if you’re signed in and the recording still needs cloud analysis. The shots play together when the comparison opens. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session.
 
 ## Connect Vercel and Supabase
 
@@ -40,7 +40,7 @@ Rebuild the iOS app after changing build-time values. If upgrading an existing l
 
 In Vercel, set the project root to `server/` and deploy `main`. Apply the SQL files in [server/supabase/migrations](server/supabase/migrations) in numeric order. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `BLOB_READ_WRITE_TOKEN` on Vercel. Vercel OIDC with `BLOB_STORE_ID` also works for private Blob. Set `SUPABASE_JWT_SECRET` only if the project still signs access tokens with the legacy HS256 secret.
 
-The app requests the public `GET /v1/demos?shotType=three_point` catalog and opens downloaded USDZs in Quick Look. Recording, manual tags, replay, and downloaded models work when signed out. For recordings made and tagged while signed in, the app queues shot clips in SQLite. It sends a Supabase bearer token to the API to request an upload grant, uploads the recording directly to private Blob storage with that grant, and asks the API to cut clips. New tags and edited outcomes sync while the app is active. Signing out pauses that account’s pending work. The server removes the full recording from Blob after it cuts the requested clips. Existing and guest practice stays on the phone. [Cloud API contract](PROJECT_CONTEXT.md#authenticated-endpoints-shot-clips)
+Recording, manual tags, replay, and guest comparisons work when signed out. For recordings made and tagged while signed in, the app queues shot clips in SQLite. It sends a Supabase bearer token to the API to request an upload grant, uploads the recording directly to private Blob storage with that grant, and asks the API to cut clips. New tags and edited outcomes sync while the app is active. Signing out pauses that account’s pending work. The server removes the full recording from Blob after it cuts the requested clips. Existing and guest practice stays on the phone. [Cloud API contract](PROJECT_CONTEXT.md#authenticated-endpoints-shot-clips)
 
 For Coach chat, set `ANTHROPIC_API_KEY` and the Supabase pooled database URL `POSTGRES_URL` in Vercel. To seed the pro comparison templates, load the server environment locally and run `PERSPECTIVE_DEPS=production npm run reference-templates-ingest -w server` from the root. In the app, sign in and attach a recording in Coach or tap **Ask Coach** from its session. Mark a shot at release in replay so it can sync. Check pose analysis in the session before asking about shot mechanics.
 
@@ -84,9 +84,9 @@ npm run test:integration
 
 ## Rehearse on the demo iPhone
 
-1. Install a signed Release build and open Practice on a physical iPhone.
-2. Download the animated reference pose and open it in Quick Look while online. If the phone has the old model, select **Check for update**, then **Download update**. The bundled v2 USDZ is a stick figure animated from the averaged Curry three-point pose in `server/reference-data/average-shots/`.
-3. Record a clip, scrub it at 0.5×, and tag made and missed shots. Force quit, disable both Wi-Fi and cellular data, and reopen the clip, its stats, and the downloaded model.
+1. Install a signed Release build and continue as a guest on a physical iPhone.
+2. Record a clip and tag each shot at the release. Open that session from **Saved Clips**, tap **Compare your shot vs NBA**, choose a shot, and tap **Analyze as guest**.
+3. Watch the white skeleton and the NBA skeleton play side by side. Change the reference player and tap **View in AR** to open both named skeletons in Quick Look. Quit Peek, disable Wi-Fi and cellular data, and reopen the saved comparison.
 4. For the cloud portion, sign in with a confirmed test account, record and tag a shot, and leave the app open to sync. Check **Shot analysis** in Replay, then open the session from **Coach** and ask about follow-through. Use a second test account to verify that clips and chat history are isolated.
 
 ## Preview a pose track

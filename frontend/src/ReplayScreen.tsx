@@ -80,10 +80,8 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
       <ScreenHeader backLabel={backLabel} detail="ON THIS IPHONE" onBack={onBack} />
       <Page style={styles.page}>
         <Title title="Session details" subtitle={DRILL_NAME} />
-        {shots.length > 0 ? (
-          <Button label={onlyShot ? `Compare shot ${onlyShot.shotNumber} vs NBA` : 'Compare your shot vs NBA'} arrow
-            onPress={() => onlyShot ? onCompare(onlyShot.shotNumber) : setChoosingShot(true)} />
-        ) : null}
+        <Button label={onlyShot ? `Compare shot ${onlyShot.shotNumber} vs NBA` : 'Compare your shot vs NBA'} arrow
+          onPress={() => onlyShot ? onCompare(onlyShot.shotNumber) : setChoosingShot(true)} />
         {video ? (
           <ReplayPlayer uri={video} durationMs={session.durationMs} stats={stats} shots={shots} onTag={tag} />
         ) : (
@@ -144,17 +142,29 @@ export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId,
         ) : null}
       </Page>
       <Sheet visible={choosingShot} onClose={() => setChoosingShot(false)}>
-        <Title title="Choose a shot" size={26} />
-        <ScrollView style={styles.shotPicker} contentContainerStyle={styles.shotPickerList}>
-          {shots.map(({ shotNumber, releaseMs }) => (
-            <Button key={shotNumber} label={`Shot ${shotNumber} · ${clipTime(releaseMs, true)}`} kind="secondary" arrow
-              onPress={() => {
-                setChoosingShot(false);
-                onCompare(shotNumber);
-              }} />
-          ))}
-        </ScrollView>
-        <Button label="Cancel" kind="secondary" onPress={() => setChoosingShot(false)} />
+        {shots.length ? (
+          <>
+            <Title title="Choose a shot" size={26} />
+            <ScrollView style={styles.shotPicker} contentContainerStyle={styles.shotPickerList}>
+              {shots.map(({ shotNumber, releaseMs }) => (
+                <Button key={shotNumber} label={`Shot ${shotNumber} · ${clipTime(releaseMs, true)}`} kind="secondary" arrow
+                  onPress={() => {
+                    setChoosingShot(false);
+                    onCompare(shotNumber);
+                  }} />
+              ))}
+            </ScrollView>
+            <Button label="Cancel" kind="secondary" onPress={() => setChoosingShot(false)} />
+          </>
+        ) : (
+          <>
+            <Title title="Tag a shot first" size={26} />
+            <Text style={ui.body}>{video
+              ? 'Pause when the ball leaves your hand. Tap Made, Missed, or Unmarked to tag the shot.'
+              : 'Open a saved recording to tag a shot and compare it.'}</Text>
+            <Button label={video ? 'Back to video' : 'Back to session'} onPress={() => setChoosingShot(false)} />
+          </>
+        )}
       </Sheet>
       <Sheet visible={removing} onClose={() => setRemoving(false)}>
         <Title title="Remove video?" size={33} />

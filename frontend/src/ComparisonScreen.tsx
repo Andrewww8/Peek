@@ -13,7 +13,6 @@ import { localVideoUri } from './device-storage';
 import { analyzeGuestShot, hasOnDeviceAnalysis, readGuestPose } from './guest-pose';
 import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow, slicePose } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
-import { clipTime, sessionTime } from './practice';
 import { Button, Chip, colors, gradients, Loading, message, Notice, Page, Panel, ScreenHeader, Sheet, Title, ui } from './ui';
 
 type Reference = { player: string; shotsAveraged: number; pose: Pose };
@@ -24,7 +23,6 @@ const references: Reference[] = require('../assets/peek-nba-poses.json');
 const nameAtlas: NameAtlas = require('../assets/peek-ar-name-atlas.json');
 const nameAtlasImage: number = require('../assets/peek-ar-name-atlas.png');
 const preferred = references.find(({ player }) => player === 'Stephen Curry') ?? references[0]!;
-const example = references.find(({ player }) => player === 'Damian Lillard') ?? references[1]!;
 
 async function loadShotPose(shot: ComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
   const { sessionId, shotNumber } = shot;
@@ -43,38 +41,6 @@ async function loadShotPose(shot: ComparisonShot, userId: string, syncing: boole
     throw new Error('This shot could not be lined up with the three-point reference.');
   }
   return pose;
-}
-
-export function ComparisonShotPicker({ store, backLabel, onBack, onSelect, onBrowseClips }: Navigation & {
-  store: PracticeStore;
-  onSelect: (shot: ComparisonShot) => void;
-  onBrowseClips: () => void;
-}) {
-  const sessions = store.listSessions().flatMap((session) => {
-    const shots = store.listShots(session.id);
-    return shots.length ? [{ session, shots }] : [];
-  });
-  return (
-    <>
-      <ScreenHeader backLabel={backLabel} detail="NBA COMPARISON" onBack={onBack} />
-      <Page>
-        <Title title="Choose your shot" subtitle="Select a tagged shot to compare with an NBA player." />
-        {sessions.map(({ session, shots }) => (
-          <Panel key={session.id}>
-            <Text accessibilityRole="header" style={ui.title}>{sessionTime(session.createdAt)}</Text>
-            {shots.map(({ shotNumber, releaseMs }) => (
-              <Button key={shotNumber} label={`Shot ${shotNumber} · ${clipTime(releaseMs, true)}`} kind="secondary" arrow
-                onPress={() => onSelect({ sessionId: session.id, shotNumber })} />
-            ))}
-          </Panel>
-        ))}
-        {!sessions.length ? (
-          <Panel><Text style={ui.body}>Tag a release in a saved clip to compare your shot.</Text></Panel>
-        ) : null}
-        <Button label="Open Saved Clips" kind="secondary" arrow onPress={onBrowseClips} />
-      </Page>
-    </>
-  );
 }
 
 type ComparisonProps = Navigation & {
@@ -245,28 +211,15 @@ function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, ba
   );
 }
 
-export function ComparisonExample({ backLabel, onBack, onChooseShot }: Navigation & { onChooseShot: () => void }) {
-  return (
-    <>
-      <ScreenHeader backLabel={backLabel} detail="3D EXAMPLE" onBack={onBack} />
-      <Page>
-        <Title title="NBA comparison example" subtitle="Two NBA reference shots" />
-        <PoseComparison playerPose={example.pose} playerLabel={example.player} sample={example} />
-        <Button label="Choose your shot" kind="secondary" arrow onPress={onChooseShot} />
-      </Page>
-    </>
-  );
-}
-
-function PoseComparison({ playerPose: fullPose, playerLabel, sample }: {
-  playerPose: Pose; playerLabel: string; sample?: Reference;
+function PoseComparison({ playerPose: fullPose, playerLabel }: {
+  playerPose: Pose; playerLabel: string;
 }) {
   const [reference, setReference] = useState(preferred);
-  const [firstFrame, lastFrame] = useMemo(() => sample ? [0, fullPose.frameCount - 1] : shotMotionWindow(fullPose), [fullPose, sample]);
+  const [firstFrame, lastFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
   const playerPose = useMemo(() => slicePose(fullPose, firstFrame, lastFrame), [fullPose, firstFrame, lastFrame]);
   const referencePose = useMemo(() => slicePose(reference.pose, firstFrame, lastFrame), [reference, firstFrame, lastFrame]);
   const [frame, setFrame] = useState(0);
-  const [playing, setPlaying] = useState(!sample && playerPose.frameCount > 1);
+  const [playing, setPlaying] = useState(playerPose.frameCount > 1);
   const [angle, setAngle] = useState(0.55);
   const [openingAR, setOpeningAR] = useState(false);
   const [arNotice, setArNotice] = useState<string>();
@@ -318,7 +271,6 @@ function PoseComparison({ playerPose: fullPose, playerLabel, sample }: {
     opening.current = true;
     setOpeningAR(true);
     setArNotice(undefined);
-    setPlaying(false);
     let asset: File | undefined;
     let opened = false;
     try {
@@ -348,12 +300,10 @@ function PoseComparison({ playerPose: fullPose, playerLabel, sample }: {
   }
 
   const frameDeltaMs = Math.round((frame - playerPose.releaseIndex) * 1000 / playerPose.fps);
-  const chosenReference = references.filter(({ player }) => player !== sample?.player);
-
   return (
     <>
       <View style={styles.stageRow} {...rotate.panHandlers}>
-        <PosePanel label={playerLabel} detail={sample ? averageLabel(sample) : handLabel(playerPose)}
+        <PosePanel label={playerLabel} detail={handLabel(playerPose)}
           pose={playerPose} frame={frame} angle={angle} tint={colors.white} />
         <PosePanel label={reference.player} detail={averageLabel(reference)}
           pose={referencePose} frame={frame} angle={angle} tint="#ffca0a" />
@@ -398,7 +348,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel, sample }: {
       <Sheet visible={picker} onClose={() => setPicker(false)}>
         <Title title="Change NBA player" size={26} />
         <ScrollView style={styles.pickerList} contentContainerStyle={styles.players}>
-          {chosenReference.map((item) => (
+          {references.map((item) => (
             <Button key={item.player} label={item.player} kind="secondary"
               icon={item.player === reference.player ? 'check' : undefined}
               selected={item.player === reference.player} onPress={() => {

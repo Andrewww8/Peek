@@ -22,10 +22,9 @@ import type { EntryMode } from './AccountScreen';
 import { accountName, loadRecentChats, passwordRecoveryCode, rememberAccount, saveRecentChats, startGuestSession, storedSession, supabase } from './auth';
 import type { RecentChat } from './coach';
 import { CoachScreen } from './CoachScreen';
-import { ComparisonExample, ComparisonScreen, ComparisonShotPicker } from './ComparisonScreen';
+import { ComparisonScreen } from './ComparisonScreen';
 import type { ComparisonShot } from './ComparisonScreen';
 import type { PracticeStore } from './database';
-import { DemoScreen } from './DemoScreen';
 import { loadPractice } from './device-storage';
 import { ClipPicker, SavedClips } from './LibraryScreen';
 import { Splash } from './PeekMotion';
@@ -41,8 +40,6 @@ type Route =
   | { screen: 'welcome' | 'coach' | 'saved' | 'account' | 'switch' | 'picker' }
   | { screen: 'record'; from: 'coach' | 'saved' }
   | { screen: 'replay'; sessionId: string; backLabel: string }
-  | { screen: 'demo'; backLabel: string }
-  | { screen: 'compare-picker' | 'compare-example'; backLabel: string }
   | { screen: 'compare'; backLabel: string; shot: ComparisonShot }
   | { screen: 'auth'; mode: EntryMode; email?: string; recoveryError?: string; switching?: boolean; fromCoach?: boolean };
 
@@ -274,11 +271,6 @@ function PracticeApp({ store }: { store: PracticeStore }) {
     push({ screen: 'replay', sessionId: clip.id, backLabel });
   }
 
-  function chooseComparisonShot() {
-    if (stack.at(-2)?.screen === 'compare-picker') back();
-    else push({ screen: 'compare-picker', backLabel: 'Back' });
-  }
-
   const openMenu = () => setMenu(true);
   let content: React.ReactNode;
   switch (currentRoute.screen) {
@@ -337,23 +329,11 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       ) : <Page><Notice>This session is no longer available.</Notice><Button label="Back" onPress={back} /></Page>;
       break;
     }
-    case 'demo':
-      content = <DemoScreen store={store} backLabel={currentRoute.backLabel} onBack={back}
-        onCompare={() => push({ screen: 'compare-example', backLabel: '3D example' })} />;
-      break;
-    case 'compare-picker':
-      content = <ComparisonShotPicker store={store} backLabel={currentRoute.backLabel} onBack={back}
-        onSelect={(shot) => push({ screen: 'compare', backLabel: 'Choose shot', shot })}
-        onBrowseClips={() => go({ screen: 'saved' })} />;
-      break;
-    case 'compare-example':
-      content = <ComparisonExample backLabel={currentRoute.backLabel} onBack={back} onChooseShot={chooseComparisonShot} />;
-      break;
     case 'compare':
       content = <ComparisonScreen key={`${currentRoute.shot.sessionId}:${currentRoute.shot.shotNumber}`}
         backLabel={currentRoute.backLabel} onBack={back} shot={currentRoute.shot} store={store} userId={cloudUserId} isGuest={!playerSession}
         playerName={playerSession ? accountName(playerSession.user) : undefined} guestLimit={guestLimit}
-        onChooseShot={chooseComparisonShot} onSignIn={() => openAuth('sign-in')} onGuestConnect={startGuestSession} onSync={scheduleClipSync} />;
+        onChooseShot={back} onSignIn={() => openAuth('sign-in')} onGuestConnect={startGuestSession} onSync={scheduleClipSync} />;
       break;
     case 'coach':
       break;
@@ -384,8 +364,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       ) : null}
       {content}
       <Menu visible={menu} session={playerSession} chats={knownConversations} onDismiss={() => setMenu(false)}
-        onNewChat={newChat} onSaved={() => go({ screen: 'saved' })} onDemo={() => push({ screen: 'demo', backLabel: 'Back' })}
-        onCompare={() => push({ screen: 'compare-picker', backLabel: 'Back' })}
+        onNewChat={newChat} onSaved={() => go({ screen: 'saved' })}
         onAccount={() => go(accountRoute)} onSwitch={() => { setMenu(false); setStack([accountRoute, { screen: 'switch' }]); }}
         onChat={(clip) => selectClip(clip, true)} onSignIn={() => openAuth('sign-in')} />
     </>
@@ -417,15 +396,13 @@ function Welcome({ onSignIn, onCreate, onGuest }: { onSignIn: () => void; onCrea
 
 type MenuChat = { session: Session; title: string };
 
-function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onDemo, onCompare, onAccount, onSwitch, onChat, onSignIn }: {
+function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccount, onSwitch, onChat, onSignIn }: {
   visible: boolean;
   session: AuthSession | null;
   chats: MenuChat[];
   onDismiss: () => void;
   onNewChat: () => void;
   onSaved: () => void;
-  onDemo: () => void;
-  onCompare: () => void;
   onAccount: () => void;
   onSwitch: () => void;
   onChat: (clip: Session) => void;
@@ -447,8 +424,6 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onDemo, 
           <ScrollView style={styles.fill} contentContainerStyle={styles.drawerLinks}>
             <Text style={styles.sectionLabel}>LIBRARY</Text>
             <MenuItem title="Saved clips" icon="library" onPress={onSaved} />
-            <MenuItem title="NBA comparison" onPress={onCompare} />
-            <MenuItem title="3D example" onPress={onDemo} />
             <Text style={[styles.sectionLabel, styles.recentLabel]}>RECENTS</Text>
             {session ? (
               chats.length ? chats.map((chat) => (
