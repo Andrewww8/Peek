@@ -3,7 +3,7 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 300,
-      "includeFiles": "{catalog/**,media/three-point-follow-through-v2.usdz,node_modules/ffmpeg-static/**,node_modules/@langchain/langgraph-sdk/dist/node_modules/**}"
+      "includeFiles": "{catalog/**,media/three-point-follow-through-v2.usdz,node_modules/ffmpeg-static/**,../node_modules/ffmpeg-static/**,node_modules/@langchain/langgraph-sdk/dist/node_modules/**}"
     }
   },
   "rewrites": [
