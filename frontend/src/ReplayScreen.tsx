@@ -22,10 +22,11 @@ const outcomes: { value: ShotOutcome; label: string }[] = [
 
 type Stats = ReturnType<typeof shotStats>;
 
-export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChanged, backLabel, onBack, onAskCoach, onCompare }: {
+export function ReplayScreen({ initialSession, store, cloudUserId, playerUserId, onShotsChanged, backLabel, onBack, onAskCoach, onCompare }: {
   initialSession: Session;
   store: PracticeStore;
   cloudUserId: string | null;
+  playerUserId: string | null;
   onShotsChanged: () => void;
   backLabel: string;
   onBack: () => void;
@@ -47,7 +48,7 @@ export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChange
     setNotice(undefined);
     try {
       if (existing) store.updateShot(session.id, existing.shotNumber, outcome, cloudUserId);
-      else store.addShot(session.id, releaseMs, outcome, cloudUserId);
+      else store.addShot(session.id, releaseMs, outcome, playerUserId);
     } catch (error) {
       const text = message(error, 'Your shot tag could not be saved.');
       if (edit) setEditorError(text);

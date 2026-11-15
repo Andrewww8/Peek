@@ -10,6 +10,7 @@ import { accountFetch, apiUrl } from './api';
 import { accessToken } from './auth';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
+import { analyzeGuestShot, hasOnDeviceAnalysis, readGuestPose } from './guest-pose';
 import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime, sessionTime } from './practice';
@@ -76,17 +77,78 @@ export function ComparisonShotPicker({ store, backLabel, onBack, onSelect, onBro
   );
 }
 
-export function ComparisonScreen({ shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync }: Navigation & {
+type ComparisonProps = Navigation & {
   shot: ComparisonShot;
   store: PracticeStore;
   userId: string | null;
+  isGuest: boolean;
   playerName?: string;
   guestLimit?: string;
   onChooseShot: () => void;
   onSignIn: () => void;
   onGuestConnect: () => Promise<string>;
   onSync: () => void;
+};
+
+export function ComparisonScreen(props: ComparisonProps) {
+  if (props.isGuest && hasOnDeviceAnalysis()) {
+    const { shot, store } = props;
+    const release = store.listShots(shot.sessionId).find(({ shotNumber }) => shotNumber === shot.shotNumber);
+    const video = localVideoUri(store.getSession(shot.sessionId)?.videoPath ?? null);
+    const key = release && `pose:${shot.sessionId}:${shot.shotNumber}:${release.releaseMs}`;
+    const saved = key ? readGuestPose(key) : undefined;
+    if (saved || video || !props.userId) {
+      return <OnDeviceComparisonScreen {...props} saved={saved}
+        recording={release && video && key ? { key, video, releaseMs: release.releaseMs } : undefined} />;
+    }
+  }
+  return <CloudComparisonScreen {...props} />;
+}
+
+function OnDeviceComparisonScreen({ shot, saved, recording, backLabel, onBack, onChooseShot }: ComparisonProps & {
+  saved?: Pose;
+  recording?: { key: string; video: string; releaseMs: number };
 }) {
+  const [result, setResult] = useState(saved);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [notice, setNotice] = useState<string>();
+
+  async function analyze() {
+    if (!recording || analyzing) return;
+    setAnalyzing(true);
+    setNotice(undefined);
+    try {
+      setResult(await analyzeGuestShot(recording.key, recording.video, recording.releaseMs));
+    } catch (error) {
+      setNotice(message(error, 'This shot could not be analyzed.'));
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  return (
+    <>
+      <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
+      <Page>
+        <Title title="Your shot vs NBA" subtitle={`Shot ${shot.shotNumber} · Catch-and-shoot three`} />
+        {result ? <PoseComparison playerPose={result} playerLabel="Your shot" /> : (
+          <Panel>
+            {notice ? <Notice>{notice}</Notice> : null}
+            {analyzing ? <Loading text="Analyzing your shot on this iPhone…" /> : recording ? (
+              <>
+                <Text style={ui.body}>Create a 3D comparison from this recording. Guests can analyze five new shots a day.</Text>
+                <Button label="Analyze as guest" onPress={() => void analyze()} />
+              </>
+            ) : <Notice>This shot needs its original recording or a saved analysis.</Notice>}
+          </Panel>
+        )}
+        <Button label="Choose another shot" kind="secondary" arrow onPress={onChooseShot} />
+      </Page>
+    </>
+  );
+}
+
+function CloudComparisonScreen({ shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync }: ComparisonProps) {
   const [loaded, setLoaded] = useState<{ userId: string; pose: Pose }>();
   const [notice, setNotice] = useState<string>();
   const [loading, setLoading] = useState('Opening your shot…');
@@ -150,7 +212,7 @@ export function ComparisonScreen({ shot, store, userId, playerName, guestLimit, 
     <>
       <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
       <Page>
-        <Title title="Compare shot" subtitle={`Shot ${shotNumber} · Catch-and-shoot three`} />
+        <Title title="Your shot vs NBA" subtitle={`Shot ${shotNumber} · Catch-and-shoot three`} />
         {!userId ? (
           <Panel>
             {notice ? <Notice>{notice}</Notice> : null}

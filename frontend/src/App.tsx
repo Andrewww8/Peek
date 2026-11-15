@@ -328,7 +328,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
     case 'replay': {
       const clip = store.getSession(currentRoute.sessionId);
       content = clip ? (
-        <ReplayScreen key={clip.id} store={store} cloudUserId={cloudUserId} initialSession={clip}
+        <ReplayScreen key={clip.id} store={store} cloudUserId={cloudUserId} playerUserId={playerUserId} initialSession={clip}
           backLabel={currentRoute.backLabel} onBack={back} onShotsChanged={scheduleClipSync}
           onCompare={(shotNumber) => push({
             screen: 'compare', backLabel: 'Session details', shot: { sessionId: clip.id, shotNumber },
@@ -351,7 +351,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       break;
     case 'compare':
       content = <ComparisonScreen key={`${currentRoute.shot.sessionId}:${currentRoute.shot.shotNumber}`}
-        backLabel={currentRoute.backLabel} onBack={back} shot={currentRoute.shot} store={store} userId={cloudUserId}
+        backLabel={currentRoute.backLabel} onBack={back} shot={currentRoute.shot} store={store} userId={cloudUserId} isGuest={!playerSession}
         playerName={playerSession ? accountName(playerSession.user) : undefined} guestLimit={guestLimit}
         onChooseShot={chooseComparisonShot} onSignIn={() => openAuth('sign-in')} onGuestConnect={startGuestSession} onSync={scheduleClipSync} />;
       break;

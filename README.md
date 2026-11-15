@@ -18,7 +18,7 @@ For a rehearsal that relaunches offline with the JavaScript bundle embedded, ins
 
 Open Peek and sign in or continue as a guest. In Coach, tap **+** to record or attach a video. Open **Saved clips** from the menu to replay sessions, mark shots, and review stats.
 
-Open **NBA comparison** from the menu and choose a tagged shot. In **Session details**, tap **Compare shot** on the tag you want to use. Tap **Analyze as guest** or **Analyze this shot** if the recording still needs analysis. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session. **3D example → Compare two NBA examples** works without a recording.
+Open **NBA comparison** from the menu and choose a tagged shot. In **Session details**, tap **Compare shot** on the tag you want to use. Tap **Analyze as guest** to estimate the shot’s 3D body pose from the saved video directly on an iPhone running iOS 17 or later. Tap **Analyze this shot** if you’re signed in and the recording still needs cloud analysis. Tap **Change NBA player** to pick a reference. Both skeletons use the same release position, camera angle, and playhead. **View in AR** opens an animated Quick Look scene with names above the white player skeleton and the yellow NBA reference. New cloud analyses show the finger points that Shot Coach can track around release. To add them to an older analysis, import the original video again and mark the release in the new session. **3D example → Compare two NBA examples** works without a recording.
 
 ## Connect Vercel and Supabase
 
@@ -34,7 +34,7 @@ The Expo variables are bundled into the app. Supabase secret keys, service-role 
 
 For password recovery, add `perspective://reset-password` to Supabase's additional redirect URLs. Open the reset email on the same iPhone that requested it. [Supabase native deep linking](https://supabase.com/docs/guides/auth/native-mobile-deep-linking)
 
-Guest Coach and shot analysis use Supabase anonymous sessions. Enable anonymous sign-ins in the app's Supabase project. Each guest session can submit five requests per UTC day across Coach messages and new shot analyses. Viewing a completed analysis or changing the NBA player does not use this allowance. A signed-in account can use Coach and shot analysis with email sign-in. [Supabase anonymous sign-ins](https://supabase.com/docs/guides/auth/auth-anonymous)
+Guest comparisons run directly on the iPhone for up to five new shot analyses per UTC day. Reopening a saved analysis and changing the NBA player are unlimited. Guest Coach and cloud requests use Supabase anonymous sessions and require anonymous sign-ins in the app's Supabase project. The cloud guest allowance is five requests per UTC day across Coach messages and new cloud shot analyses. [Supabase anonymous sign-ins](https://supabase.com/docs/guides/auth/auth-anonymous)
 
 Rebuild the iOS app after changing build-time values. If upgrading an existing local native project, run `npx expo prebuild --platform ios` from `frontend` to update its native modules and permissions.
 
