@@ -1113,7 +1113,7 @@ def write_glb(path, skeletons, fps=30.0):
             geo[nd["name"]] = dict(POSITION=add(read(pr["attributes"]["POSITION"]).astype(np.float32), "VEC3", 34962, True), NORMAL=add(read(pr["attributes"]["NORMAL"]).astype(np.float32), "VEC3", 34962),
                                    indices=add(ix.astype(np.uint16 if ix.max() < 65535 else np.uint32), "SCALAR", 34963))
     n_fr = len(next(iter(skeletons[0][1]["pos"].values()))); t_acc = add((np.arange(n_fr) / fps).astype(np.float32), "SCALAR", None, True)
-    out["nodes"].append(dict(name="shot", rotation=[0, 0.7071067811865476, 0.7071067811865476, 0], children=[]))   # z up, facing +y  ->  y up, facing +z; anim = dict(name="shot", samplers=[], channels=[])
+    out["nodes"].append(dict(name="shot", rotation=[0, 0.7071067811865476, 0.7071067811865476, 0], children=[])); anim = dict(name="shot", samplers=[], channels=[])   # root: z up, facing +y  ->  y up, facing +z
     for k, (name, rg, rgba) in enumerate(skeletons):
         mat = dict(name=name, pbrMetallicRoughness=dict(baseColorFactor=list(rgba), metallicFactor=0.0, roughnessFactor=0.9))
         if rgba[3] < 1: mat["alphaMode"] = "BLEND"
