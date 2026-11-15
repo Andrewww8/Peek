@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { GUEST_DAILY_LIMIT, GUEST_LIMIT_MESSAGE } from './coach/deps.js';
 import { coachRoutes } from './coach/routes.js';
 import { recompute, type ShotAnalysis } from './cv/metrics.js';
 import { poseView } from './cv/pose-view.js';
@@ -67,6 +68,7 @@ function outcomeOf(v: unknown, where = 'outcome'): Outcome {
 declare module 'fastify' {
   interface FastifyRequest {
     userId: string;
+    isGuest: boolean;
   }
 }
 
@@ -79,6 +81,7 @@ export interface ClipRouteOptions {
 export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): Promise<void> {
   const { deps } = opts;
   app.decorateRequest('userId', '');
+  app.decorateRequest('isGuest', false);
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ApiError) return reply.code(err.status).send({ error: err.code, message: err.message, ...err.extra });
@@ -96,15 +99,18 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     const m = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? '');
     if (!m) throw new ApiError(401, 'unauthorized');
     try {
-      req.userId = (await deps.auth.verify(m[1]!)).toLowerCase();
+      const { userId, isGuest } = await deps.auth.verify(m[1]!);
+      req.userId = userId;
+      req.isGuest = isGuest;
     } catch (err) {
       if (err instanceof AuthError) throw new ApiError(401, 'unauthorized');
       throw err;
     }
   });
   // The onRequest hook has already answered 503 when deps are missing.
-  const { blob, clips, trimmer } = deps ?? ({} as Deps);
+  const { blob, clips, trimmer, usage } = deps ?? ({} as Deps);
   const origin = (req: FastifyRequest) => `${req.protocol}://${req.host}`;
+  const guestDay = () => (deps?.coach?.today?.() ?? new Date().toISOString().slice(0, 10));
 
   app.post('/v1/recordings', async (req) => {
     const b = req.body;
@@ -124,6 +130,12 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     }
     if (b.durationMs !== null && b.durationMs > MAX_RECORDING_DURATION_MS) {
       throw new ApiError(422, 'recording_too_long', `recordings are limited to ${MAX_RECORDING_DURATION_MS} ms`);
+    }
+    if (req.isGuest) {
+      if (!usage) throw new ApiError(503, 'not_configured', 'Guest analysis is unavailable.');
+      if (await usage.count(req.userId, guestDay()) >= GUEST_DAILY_LIMIT) {
+        throw new ApiError(429, 'guest_daily_limit', GUEST_LIMIT_MESSAGE);
+      }
     }
     const uploadId = randomUUID();
     const put = await blob.presignPut({
@@ -169,6 +181,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
 
     const recording = await findRecording(userId, sessionId, uploadId);
     if (toCut.length) {
+      if (req.isGuest && !usage) throw new ApiError(503, 'not_configured', 'Guest analysis is unavailable.');
       if (!recording) throw new ApiError(404, 'recording_not_found', 'upload the recording first, or it was already deleted');
       if (recording.sizeBytes > MAX_RECORDING_BYTES) {
         throw new ApiError(413, 'recording_too_large', `recordings are limited to ${MAX_RECORDING_BYTES} bytes`);
@@ -198,6 +211,10 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
           });
         }
         for (const s of toCut.filter((s) => !failed.has(s.shotNumber))) {
+          if (req.isGuest && !(await usage!.consume(userId, guestDay(), GUEST_DAILY_LIMIT)).allowed) {
+            failed.set(s.shotNumber, { shotNumber: s.shotNumber, error: 'guest_daily_limit', message: GUEST_LIMIT_MESSAGE, durationMs });
+            continue;
+          }
           const { startMs, endMs } = clipWindow(s.releaseMs, durationMs);
           const out = join(dir, `${s.shotNumber}.mp4`);
           await trimmer.trim(input, startMs, endMs, out);

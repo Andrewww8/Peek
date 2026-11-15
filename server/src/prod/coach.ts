@@ -62,6 +62,10 @@ function check<T>(res: { data: T; error: { message: string; code?: string } | nu
 
 export function createSupabaseUsageRepo(db: SupabaseClient): CoachUsageRepo {
   return {
+    async count(userId, day) {
+      const row = check(await db.from('coach_usage').select('messages').eq('user_id', userId).eq('day', day).maybeSingle(), 'coach_usage');
+      return Number(row?.messages ?? 0);
+    },
     async consume(userId, day, limit) {
       const rows = check(await db.rpc('coach_consume', { p_user: userId, p_day: day, p_limit: limit }), 'coach_consume') as { allowed: boolean; messages: number }[];
       const r = rows?.[0];

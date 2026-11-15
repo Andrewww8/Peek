@@ -22,14 +22,13 @@ const outcomes: { value: ShotOutcome; label: string }[] = [
 
 type Stats = ReturnType<typeof shotStats>;
 
-export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChanged, backLabel, onBack, onViewDemo, onAskCoach, onCompare }: {
+export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChanged, backLabel, onBack, onAskCoach, onCompare }: {
   initialSession: Session;
   store: PracticeStore;
   cloudUserId: string | null;
   onShotsChanged: () => void;
   backLabel: string;
   onBack: () => void;
-  onViewDemo: () => void;
   onAskCoach: (session: Session) => void;
   onCompare: (shotNumber: number) => void;
 }) {
@@ -113,19 +112,22 @@ export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChange
           <Panel>
             <Text style={styles.panelLabel}>TAGGED SHOTS</Text>
             {shots.map((shot) => (
-              <Pressable key={shot.shotNumber} accessibilityRole="button"
-                accessibilityLabel={'Edit shot ' + String(shot.shotNumber) + ', ' + shot.outcome + ', at ' + clipTime(shot.releaseMs, true)}
-                onPress={() => { setEditorError(undefined); setEdit(shot); }}
-                style={({ pressed }) => [styles.shotRow, pressed && styles.dimmed]}>
-                <View style={ui.group}>
-                  <Text style={ui.text}>Shot {shot.shotNumber}</Text>
-                  <Text style={ui.time}>{clipTime(shot.releaseMs, true)}</Text>
-                </View>
-                <View style={styles.shotEnd}>
-                  <Text style={ui.body}>{outcomes.find(({ value }) => value === shot.outcome)?.label}</Text>
-                  <Icon name="chevron" />
-                </View>
-              </Pressable>
+              <View key={shot.shotNumber} style={ui.group}>
+                <Pressable accessibilityRole="button"
+                  accessibilityLabel={'Edit shot ' + String(shot.shotNumber) + ', ' + shot.outcome + ', at ' + clipTime(shot.releaseMs, true)}
+                  onPress={() => { setEditorError(undefined); setEdit(shot); }}
+                  style={({ pressed }) => [styles.shotRow, pressed && styles.dimmed]}>
+                  <View style={ui.group}>
+                    <Text style={ui.text}>Shot {shot.shotNumber}</Text>
+                    <Text style={ui.time}>{clipTime(shot.releaseMs, true)}</Text>
+                  </View>
+                  <View style={styles.shotEnd}>
+                    <Text style={ui.body}>{outcomes.find(({ value }) => value === shot.outcome)?.label}</Text>
+                    <Icon name="chevron" />
+                  </View>
+                </Pressable>
+                <Button label={`Compare shot ${shot.shotNumber}`} kind="secondary" arrow onPress={() => onCompare(shot.shotNumber)} />
+              </View>
             ))}
           </Panel>
         ) : null}
@@ -133,7 +135,6 @@ export function ReplayScreen({ initialSession, store, cloudUserId, onShotsChange
           <ShotAnalysisPanel key={cloudUserId + ':' + session.id} store={store} sessionId={session.id}
             userId={cloudUserId} shotCount={cloudShotCount} onCompare={onCompare} />
         ) : null}
-        <Button label="View 3D example" kind="secondary" arrow onPress={onViewDemo} />
       </Page>
       <Sheet visible={removing} onClose={() => setRemoving(false)}>
         <Title title="Remove video?" size={33} />

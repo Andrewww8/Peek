@@ -4,7 +4,7 @@ import { createFfmpegTrimmer, ffmpegPath } from '../ffmpeg.js';
 import { createSupabaseVerifier } from '../jwt.js';
 import { createSupabaseClient, createSupabaseClipRepo } from './supabaseRepo.js';
 import { createVercelBlobStore } from './vercelBlob.js';
-import { createProductionCoach, createSupabaseReferenceRepo, missingCoachEnv } from './coach.js';
+import { createProductionCoach, createSupabaseReferenceRepo, createSupabaseUsageRepo, missingCoachEnv } from './coach.js';
 import type { ReferenceRepo } from '../coach/deps.js';
 
 /** Names of the variables production needs that are missing from `env`. */
@@ -28,6 +28,7 @@ export function createProductionDeps(env: NodeJS.ProcessEnv): Deps & { reference
     auth: createSupabaseVerifier(env.SUPABASE_URL!, env.SUPABASE_JWT_SECRET),
     trimmer: createFfmpegTrimmer(ffmpegPath(env)),
     references,
+    usage: createSupabaseUsageRepo(db),
     // Optional: without them only the CV ingest route / the coach answer 503 not_configured; /health stays ok.
     cvToken: env.CV_SERVICE_TOKEN || undefined,
     coach: missingCoachEnv(env).length ? undefined : createProductionCoach(env, db, references),

@@ -240,7 +240,7 @@ describe('Supabase JWT verification', () => {
 
   test('accepts a valid JWKS-signed token and returns sub', async () => {
     const v = createSupabaseVerifier(`${URL_}/`, undefined, jwks);
-    assert.equal(await v.verify(await sign()), A);
+    assert.deepEqual(await v.verify(await sign()), { userId: A, isGuest: false });
   });
 
   test('rejects wrong audience, issuer, expiry, a non-UUID sub, and HS256 without a secret', async () => {
@@ -259,9 +259,9 @@ describe('Supabase JWT verification', () => {
 
   test('falls back to HS256 with SUPABASE_JWT_SECRET', async () => {
     const v = createSupabaseVerifier(URL_, 'legacy-secret', jwks);
-    assert.equal(await v.verify(await hs('legacy-secret')), A);
+    assert.deepEqual(await v.verify(await hs('legacy-secret')), { userId: A, isGuest: false });
     await assert.rejects(v.verify(await hs('wrong-secret')), AuthError);
-    assert.equal(await v.verify(await sign()), A, 'JWKS tokens still work');
+    assert.deepEqual(await v.verify(await sign()), { userId: A, isGuest: false }, 'JWKS tokens still work');
   });
 
   test('a JWKS endpoint that cannot be reached is a server error, not a 401', async () => {

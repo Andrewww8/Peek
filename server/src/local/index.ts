@@ -81,9 +81,9 @@ export function createLocalDeps(dir: string, opts: LocalDepsOptions): LocalDeps 
 }
 
 /** A local access token shaped like a Supabase one (aud "authenticated", sub = user id). Negative ttl gives an expired token. */
-export function signLocalToken(secret: string, userId: string, ttlSec = 3600): Promise<string> {
+export function signLocalToken(secret: string, userId: string, ttlSec = 3600, isGuest = false): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ role: 'authenticated' })
+  return new SignJWT({ role: 'authenticated', is_anonymous: isGuest })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(userId)
     .setAudience(SUPABASE_AUDIENCE)

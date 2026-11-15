@@ -34,6 +34,9 @@ export function createLocalUsageRepo(file?: string): CoachUsageRepo & { rows(): 
     (store.data[`${userId}|${day}`] ??= { userId, day, messages: 0, turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
   return {
     rows: () => Object.values(store.data).map((r) => ({ ...r })),
+    async count(userId, day) {
+      return store.data[`${userId}|${day}`]?.messages ?? 0;
+    },
     async consume(userId, day, limit) {
       const r = row(userId, day);
       if (r.messages >= limit) return { allowed: false, count: r.messages };

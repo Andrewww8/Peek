@@ -15,7 +15,7 @@ import { AIMessage, HumanMessage, isAIMessage, isHumanMessage, type BaseMessage 
 import { ApiError } from '../clips.js';
 import type { ClipRepo } from '../deps.js';
 import { createCoachAgent, skillFiles, type CoachAgent } from './agent.js';
-import { COACH_MAX_MESSAGE_CHARS, type CoachDeps, type TurnUsage } from './deps.js';
+import { COACH_MAX_MESSAGE_CHARS, GUEST_DAILY_LIMIT, GUEST_LIMIT_MESSAGE, type CoachDeps, type TurnUsage } from './deps.js';
 import { toolStatus } from './tools.js';
 
 const threadId = (userId: string, sessionId: string) => `${userId}:${sessionId}`;
@@ -54,8 +54,12 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
     const userId = req.userId;
     if (!(await clips.list(userId, sessionId)).length) throw new ApiError(404, 'session_not_found', 'no synced clips for this session');
     const day = (c.today ?? utcDay)();
-    const quota = await c.usage.consume(userId, day, c.dailyLimit);
-    if (!quota.allowed) throw new ApiError(429, 'coach_daily_limit', `the coach answers up to ${c.dailyLimit} messages a day`);
+    const limit = req.isGuest ? Math.min(c.dailyLimit, GUEST_DAILY_LIMIT) : c.dailyLimit;
+    const quota = await c.usage.consume(userId, day, limit);
+    if (!quota.allowed) {
+      if (req.isGuest) throw new ApiError(429, 'guest_daily_limit', GUEST_LIMIT_MESSAGE);
+      throw new ApiError(429, 'coach_daily_limit', `the coach answers up to ${limit} messages a day`);
+    }
 
     const config = { configurable: { thread_id: threadId(userId, sessionId) }, context: { userId, sessionId } };
     const a = getAgent();

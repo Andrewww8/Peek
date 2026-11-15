@@ -103,8 +103,8 @@ export interface ClipRepo {
 export class AuthError extends Error {}
 
 export interface AuthVerifier {
-  /** Returns the user id (a UUID) for a valid access token; throws AuthError otherwise. */
-  verify(token: string): Promise<string>;
+  /** Returns the identity from a verified access token; throws AuthError otherwise. */
+  verify(token: string): Promise<{ userId: string; isGuest: boolean }>;
 }
 
 export interface Trimmer {
@@ -125,6 +125,8 @@ export interface Deps {
   references?: import('./coach/deps.js').ReferenceRepo;
   /** The AI coach; its routes answer 503 not_configured without it. */
   coach?: import('./coach/deps.js').CoachDeps;
+  /** Durable daily usage for guest shot analyses, even when Coach is unavailable. */
+  usage?: import('./coach/deps.js').CoachUsageRepo;
   /** Extra routes a dependency needs (the local blob store's presigned PUT/GET endpoint). */
   routes?: (app: import('fastify').FastifyInstance) => Promise<void>;
 }

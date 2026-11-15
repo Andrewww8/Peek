@@ -118,14 +118,22 @@ function validAnonKey(value: string | undefined) {
 export const supabase = createAuthClient();
 export const passwordResetUrl = 'perspective://reset-password';
 
-export async function startGuestSession() {
-  if (!supabase) throw new Error('Coach sign-in is unavailable in this build.');
+let connectingGuest: Promise<string> | undefined;
+
+export function startGuestSession() {
+  return connectingGuest ??= connectGuest().finally(() => { connectingGuest = undefined; });
+}
+
+async function connectGuest() {
+  if (!supabase) throw new Error('Sign-in is unavailable in this build.');
+  const { data: current } = await supabase.auth.getSession();
+  if (current.session) return current.session.user.id;
   const { data, error } = await supabase.auth.signInAnonymously();
   if (error?.code === 'anonymous_provider_disabled') {
-    throw new Error('Guest Coach is disabled on this server. Sign in to send your clip.');
+    throw new Error('Guest mode is disabled on the server. Sign in to continue.');
   }
   if (error) throw error;
-  if (!data.session?.user.is_anonymous) throw new Error('A guest Coach session could not be started.');
+  if (!data.session?.user.is_anonymous) throw new Error('A guest session could not be started.');
   return data.session.user.id;
 }
 

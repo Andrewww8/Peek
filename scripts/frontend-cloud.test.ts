@@ -6,13 +6,14 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { unzipSync } from 'fflate';
-import { syncCloudClips } from '../frontend/src/clip-sync.ts';
+import { GuestQuotaError, syncCloudClips } from '../frontend/src/clip-sync.ts';
 import { createSessionCoach } from '../frontend/src/coach.ts';
 import { PracticeStore } from '../frontend/src/database.ts';
 import { comparisonUsdz, type NameAtlas, type Pose } from '../frontend/src/pose-3d.ts';
 import { getShotAnalysis } from '../frontend/src/shot-analysis.ts';
 import { processPoseBatch } from '../server/scripts/pose-worker.js';
 import { buildApp } from '../server/src/app.js';
+import { GUEST_DAILY_LIMIT } from '../server/src/coach/deps.js';
 import { J, NE, NJ } from '../server/src/cv/pose.js';
 import { SHOT, syntheticShot, writeNpz } from '../server/src/cv/test-pose.js';
 import { paths } from '../server/src/deps.js';
@@ -20,7 +21,7 @@ import { LOCAL_CV_TOKEN, createLocalDeps, signLocalToken } from '../server/src/l
 import { makeVideo } from '../server/src/test-video.js';
 import { ScriptedChatModel } from '../sim/coachModel.js';
 
-test('the iPhone syncs private clips, receives shot analysis, and chats about the session', async (t) => {
+test('a guest syncs private shots, compares their motion, and chats within the daily limit', async (t) => {
   const temp = await mkdtemp(join(tmpdir(), 'perspective-frontend-cloud-'));
   t.after(() => rm(temp, { recursive: true, force: true }));
   const db = new DatabaseSync(join(temp, 'practice.sqlite'));
@@ -38,7 +39,8 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
     text: human.startsWith('Follow-up') && messages.some((message) => message.text === 'Hold your finish.')
       ? 'Keep your wrist relaxed.' : 'Hold your finish.',
   });
-  const deps = createLocalDeps(temp, { jwtSecret: secret, inMemory: true, coachModel: () => model });
+  let today = '2026-11-15';
+  const deps = createLocalDeps(temp, { jwtSecret: secret, inMemory: true, coachModel: () => model, today: () => today });
   const app = await buildApp({
     catalogPath: 'server/catalog/demos.json',
     mediaDir: 'server/media',
@@ -61,8 +63,8 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
 
   const user = randomUUID();
   const sessionId = randomUUID();
-  const token = await signLocalToken(secret, user);
-  const expired = await signLocalToken(secret, user, -1);
+  const token = await signLocalToken(secret, user, 3600, true);
+  const expired = await signLocalToken(secret, user, -1, true);
   const otherUserId = randomUUID();
   const otherUser = await signLocalToken(secret, otherUserId);
   const videoPath = join(temp, 'practice.mov');
@@ -106,6 +108,7 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
     }[] }).clips;
   }
   const clips = await list(token);
+  assert.equal(await deps.usage.count(user, today), 2);
   assert.deepEqual(clips.map(({ shotNumber, startMs, endMs, outcome }) => [shotNumber, startMs, endMs, outcome]), [
     [1, 500, 4500, 'made'], [2, 2900, 6900, 'missed'],
   ]);
@@ -243,4 +246,15 @@ test('the iPhone syncs private clips, receives shot analysis, and chats about th
   ]);
   assert.deepEqual(await alienCoach.history(chatSignal), []);
   await assert.rejects(alienCoach.ask('Show me that clip', chatSignal, () => {}), /No shot clips have synced/);
+  await coach.ask('One more exercise?', chatSignal, () => {});
+  assert.equal(await deps.usage.count(user, today), GUEST_DAILY_LIMIT);
+  await assert.rejects(coach.ask('Can you answer again?', chatSignal, () => {}), /guest limit/);
+  store.addShot(sessionId, 6300, 'unmarked', user);
+  await assert.rejects(run(async () => token), GuestQuotaError);
+  assert.deepEqual(store.cloudShots(user, 'pending', sessionId).map(({ shotNumber }) => shotNumber), [3]);
+  assert.equal((await readPose(token)).status, 200, 'guests can still view completed analyses at the limit');
+  today = '2026-11-16';
+  await run(async () => token);
+  assert.equal(await deps.usage.count(user, today), 1);
+  assert.equal(store.hasCloudWork(user), false);
 });

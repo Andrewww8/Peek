@@ -5,6 +5,8 @@ import type { TemplateRecord } from '../cv/templates.js';
 
 export const COACH_MODEL = 'claude-sonnet-5-5';
 export const COACH_DAILY_LIMIT = 50;
+export const GUEST_DAILY_LIMIT = 5;
+export const GUEST_LIMIT_MESSAGE = `You’ve reached today’s guest limit of ${GUEST_DAILY_LIMIT} shot analyses or Coach messages. Try again after midnight UTC.`;
 export const COACH_RECURSION_LIMIT = 40;
 export const COACH_MAX_MESSAGE_CHARS = 2000;
 
@@ -17,7 +19,8 @@ export interface TurnUsage {
 }
 
 export interface CoachUsageRepo {
-  /** Atomically counts one message for (user, day) unless `limit` is already reached. */
+  count(userId: string, day: string): Promise<number>;
+  /** Atomically counts one request for (user, day) unless `limit` is already reached. */
   consume(userId: string, day: string, limit: number): Promise<{ allowed: boolean; count: number }>;
   /** Adds one turn's token usage to (user, day). */
   record(userId: string, day: string, usage: TurnUsage): Promise<void>;

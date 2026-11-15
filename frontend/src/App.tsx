@@ -125,7 +125,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   const cloudUserId = session?.user.id ?? null;
   const playerSession = session?.user.is_anonymous ? null : session;
   const playerUserId = playerSession?.user.id ?? null;
-  const scheduleClipSync = useClipSync(store, cloudUserId);
+  const { schedule: scheduleClipSync, guestLimit } = useClipSync(store, cloudUserId);
   const selectedSession = selection && (selection.userId === cloudUserId || selection.userId === null)
     ? store.getSession(selection.id) ?? undefined : undefined;
   const currentRoute = stack.at(-1) ?? (session || seenWelcome ? coachRoute : { screen: 'welcome' } as const);
@@ -330,7 +330,6 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       content = clip ? (
         <ReplayScreen key={clip.id} store={store} cloudUserId={cloudUserId} initialSession={clip}
           backLabel={currentRoute.backLabel} onBack={back} onShotsChanged={scheduleClipSync}
-          onViewDemo={() => push({ screen: 'demo', backLabel: 'Session details' })}
           onCompare={(shotNumber) => push({
             screen: 'compare', backLabel: 'Session details', shot: { sessionId: clip.id, shotNumber },
           })}
@@ -351,10 +350,10 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       content = <ComparisonExample backLabel={currentRoute.backLabel} onBack={back} onChooseShot={chooseComparisonShot} />;
       break;
     case 'compare':
-      content = <ComparisonScreen key={`${currentRoute.shot.sessionId}:${currentRoute.shot.shotNumber}:${cloudUserId}`}
+      content = <ComparisonScreen key={`${currentRoute.shot.sessionId}:${currentRoute.shot.shotNumber}`}
         backLabel={currentRoute.backLabel} onBack={back} shot={currentRoute.shot} store={store} userId={cloudUserId}
-        playerName={playerSession ? accountName(playerSession.user) : undefined}
-        onChooseShot={chooseComparisonShot} onSignIn={() => openAuth('sign-in')} onSync={scheduleClipSync} />;
+        playerName={playerSession ? accountName(playerSession.user) : undefined} guestLimit={guestLimit}
+        onChooseShot={chooseComparisonShot} onSignIn={() => openAuth('sign-in')} onGuestConnect={startGuestSession} onSync={scheduleClipSync} />;
       break;
     case 'coach':
       break;
@@ -379,7 +378,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
             onPickClip={() => push({ screen: 'picker' })} onRemoveClip={() => setSelection(undefined)}
             onReview={(clip) => review(clip, 'Coach')}
             onSignIn={() => push({ screen: 'auth', mode: 'sign-in', fromCoach: true })}
-            onGuestConnect={startGuestSession} onSync={scheduleClipSync} onRecent={updateRecent}
+            onGuestConnect={startGuestSession} onSync={scheduleClipSync} guestLimit={guestLimit} onRecent={updateRecent}
             resumeAfterSignIn={resumeCoach} onResume={() => setResumeCoach(false)} />
         </View>
       ) : null}

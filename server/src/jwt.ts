@@ -44,7 +44,7 @@ export function createJwtVerifier(opts: JwtVerifierOptions): AuthVerifier {
         throw new AuthError(err.message);
       }
       if (typeof payload.sub !== 'string' || !UUID.test(payload.sub)) throw new AuthError('sub must be a UUID');
-      return payload.sub.toLowerCase();
+      return { userId: payload.sub.toLowerCase(), isGuest: payload.is_anonymous === true };
     },
   };
 }

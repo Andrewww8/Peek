@@ -76,31 +76,36 @@ export function ComparisonShotPicker({ store, backLabel, onBack, onSelect, onBro
   );
 }
 
-export function ComparisonScreen({ shot, store, userId, playerName, backLabel, onBack, onChooseShot, onSignIn, onSync }: Navigation & {
+export function ComparisonScreen({ shot, store, userId, playerName, guestLimit, backLabel, onBack, onChooseShot, onSignIn, onGuestConnect, onSync }: Navigation & {
   shot: ComparisonShot;
   store: PracticeStore;
   userId: string | null;
   playerName?: string;
+  guestLimit?: string;
   onChooseShot: () => void;
   onSignIn: () => void;
+  onGuestConnect: () => Promise<string>;
   onSync: () => void;
 }) {
-  const [pose, setPose] = useState<Pose>();
+  const [loaded, setLoaded] = useState<{ userId: string; pose: Pose }>();
   const [notice, setNotice] = useState<string>();
   const [loading, setLoading] = useState('Opening your shot…');
+  const [connecting, setConnecting] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const { sessionId, shotNumber } = shot;
   const state = userId && store.sessionCloudShots(userId, sessionId).find((item) => item.shotNumber === shotNumber)?.state;
   const queued = !!state && state !== 'unavailable';
+  const limitNotice = state === 'pending' ? guestLimit : undefined;
+  const pose = loaded?.userId === userId ? loaded.pose : undefined;
   const canAnalyze = !!localVideoUri(store.getSession(sessionId)?.videoPath ?? null);
 
   useEffect(() => {
-    if (!userId || !queued) return;
+    if (!userId || !queued || limitNotice) return;
     const controller = new AbortController();
     const { signal } = controller;
     let timer: ReturnType<typeof setTimeout> | undefined;
     setNotice(undefined);
-    setPose(undefined);
+    setLoaded(undefined);
     setLoading('Opening your shot…');
     const load = async () => {
       if (signal.aborted) return;
@@ -116,24 +121,28 @@ export function ComparisonScreen({ shot, store, userId, playerName, backLabel, o
         if (typeof result === 'string') {
           setLoading(result);
           timer = setTimeout(load, 8_000);
-        } else setPose(result);
+        } else setLoaded({ userId, pose: result });
       } catch (error) {
         if (!signal.aborted) setNotice(message(error, 'The 3D pose could not be loaded.'));
       }
     };
     void load();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [store, sessionId, shotNumber, userId, queued, attempt]);
+  }, [store, sessionId, shotNumber, userId, queued, attempt, limitNotice]);
 
-  function analyze() {
-    if (!userId) return;
+  async function analyze() {
+    if (connecting) return;
     setNotice(undefined);
+    setConnecting(true);
     try {
-      store.prepareAnalysis(sessionId, userId, shotNumber);
+      const owner = userId ?? await onGuestConnect();
+      store.prepareAnalysis(sessionId, owner, shotNumber);
       onSync();
       setAttempt((value) => value + 1);
     } catch (error) {
       setNotice(message(error, 'The shot could not be queued for analysis.'));
+    } finally {
+      setConnecting(false);
     }
   }
 
@@ -143,18 +152,28 @@ export function ComparisonScreen({ shot, store, userId, playerName, backLabel, o
       <Page>
         <Title title="Compare shot" subtitle={`Shot ${shotNumber} · Catch-and-shoot three`} />
         {!userId ? (
-          <Panel><Text style={ui.body}>Sign in to analyze and compare this shot.</Text><Button label="Sign in" onPress={onSignIn} /></Panel>
+          <Panel>
+            {notice ? <Notice>{notice}</Notice> : null}
+            {canAnalyze ? (
+              <>
+                <Text style={ui.body}>Send this recording for shot analysis. Guest mode has a daily limit.</Text>
+                <Button label={connecting ? 'Connecting…' : 'Analyze as guest'} onPress={() => void analyze()} disabled={connecting} />
+              </>
+            ) : <Text style={ui.body}>Sign in to open a completed analysis.</Text>}
+            <Button label="Sign in" kind="secondary" onPress={onSignIn} disabled={connecting} />
+          </Panel>
         ) : pose ? (
           <PoseComparison playerPose={pose} playerLabel={playerName ?? 'Your shot'} />
         ) : queued ? (
-          <Panel>{notice ? <><Notice>{notice}</Notice><Button label="Try again" kind="secondary" onPress={() => setAttempt((value) => value + 1)} /></>
-            : <Loading text={loading} />}</Panel>
+          <Panel>{limitNotice ? <Notice>{limitNotice}</Notice>
+            : notice ? <><Notice>{notice}</Notice><Button label="Try again" kind="secondary" onPress={() => setAttempt((value) => value + 1)} /></>
+              : <Loading text={loading} />}</Panel>
         ) : (
           <Panel>
             {notice ? <Notice>{notice}</Notice> : null}
             {canAnalyze && state !== 'unavailable' ? (
               <><Text style={ui.body}>Send this recording for shot analysis to create your 3D comparison.</Text>
-                <Button label="Analyze this shot" onPress={analyze} /></>
+                <Button label={connecting ? 'Preparing shot…' : 'Analyze this shot'} onPress={() => void analyze()} disabled={connecting} /></>
             ) : <Notice>Choose a shot with its original recording or a completed analysis.</Notice>}
           </Panel>
         )}

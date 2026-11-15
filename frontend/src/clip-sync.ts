@@ -9,6 +9,8 @@ export type RecordingUploader = (url: string, path: string, headers: Record<stri
 const contentTypes = new Map([['mov', 'video/quicktime'], ['mp4', 'video/mp4'], ['m4v', 'video/x-m4v']]);
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 
+export class GuestQuotaError extends Error {}
+
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -53,6 +55,13 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
     });
     if (!response.ok || method === 'PATCH') {
       const { ok, status } = response;
+      if (status === 429) {
+        const error: unknown = await response.json().catch(() => null);
+        if (record(error) && error.error === 'guest_daily_limit' && typeof error.message === 'string') {
+          throw new GuestQuotaError(error.message);
+        }
+        throw new CloudResponseError(status);
+      }
       await response.body?.cancel();
       if (!ok) throw new CloudResponseError(status);
       return null;
@@ -111,6 +120,7 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
         }, 300_000);
         if (!record(result) || !Array.isArray(result.clips)) throw new Error('The clip service returned an invalid clip list.');
         const returned = new Map(result.clips.filter(record).map((clip) => [clip.shotNumber, clip]));
+        let limitMessage: string | undefined;
         for (const shot of batch) {
           const clip = returned.get(shot.shotNumber);
           if (clip && clip.error === undefined && typeof clip.sizeBytes === 'number' &&
@@ -120,8 +130,11 @@ export async function syncCloudClips({ baseUrl, store, account, upload, hasRecor
             finish([shot], 'pending', 'saved');
           } else if (clip?.error === 'release_beyond_duration') {
             finish([shot], 'pending', 'unavailable');
+          } else if (clip?.error === 'guest_daily_limit' && typeof clip.message === 'string') {
+            limitMessage = clip.message;
           }
         }
+        if (limitMessage) throw new GuestQuotaError(limitMessage);
       } catch (error) {
         if (signal.aborted) return;
         if (error instanceof CloudResponseError && error.from === 'api' && [400, 413, 415, 422].includes(error.status)) {

@@ -29,7 +29,7 @@ const caption = (text: string) => text.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
 
 export function CoachScreen({
   store, userId, session, question, onChangeQuestion, onMenu, onNewChat, onRecord, onPickClip,
-  onRemoveClip, onReview, onSignIn, onGuestConnect, onSync, onRecent, visible, resumeAfterSignIn, onResume,
+  onRemoveClip, onReview, onSignIn, onGuestConnect, onSync, guestLimit, onRecent, visible, resumeAfterSignIn, onResume,
 }: {
   store: PracticeStore;
   userId: string | null;
@@ -45,6 +45,7 @@ export function CoachScreen({
   onSignIn: () => void;
   onGuestConnect: () => Promise<string>;
   onSync: () => void;
+  guestLimit?: string;
   onRecent: (userId: string, chat: RecentChat) => void;
   visible: boolean;
   resumeAfterSignIn: boolean;
@@ -240,6 +241,7 @@ export function CoachScreen({
   const showRequireTags = !!session && awaitingTag && !tagged;
   const videoRemoved = !!session && !localVideoUri(session.videoPath);
   const canReview = !!session && (ready || !videoRemoved);
+  const syncLimit = syncing && !ready ? guestLimit : undefined;
 
   return (
     <KeyboardAvoidingView behavior="padding" keyboardVerticalOffset={top} style={styles.fill} enabled={visible}>
@@ -304,10 +306,10 @@ export function CoachScreen({
 
       {attachOpen ? <Pressable accessible={false} onPress={() => setAttachOpen(false)} style={styles.scrim} /> : null}
       <View style={[styles.footer, attachOpen && styles.footerOpen]}>
-        {notice ? (
+        {notice || syncLimit ? (
           <View style={styles.feedback}>
-            <Notice>{notice}</Notice>
-            {client && !history ? <Chip label="Retry conversation" onPress={() => setAttempt(attempt + 1)} /> : null}
+            <Notice>{notice ?? syncLimit}</Notice>
+            {notice && client && !history ? <Chip label="Retry conversation" onPress={() => setAttempt(attempt + 1)} /> : null}
           </View>
         ) : null}
         {session && !userId && notice ? <View style={styles.actions}><Chip label="Sign in" onPress={onSignIn} /></View> : null}
@@ -318,7 +320,7 @@ export function CoachScreen({
           </View>
         ) : null}
         {session && unavailable ? <Notice>This shot couldn’t sync. Attach another clip to try again.</Notice> : null}
-        {connecting || syncing && !ready || queued && !notice ? (
+        {!syncLimit && (connecting || syncing && !ready || queued && !notice) ? (
           <Text accessibilityLiveRegion="polite" style={styles.status}>
             {connecting ? 'Connecting to Coach…' : syncing ? 'Syncing your shot with Coach…' : 'Opening your conversation…'}
           </Text>
