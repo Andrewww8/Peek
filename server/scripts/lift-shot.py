@@ -12,7 +12,7 @@ def lift_extremities(coach, video, data, frames, joints, pose, tagged_frame):
     coach._load("ext")
     points = np.full((len(frames), len(coach.EXT_NAMES), 2), np.nan, dtype=np.float32)
     fps = data["fps"]
-    window = np.flatnonzero((frames >= tagged_frame - 1.2 * fps) & (frames <= tagged_frame + 0.75 * fps))
+    window = np.flatnonzero((frames >= tagged_frame - 1.2 * fps) & (frames <= tagged_frame + fps))
     capture = None
     try:
         for row in window:

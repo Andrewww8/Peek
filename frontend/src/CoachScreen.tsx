@@ -14,6 +14,7 @@ import { createSessionCoach, maxCoachQuestionLength } from './coach';
 import type { RecentChat } from './coach';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
+import { getShotAnalysisState } from './guest-pose';
 import { ThinkingDots } from './PeekMotion';
 import { clipTime, sessionTime, type Session } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -29,11 +30,12 @@ const prompts = [
 const caption = (text: string) => text.replace(/\*\*([^*]+)\*\*/g, '$1').trim();
 
 export function CoachScreen({
-  store, userId, session, question, onChangeQuestion, onMenu, onNewChat, onRecord, onPickClip,
+  store, userId, conversationId, session, question, onChangeQuestion, onMenu, onNewChat, onRecord, onPickClip,
   onRemoveClip, onReview, onSignIn, onGuestConnect, onSync, guestLimit, onRecent, visible, resumeAfterSignIn, onResume,
 }: {
   store: PracticeStore;
   userId: string | null;
+  conversationId: string;
   session?: Session;
   question: string;
   onChangeQuestion: (text: string) => void;
@@ -62,33 +64,31 @@ export function CoachScreen({
   const [connecting, setConnecting] = useState(false);
   const [queued, setQueued] = useState<string>();
   const [submitted, setSubmitted] = useState('');
-  const [awaitingTag, setAwaitingTag] = useState(false);
-  const [needsClip, setNeedsClip] = useState('');
   const [attachOpen, setAttachOpen] = useState(false);
   const [, setRevision] = useState(0);
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const activeTurn = useRef<AbortController>(null);
   const connectingRef = useRef(false);
-  const sessionId = session?.id;
-  const cloud = userId && sessionId ? store.sessionCloudShots(userId, sessionId) : [];
+  const sessionId = session?.id ?? conversationId;
+  const cloud = userId && session ? store.sessionCloudShots(userId, session.id) : [];
   const syncing = cloud.some(({ state }) => state === 'pending');
   const ready = cloud.some(({ state }) => state === 'synced' || state === 'dirty');
   const unavailable = !ready && !syncing && cloud.some(({ state }) => state === 'unavailable');
-  const tagged = !!sessionId && (!!cloud.length || store.listShots(sessionId).length > 0);
-  const client = useMemo(() => sessionId && userId && ready
+  const tagged = !!session && (!!cloud.length || store.listShots(session.id).length > 0);
+  const client = useMemo(() => userId
     ? createSessionCoach(apiUrl, sessionId, (renew) => accessToken(userId, renew), expoFetch)
-    : undefined, [sessionId, userId, ready]);
+    : undefined, [sessionId, userId]);
 
   const saveLoadedChat = useEffectEvent((messages: CoachMessage[]) => {
     const first = messages.find(({ role }) => role === 'user');
     const last = messages.findLast(({ role }) => role === 'assistant');
-    if (userId && session && first && last) {
+    if (userId && first && last) {
       const timestamp = Date.parse(messages.at(-1)?.createdAt ?? '');
       onRecent(userId, {
-        sessionId: session.id,
+        sessionId,
         title: chatTitle(first.text),
         reply: caption(last.text).slice(0, 1000),
-        updatedAt: Number.isFinite(timestamp) ? timestamp : session.createdAt,
+        updatedAt: Number.isFinite(timestamp) ? timestamp : (session?.createdAt ?? Date.now()),
       });
     }
   });
@@ -128,15 +128,8 @@ export function CoachScreen({
     setNotice(undefined);
     setAttachOpen(false);
     Keyboard.dismiss();
-    if (!session) {
-      setNeedsClip(text);
-      onChangeQuestion('');
-      return;
-    }
     onChangeQuestion(text);
     setSubmitted(text);
-    setAwaitingTag(!tagged);
-    if (!tagged) return;
     let owner = userId;
     if (!userId) {
       connectingRef.current = true;
@@ -152,29 +145,35 @@ export function CoachScreen({
       }
     }
     if (!owner) return;
-    try {
-      store.prepareAnalysis(session.id, owner);
-      setRevision((n) => n + 1);
-      onSync();
-    } catch (error) {
-      setNotice(message(error, 'The selected clip could not be attached.'));
-      return;
+    if (session && tagged) {
+      try {
+        store.prepareAnalysis(session.id, owner);
+        setRevision((n) => n + 1);
+        onSync();
+      } catch {
+        // A locally available analysis can still provide context without a synced clip.
+      }
     }
     if (client && history) {
       void deliver(text);
-    } else if (store.sessionCloudShots(owner, session.id).some(({ state }) => state !== 'unavailable')) {
+    } else {
       setQueued(text);
     }
   }
 
   async function deliver(text: string) {
-    if (!session || !userId || !client || !history || activeTurn.current) return;
+    if (!userId || !client || !history || activeTurn.current) return;
     setQueued(undefined);
     setNotice(undefined);
     const request = new AbortController();
     activeTurn.current = request;
-    setNeedsClip('');
-    setStatus('Looking at your shot…');
+    const shot = session && getShotAnalysisState(session.id)?.result;
+    const onDeviceShot = shot ? {
+      releaseMs: shot.releaseMs,
+      shootingHand: shot.pose.shootingHand,
+      ...shot.pose.metrics,
+    } : undefined;
+    setStatus(onDeviceShot || ready ? 'Looking at your shot…' : 'Thinking…');
     setPending(text);
     setWriting('');
     try {
@@ -184,7 +183,7 @@ export function CoachScreen({
         setStatus(update);
       }, (piece) => {
         if (!request.signal.aborted) setWriting((current) => current + piece);
-      });
+      }, onDeviceShot);
       if (request.signal.aborted) return;
       const next = [...history, { id: null, text, role: 'user', createdAt: new Date().toISOString() } satisfies CoachMessage, reply];
       setHistory(next);
@@ -192,7 +191,7 @@ export function CoachScreen({
       onChangeQuestion('');
       const first = next.find(({ role }) => role === 'user')?.text ?? text;
       onRecent(userId, {
-        sessionId: session.id,
+        sessionId,
         title: chatTitle(first),
         reply: caption(reply.text).slice(0, 1000),
         updatedAt: Date.now(),
@@ -216,18 +215,10 @@ export function CoachScreen({
     onResume();
     if (question.trim()) void send(question);
   });
-  const sendTagged = useEffectEvent(() => {
-    if (submitted) void send(submitted);
-  });
   useEffect(() => {
     if (visible && userId && resumeAfterSignIn) resume();
   }, [visible, userId, resumeAfterSignIn]);
-  useEffect(() => {
-    if (visible && awaitingTag && tagged) sendTagged();
-  }, [visible, awaitingTag, tagged]);
-
   function startAttachment(action: () => void) {
-    if (!question && needsClip) onChangeQuestion(needsClip);
     setAttachOpen(false);
     Keyboard.dismiss();
     action();
@@ -235,13 +226,11 @@ export function CoachScreen({
 
   const messages = history ?? [];
   const firstQuestion = messages.find(({ role }) => role === 'user');
-  const hasMessages = !!(messages.length || pending || needsClip || submitted);
+  const hasMessages = !!(messages.length || pending || submitted);
   const attached = !!session && !messages.length && !pending && !submitted;
   const promptList = attached ? prompts.slice(0, 2) : prompts;
   const title = firstQuestion ? chatTitle(firstQuestion.text) : hasMessages ? 'New chat' : 'Coach';
-  const showRequireTags = !!session && awaitingTag && !tagged;
   const videoRemoved = !!session && !localVideoUri(session.videoPath);
-  const canReview = !!session && (ready || !videoRemoved);
   const syncLimit = syncing && !ready ? guestLimit : undefined;
 
   return (
@@ -270,16 +259,6 @@ export function CoachScreen({
               {visible ? <ShotAnalysisProgress sessionId={session.id} style={styles.threadAnalysis} /> : null}
             </View>
           ) : null}
-          {needsClip && !messages.length && !pending && !session ? (
-            <>
-              <UserBubble text={needsClip} />
-              <CoachReply text="Happy to help! I need to see your shot first. Record a clip or upload a video, and I’ll give you tips to improve it." />
-              <View style={styles.actions}>
-                <Chip label="Record a clip" onPress={() => startAttachment(onRecord)} />
-                <Chip label="Upload a video" onPress={() => startAttachment(onPickClip)} />
-              </View>
-            </>
-          ) : null}
           {messages.map((entry, index) => entry.role === 'assistant'
             ? <CoachReply key={entry.id ?? index} text={entry.text} />
             : <UserBubble key={entry.id ?? index} text={entry.text} />)}
@@ -301,7 +280,7 @@ export function CoachScreen({
           <View style={styles.greeting}>
             <Brand size={56} />
             <Text style={styles.greetingTitle} accessibilityRole="header">How’s your shot{'\n'}today?</Text>
-            <Text style={styles.greetingCopy}>Record or upload a clip and I’ll give you tips to improve your shot.</Text>
+            <Text style={styles.greetingCopy}>Ask a question or attach a clip for tips on your shooting form.</Text>
           </View>
         </ScrollView>
       )}
@@ -314,13 +293,7 @@ export function CoachScreen({
             {notice && client && !history ? <Chip label="Retry conversation" onPress={() => setAttempt(attempt + 1)} /> : null}
           </View>
         ) : null}
-        {session && !userId && notice ? <View style={styles.actions}><Chip label="Sign in" onPress={onSignIn} /></View> : null}
-        {session && showRequireTags && canReview ? (
-          <View style={styles.feedback}>
-            <Text style={ui.body}>Tag the release of a shot in the clip so Coach can analyze it.</Text>
-            <Chip label="Mark a shot" onPress={() => onReview(session)} />
-          </View>
-        ) : null}
+        {!userId && notice ? <View style={styles.actions}><Chip label="Sign in" onPress={onSignIn} /></View> : null}
         {session && unavailable ? <Notice>This shot couldn’t sync. Attach another clip to try again.</Notice> : null}
         {!syncLimit && (connecting || syncing && !ready || queued && !notice) ? (
           <Text accessibilityLiveRegion="polite" style={styles.status}>
@@ -344,7 +317,6 @@ export function CoachScreen({
                   setNotice(undefined);
                   setQueued(undefined);
                   setSubmitted('');
-                  setAwaitingTag(false);
                   onRemoveClip();
                 }} />
               </View>
@@ -362,7 +334,6 @@ export function CoachScreen({
               maxLength={maxCoachQuestionLength} onChangeText={(text) => {
                 setQueued(undefined);
                 setSubmitted('');
-                setAwaitingTag(false);
                 onChangeQuestion(text);
               }}
               onFocus={() => setAttachOpen(false)} />

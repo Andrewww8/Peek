@@ -118,6 +118,7 @@ export interface Deps {
   blob: BlobStore;
   clips: ClipRepo;
   auth: AuthVerifier;
+  guestSessions?: import('./guest-session.js').GuestSessions;
   trimmer: Trimmer;
   /** Shared secret the CV worker uses for POST /v1/internal/analysis; the route answers 503 without it. */
   cvToken?: string;

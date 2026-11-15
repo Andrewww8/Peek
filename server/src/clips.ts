@@ -12,7 +12,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { GUEST_DAILY_LIMIT, GUEST_LIMIT_MESSAGE } from './coach/deps.js';
 import { coachRoutes } from './coach/routes.js';
 import { recompute, type ShotAnalysis } from './cv/metrics.js';
-import { poseView } from './cv/pose-view.js';
+import { playbackPoseView, poseView } from './cv/pose-view.js';
 import {
   AuthError,
   CLIP_TTL_DAYS,
@@ -289,7 +289,7 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
 
   coachRoutes(app, { coach: deps?.coach, clips, sessionParam });
 
-  app.get<{ Params: { sessionId: string; shotNumber: string } }>('/v1/sessions/:sessionId/shots/:shotNumber/pose', async (req, reply) => {
+  app.get<{ Params: { sessionId: string; shotNumber: string }; Querystring: { followThrough?: string } }>('/v1/sessions/:sessionId/shots/:shotNumber/pose', async (req, reply) => {
     const sessionId = sessionParam(req.params.sessionId);
     const shotNumber = shotNumberParam(req.params.shotNumber);
     const row = await clips.get(req.userId, sessionId, shotNumber);
@@ -307,7 +307,10 @@ export async function clipRoutes(app: FastifyInstance, opts: ClipRouteOptions): 
     }
     if (!comparison) throw new ApiError(422, 'pose_unavailable', 'The shot needs a clearer view of the shooter through release.');
     reply.header('Cache-Control', 'private, no-store');
-    return { shotType: row.shotType, pose: poseView(comparison.series, comparison.metrics) };
+    const pose = req.query.followThrough === '1' && analysis.pose && analysis.metrics
+      ? playbackPoseView(comparison.series, comparison.metrics, analysis.pose, analysis.metrics.releaseFrame)
+      : poseView(comparison.series, comparison.metrics);
+    return { shotType: row.shotType, pose };
   });
 
   app.get<{ Querystring: { sessionId?: string } }>('/v1/clips', async (req) => {

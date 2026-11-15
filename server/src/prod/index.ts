@@ -1,10 +1,13 @@
 /** Production dependencies, chosen from environment variables. */
 import type { Deps } from '../deps.js';
 import { createFfmpegTrimmer, ffmpegPath } from '../ffmpeg.js';
+import { createGuestSessionAuth } from '../guest-session.js';
 import { createSupabaseVerifier } from '../jwt.js';
 import { createSupabaseClient, createSupabaseClipRepo } from './supabaseRepo.js';
 import { createVercelBlobStore } from './vercelBlob.js';
 import { createProductionCoach, createSupabaseReferenceRepo, createSupabaseUsageRepo, missingCoachEnv } from './coach.js';
+import { createPostgresGuestRateLimiter, createSupabaseGuestAccounts } from './guest-session.js';
+import { createPostgresPool } from './postgres.js';
 import type { ReferenceRepo } from '../coach/deps.js';
 
 /** Names of the variables production needs that are missing from `env`. */
@@ -22,10 +25,18 @@ export function createProductionDeps(env: NodeJS.ProcessEnv): Deps & { reference
   if (missing.length) throw new Error(`missing environment variables: ${missing.join(', ')}`);
   const db = createSupabaseClient(env.SUPABASE_URL!, env.SUPABASE_SERVICE_ROLE_KEY!);
   const references = createSupabaseReferenceRepo(db);
+  const accountAuth = createSupabaseVerifier(env.SUPABASE_URL!, env.SUPABASE_JWT_SECRET);
+  const guest = env.POSTGRES_URL ? createGuestSessionAuth({
+    secret: env.PEEK_GUEST_SECRET || env.SUPABASE_SERVICE_ROLE_KEY!,
+    projectOrigin: env.SUPABASE_URL!, behindVercel: env.VERCEL === '1', accountAuth,
+    accounts: createSupabaseGuestAccounts(db),
+    permit: createPostgresGuestRateLimiter(createPostgresPool(env.POSTGRES_URL, 1)),
+  }) : undefined;
   return {
     blob: createVercelBlobStore({ token: env.BLOB_READ_WRITE_TOKEN || undefined }),
     clips: createSupabaseClipRepo(db),
-    auth: createSupabaseVerifier(env.SUPABASE_URL!, env.SUPABASE_JWT_SECRET),
+    auth: guest?.auth ?? accountAuth,
+    guestSessions: guest?.guestSessions,
     trimmer: createFfmpegTrimmer(ffmpegPath(env)),
     references,
     usage: createSupabaseUsageRepo(db),

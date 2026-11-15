@@ -8,10 +8,11 @@ import { Poppins_400Regular } from '@expo-google-fonts/poppins/400Regular';
 import { Poppins_600SemiBold } from '@expo-google-fonts/poppins/600SemiBold';
 import { Poppins_800ExtraBold } from '@expo-google-fonts/poppins/800ExtraBold';
 import type { Session as AuthSession } from '@supabase/supabase-js';
+import { randomUUID } from 'expo-crypto';
 import { useFonts } from 'expo-font';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   AppState, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View,
 } from 'react-native';
@@ -25,6 +26,7 @@ import { CoachScreen } from './CoachScreen';
 import { ComparisonScreen } from './ComparisonScreen';
 import type { ComparisonShot } from './ComparisonScreen';
 import type { PracticeStore } from './database';
+import { guestUserId, restoreDeviceGuest, subscribeToGuest } from './device-guest';
 import { loadPractice, localVideoUri } from './device-storage';
 import { hasAutomaticAnalysis, startShotAnalysis } from './guest-pose';
 import { ClipPicker, SavedClips } from './LibraryScreen';
@@ -115,12 +117,14 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   const [authReady, setAuthReady] = useState(!supabase);
   const [selection, setSelection] = useState<{ id: string; userId: string | null }>();
   const [question, setQuestion] = useState('');
+  const [conversationId, setConversationId] = useState(randomUUID);
   const [resumeCoach, setResumeCoach] = useState(false);
   const [generation, setGeneration] = useState(0);
   const [recent, setRecent] = useState<{ userId: string; values: RecentChat[] }>();
   const currentRecent = useRef(recent);
   const recoveryLink = useRef<string>(null);
-  const cloudUserId = session?.user.id ?? null;
+  const deviceGuest = useSyncExternalStore(subscribeToGuest, guestUserId);
+  const cloudUserId = session?.user.id ?? deviceGuest;
   const playerSession = session?.user.is_anonymous ? null : session;
   const playerUserId = playerSession?.user.id ?? null;
   const { schedule: scheduleClipSync, guestLimit } = useClipSync(store, cloudUserId);
@@ -133,6 +137,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
 
   useEffect(() => {
     let alive = true;
+    void restoreDeviceGuest();
     void preferences.getItem(guestKey).then(
       (value) => { if (alive) setSeenWelcome(value === 'yes'); },
       () => { if (alive) setSeenWelcome(false); },
@@ -193,19 +198,19 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   }, []);
 
   useEffect(() => {
-    if (!playerUserId) {
+    if (!cloudUserId) {
       currentRecent.current = undefined;
       setRecent(undefined);
       return;
     }
     let active = true;
-    void loadRecentChats(playerUserId).then((values) => {
-      if (!active || currentRecent.current?.userId === playerUserId) return;
-      currentRecent.current = { userId: playerUserId, values };
+    void loadRecentChats(cloudUserId).then((values) => {
+      if (!active || currentRecent.current?.userId === cloudUserId) return;
+      currentRecent.current = { userId: cloudUserId, values };
       setRecent(currentRecent.current);
     }, () => {});
     return () => { active = false; };
-  }, [playerUserId]);
+  }, [cloudUserId]);
 
   useEffect(() => {
     if (!selection || selection.userId === cloudUserId) return;
@@ -219,7 +224,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   }, [cloudUserId, selection]);
 
   function updateRecent(userId: string, chat: RecentChat) {
-    if (userId !== playerUserId) return;
+    if (userId !== cloudUserId) return;
     const previous = currentRecent.current?.userId === userId ? currentRecent.current.values : [];
     const existing = previous.find(({ sessionId }) => sessionId === chat.sessionId);
     if (existing?.reply === chat.reply && existing.title === chat.title) return;
@@ -265,7 +270,21 @@ function PracticeApp({ store }: { store: PracticeStore }) {
   function newChat() {
     setSelection(undefined);
     setQuestion('');
+    setConversationId(randomUUID());
     setResumeCoach(false);
+    setGeneration((value) => value + 1);
+    go(coachRoute);
+  }
+
+  function openRecentChat(id: string) {
+    const clip = store.getSession(id);
+    if (clip) {
+      selectClip(clip, true);
+      return;
+    }
+    setSelection(undefined);
+    setQuestion('');
+    setConversationId(id);
     setGeneration((value) => value + 1);
     go(coachRoute);
   }
@@ -300,11 +319,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
     case 'account':
       content = <AccountScreen session={playerSession} latestChat={latestChat} onMenu={openMenu}
         onSwitch={() => push({ screen: 'switch' })} onAuth={openAuth}
-        onChat={() => {
-          const clip = latestChat && store.getSession(latestChat.sessionId);
-          if (clip) selectClip(clip, true);
-          else go(coachRoute);
-        }} />;
+        onChat={() => latestChat ? openRecentChat(latestChat.sessionId) : go(coachRoute)} />;
       break;
     case 'switch':
       content = <SwitchAccount session={playerSession} onBack={back}
@@ -353,19 +368,14 @@ function PracticeApp({ store }: { store: PracticeStore }) {
 
   if (!authReady || seenWelcome === undefined) return <Splash />;
 
-  const knownConversations: MenuChat[] = cloudUserId && menu
-    ? authenticatedRecent.flatMap(({ sessionId, title }) => {
-        const clip = store.getSession(sessionId);
-        return clip ? [{ session: clip, title }] : [];
-      })
-    : [];
+  const knownConversations = menu ? authenticatedRecent : [];
 
   return (
     <>
       {currentRoute.screen !== 'welcome' ? (
         <View style={showCoach ? styles.fill : styles.hidden}>
           <CoachScreen key={(playerUserId ?? 'guest') + ':' + String(generation)} visible={showCoach}
-            store={store} userId={cloudUserId} session={selectedSession} question={question} onChangeQuestion={setQuestion}
+            store={store} userId={cloudUserId} conversationId={conversationId} session={selectedSession} question={question} onChangeQuestion={setQuestion}
             onMenu={openMenu} onNewChat={newChat} onRecord={() => push({ screen: 'record', from: 'coach' })}
             onPickClip={() => push({ screen: 'picker' })} onRemoveClip={() => setSelection(undefined)}
             onReview={(clip) => review(clip, 'Coach')}
@@ -378,7 +388,7 @@ function PracticeApp({ store }: { store: PracticeStore }) {
       <Menu visible={menu} session={playerSession} chats={knownConversations} onDismiss={() => setMenu(false)}
         onNewChat={newChat} onSaved={() => go({ screen: 'saved' })}
         onAccount={() => go(accountRoute)} onSwitch={() => { setMenu(false); setStack([accountRoute, { screen: 'switch' }]); }}
-        onChat={(clip) => selectClip(clip, true)} onSignIn={() => openAuth('sign-in')} />
+        onChat={openRecentChat} />
     </>
   );
 }
@@ -406,19 +416,16 @@ function Welcome({ onSignIn, onCreate, onGuest }: { onSignIn: () => void; onCrea
   );
 }
 
-type MenuChat = { session: Session; title: string };
-
-function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccount, onSwitch, onChat, onSignIn }: {
+function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccount, onSwitch, onChat }: {
   visible: boolean;
   session: AuthSession | null;
-  chats: MenuChat[];
+  chats: RecentChat[];
   onDismiss: () => void;
   onNewChat: () => void;
   onSaved: () => void;
   onAccount: () => void;
   onSwitch: () => void;
-  onChat: (clip: Session) => void;
-  onSignIn: () => void;
+  onChat: (sessionId: string) => void;
 }) {
   const name = session ? accountName(session.user) : 'Guest';
   return (
@@ -437,11 +444,9 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccoun
             <Text style={styles.sectionLabel}>LIBRARY</Text>
             <MenuItem title="Saved clips" icon="library" onPress={onSaved} />
             <Text style={[styles.sectionLabel, styles.recentLabel]}>RECENTS</Text>
-            {session ? (
-              chats.length ? chats.map((chat) => (
-                <MenuItem key={chat.session.id} title={chat.title} onPress={() => onChat(chat.session)} />
-              )) : <Text style={styles.noRecent}>No conversations yet</Text>
-            ) : <MenuItem title="Sign in to see your chat history" icon="lock" boxed onPress={onSignIn} />}
+            {chats.length ? chats.map((chat) => (
+              <MenuItem key={chat.sessionId} title={chat.title} onPress={() => onChat(chat.sessionId)} />
+            )) : <Text style={styles.noRecent}>No conversations yet</Text>}
           </ScrollView>
           <View style={styles.accountLink}>
             <Pressable accessibilityRole="button" accessibilityLabel={session ? 'View profile' : 'Guest account'}
@@ -460,12 +465,12 @@ function Menu({ visible, session, chats, onDismiss, onNewChat, onSaved, onAccoun
   );
 }
 
-function MenuItem({ title, icon, boxed, onPress }: {
-  title: string; icon?: 'library' | 'lock'; boxed?: boolean; onPress: () => void;
+function MenuItem({ title, icon, onPress }: {
+  title: string; icon?: 'library'; onPress: () => void;
 }) {
   return (
     <Pressable accessibilityRole="button" onPress={onPress}
-      style={({ pressed }) => [styles.menuItem, boxed && styles.menuItemBox, pressed && styles.dimmed]}>
+      style={({ pressed }) => [styles.menuItem, pressed && styles.dimmed]}>
       {icon ? <Icon name={icon} /> : null}
       <Text style={icon === 'library' ? styles.accountName : styles.menuText} numberOfLines={1}>{title}</Text>
     </Pressable>
@@ -500,7 +505,6 @@ const styles = StyleSheet.create({
   sectionLabel: { ...ui.mono, color: colors.muted, fontSize: 10, paddingHorizontal: 8, paddingBottom: 3 },
   recentLabel: { marginTop: 12 },
   menuItem: { flexDirection: 'row', alignItems: 'center', gap: 11, borderRadius: 11, paddingHorizontal: 10, minHeight: 42 },
-  menuItemBox: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   menuText: { ...ui.body, flexShrink: 1 },
   noRecent: { ...ui.body, padding: 10 },
   accountLink: {

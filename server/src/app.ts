@@ -5,6 +5,7 @@ import { CatalogError, checkCatalogAssets, createCatalogReader, mediaFileName, t
 import { analysisRoutes } from './analysis.js';
 import { clipRoutes } from './clips.js';
 import type { Deps } from './deps.js';
+import { registerGuestSessionRoute } from './guest-session.js';
 
 export interface AppOptions {
   /** Path to demos.json. */
@@ -74,6 +75,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     return { status: 'ok', service: 'perspective-api', time };
   });
 
+  registerGuestSessionRoute(app, opts.deps?.guestSessions);
   await app.register(clipRoutes, { deps: opts.deps, depsError: opts.depsError });
   await app.register(analysisRoutes, { blob: opts.deps?.blob, clips: opts.deps?.clips, cvToken: opts.deps?.cvToken });
   if (opts.deps?.routes) await opts.deps.routes(app);

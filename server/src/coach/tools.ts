@@ -6,13 +6,21 @@
  */
 import { tool } from 'langchain';
 import { z } from 'zod';
-import type { ClipRepo, ClipRow } from '../deps.js';
+import { DURATION_TOLERANCE_MS, MAX_RECORDING_DURATION_MS, type ClipRepo, type ClipRow } from '../deps.js';
 import type { ShotAnalysis, ShotMetrics } from '../cv/metrics.js';
 import { PRO_BASELINES } from './pro-baselines.generated.js';
 import { HAND_NOTE, compareToPros, effectiveAnalysis, handUncertain, metricZ, playerComparable, rankPros, sessionShotType } from './compare.js';
 import type { ReferenceRepo, TemplateRow } from './deps.js';
 
-export const coachContextSchema = z.object({ userId: z.string(), sessionId: z.string() });
+const angleEstimate = z.number().min(0).max(180).nullable();
+export const onDeviceShotSchema = z.object({
+  releaseMs: z.number().int().min(0).max(MAX_RECORDING_DURATION_MS + DURATION_TOLERANCE_MS),
+  shootingHand: z.enum(['left', 'right']),
+  releaseElbowDeg: angleEstimate,
+  kneeDipDeg: angleEstimate,
+  releaseHeight: z.number().min(-2).max(2).nullable(),
+});
+export const coachContextSchema = z.object({ userId: z.string(), sessionId: z.string(), onDeviceShot: onDeviceShotSchema.optional() });
 export type CoachContext = z.infer<typeof coachContextSchema>;
 
 /** Numeric metrics the tools compare. */
@@ -82,6 +90,7 @@ export function createCoachTools(deps: { clips: ClipRepo; references: ReferenceR
       const rows = await session(runtime);
       const made = rows.filter((r) => r.outcome === 'made').length;
       const missed = rows.filter((r) => r.outcome === 'missed').length;
+      const estimated = rows.some(usable) ? undefined : ctx(runtime).onDeviceShot;
       return json({
         shots: rows.map((r) => ({
           shotNumber: r.shotNumber,
@@ -96,9 +105,10 @@ export function createCoachTools(deps: { clips: ClipRepo; references: ReferenceR
         makePercent: made + missed ? Math.round((made / (made + missed)) * 100) : null,
         analyzedShots: rows.filter((r) => analysisOf(r)).length,
         pendingShots: rows.filter((r) => r.analysisStatus === 'pending').length,
+        ...(estimated ? { onDeviceShot: { source: 'iphone_pose_estimate', ...estimated } } : {}),
       });
     },
-    { name: 'get_session_overview', description: "This session's shots, outcomes, make percentage, and which shots have form analysis.", schema: z.object({}) },
+    { name: 'get_session_overview', description: "Synced shots, outcomes, make percentage, form analysis status, and any on-device estimate supplied for this turn.", schema: z.object({}) },
   );
 
   const getShotMetrics = tool(

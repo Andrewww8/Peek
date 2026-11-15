@@ -6,7 +6,7 @@ type Point = [number, number, number];
 
 const fps = 30;
 const releaseIndex = 24;
-const frameCount = 37;
+const frameCount = releaseIndex + fps + 1;
 const maxGap = 6;
 const templateHeight = 0.968;
 const { pelvis, rightHip, rightKnee, rightAnkle, leftHip, leftKnee, leftAnkle, thorax,

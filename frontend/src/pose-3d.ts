@@ -41,15 +41,28 @@ export function shotMotionWindow(pose: Pose): [first: number, last: number] {
   return [first, last];
 }
 
-export function slicePose(pose: Pose, first: number, last: number): Pose {
-  if (first === 0 && last === pose.frameCount - 1) return pose;
+export function comparisonPlayback(pose: Pose, first = 0): Pose {
+  const frameCount = pose.releaseIndex + pose.fps - first + 1;
+  let lastVisible: number | undefined;
+  const frames = Array.from({ length: frameCount }, (_, i) => {
+    const frame = first + i;
+    if (frame < pose.frameCount && bones.some(([a, b]) => b < jointCount && posePoint(pose, frame, a) && posePoint(pose, frame, b))) {
+      lastVisible = frame;
+      return frame;
+    }
+    // Preserve the last whole tracked pose across detection gaps and beyond the end of the clip.
+    return frame >= pose.releaseIndex ? lastVisible ?? frame : frame;
+  });
+  const samples = (values: PoseSample[], width: number) => frames.flatMap((frame) =>
+    Array.from({ length: width }, (_, i) => values[frame * width + i] ?? null),
+  );
   return {
     ...pose,
-    frameCount: last - first + 1,
+    frameCount,
     releaseIndex: pose.releaseIndex - first,
-    joints: pose.joints.slice(first * coordinatesPerFrame, (last + 1) * coordinatesPerFrame),
-    fingers: pose.fingers?.slice(first * fingerCount * 3, (last + 1) * fingerCount * 3),
-    pelvisRise: pose.pelvisRise?.slice(first, last + 1) ?? null,
+    joints: samples(pose.joints, coordinatesPerFrame),
+    fingers: pose.fingers && samples(pose.fingers, fingerCount * 3),
+    pelvisRise: pose.pelvisRise && samples(pose.pelvisRise, 1),
   };
 }
 
@@ -237,20 +250,22 @@ function nameMesh(id: string, name: string, offset: number, material: string, at
 }
 
 export function comparisonUsdz(player: Pose, reference: Pose, labels?: ComparisonLabels) {
-  if (player.fps !== reference.fps || player.frameCount !== reference.frameCount || player.releaseIndex !== reference.releaseIndex) {
+  if (player.fps !== reference.fps || player.releaseIndex !== reference.releaseIndex) {
     throw new Error('The two shots must use the same release timeline.');
   }
+  const playerPlayback = comparisonPlayback(player);
+  const referencePlayback = comparisonPlayback(reference);
   const fps = String(player.fps / 2);
   const white: Vector = [1, 1, 1];
   const yellow: Vector = [1, 0.79, 0.04];
   const text = [
     '#usda 1.0', '(',
     'defaultPrim = "PeekComparison"', 'metersPerUnit = 1', 'upAxis = "Y"',
-    'startTimeCode = 0', 'endTimeCode = ' + String(player.frameCount - 1),
+    'startTimeCode = 0', 'endTimeCode = ' + String(playerPlayback.frameCount - 1),
     'timeCodesPerSecond = ' + fps, 'framesPerSecond = ' + fps, ')',
     'def Xform "PeekComparison" ( kind = "component" ) {',
-    actor('Player', player, -0.63, white),
-    actor('NBAReference', reference, 0.63, yellow),
+    actor('Player', playerPlayback, -0.63, white),
+    actor('NBAReference', referencePlayback, 0.63, yellow),
     ...(labels ? [
       'def Scope "NameMaterials" {', nameMaterial('White', white), nameMaterial('Yellow', yellow), '}',
       nameMesh('PlayerName', labels.player, -0.63, 'White', labels.atlas),

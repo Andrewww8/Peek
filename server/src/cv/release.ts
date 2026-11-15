@@ -26,6 +26,8 @@ import { EXTREMITIES, J, NE, NJ, type PoseSeries } from './pose.js';
 export const GRID_FPS = 30;
 export const RELEASE_INDEX = 24;
 export const GRID_N = 37;
+/** Render a full second of follow-through on the comparison timeline. */
+export const PLAYBACK_FRAME_COUNT = RELEASE_INDEX + GRID_FPS + 1;
 export const GRID_T = Array.from({ length: GRID_N }, (_, i) => Number(((i - RELEASE_INDEX) / GRID_FPS).toFixed(3)));
 /** Median skeletal height of the templates (head–thorax–pelvis plus mean leg length), in body heights. */
 export const SKELETAL_HEIGHT = 0.968;
@@ -115,7 +117,7 @@ export function skeletalHeight(pose: Float32Array, f: number): number {
  * Pelvis-relative, rotated about the vertical so (left − right) of shoulders + hips near
  * release is +x, and scaled to SKELETAL_HEIGHT. Returns null without enough 3D near release.
  */
-export function canonicalize(s: ReleaseSeries): ReleaseSeries | null {
+export function canonicalize(s: ReleaseSeries, scaleFrames = n(s)): ReleaseSeries | null {
   const N = n(s);
   let lx = 0, lz = 0;
   for (let f = Math.max(0, s.releaseIndex - 3); f <= Math.min(N - 1, s.releaseIndex + 3); f++) {
@@ -127,7 +129,7 @@ export function canonicalize(s: ReleaseSeries): ReleaseSeries | null {
   const norm = Math.hypot(lx, lz);
   if (!(norm > 0)) return null;
   const c = lx / norm, sn = lz / norm; // rotate (lx, lz) onto +x: x' = c·x + s·z, z' = −s·x + c·z
-  const height = median(Array.from({ length: N }, (_, f) => skeletalHeight(s.pose, f)));
+  const height = median(Array.from({ length: scaleFrames }, (_, f) => skeletalHeight(s.pose, f)));
   if (!(height > 0)) return null;
   const k = SKELETAL_HEIGHT / height;
   const tf = (src: Float32Array, w: number) => {
@@ -315,16 +317,16 @@ export function computeCurves(s: ReleaseSeries): Curves {
  * Resamples one shooter's (quantized) clip series onto the template grid around `releaseFrame`.
  * Pelvis rise comes from the 2D pelvis height relative to the window start, per box height.
  */
-export function releaseSeriesFromClip(s: PoseSeries, releaseFrame: number, hand: Hand): ReleaseSeries {
-  const pose = new Float32Array(GRID_N * NJ * 3).fill(NaN);
-  const extremities = s.extremities3d ? new Float32Array(GRID_N * NE * 3).fill(NaN) : null;
-  const rise = new Float32Array(GRID_N).fill(NaN);
+export function releaseSeriesFromClip(s: PoseSeries, releaseFrame: number, hand: Hand, frameCount = GRID_N): ReleaseSeries {
+  const pose = new Float32Array(frameCount * NJ * 3).fill(NaN);
+  const extremities = s.extremities3d ? new Float32Array(frameCount * NE * 3).fill(NaN) : null;
+  const rise = new Float32Array(frameCount).fill(NaN);
   const pelvisY = (i: number) => s.kpts2d[(i * NJ + J.pelvis) * 2 + 1]!;
   const boxH = (i: number) => s.bbox[i * 4 + 3]! - s.bbox[i * 4 + 1]!;
   let base: number | null = null;
   let next = 0;
   const maxGap = Math.max(1, s.fps * 0.1);
-  for (let g = 0; g < GRID_N; g++) {
+  for (let g = 0; g < frameCount; g++) {
     const fpos = releaseFrame + ((g - RELEASE_INDEX) * s.fps) / GRID_FPS;
     while (next < s.frames.length && s.frames[next]! < fpos - 1e-9) next++;
     const upper = s.frames[next];

@@ -11,7 +11,7 @@ import { accessToken } from './auth';
 import type { PracticeStore } from './database';
 import { localVideoUri } from './device-storage';
 import { getShotAnalysisState, hasOnDeviceAnalysis, startShotAnalysis, subscribeToShotAnalysis, type ShotAnalysisTag } from './guest-pose';
-import { bones, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow, slicePose } from './pose-3d';
+import { bones, comparisonPlayback, comparisonUsdz, coordinatesPerFrame, jointCount, poseGround, posePoint, posePointCount, shotMotionWindow } from './pose-3d';
 import type { NameAtlas, Pose, PoseSample } from './pose-3d';
 import { clipTime } from './practice';
 import { ShotAnalysisProgress } from './ShotAnalysisProgress';
@@ -30,7 +30,7 @@ const preferred = references.find(({ player }) => player === 'Stephen Curry') ??
 async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing: boolean, signal: AbortSignal): Promise<Pose | string> {
   const { sessionId, shotNumber } = shot;
   const request = accountFetch(apiUrl, (renew) => accessToken(userId, renew));
-  const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose', {
+  const response = await request('/v1/sessions/' + encodeURIComponent(sessionId) + '/shots/' + String(shotNumber) + '/pose?followThrough=1', {
     signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]),
   });
   const body = await response.json() as { pose?: Pose; shotType?: string; message?: string };
@@ -39,7 +39,7 @@ async function loadShotPose(shot: TaggedComparisonShot, userId: string, syncing:
   if (!response.ok) throw new Error(body.message || 'Could not load the 3D pose.');
   const pose = body.pose;
   if (body.shotType !== 'three_point' || !pose || pose.fps !== preferred.pose.fps ||
-      pose.releaseIndex !== preferred.pose.releaseIndex || pose.frameCount !== preferred.pose.frameCount ||
+      pose.releaseIndex !== preferred.pose.releaseIndex || pose.frameCount <= pose.releaseIndex ||
       !Array.isArray(pose.joints) || pose.joints.length !== pose.frameCount * coordinatesPerFrame) {
     throw new Error('This shot could not be lined up with the three-point reference.');
   }
@@ -80,12 +80,18 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
   const state = useSyncExternalStore(subscribeToShotAnalysis, () => getShotAnalysisState(sessionId, tag));
   const result = state?.result;
   const automatic = shot.shotNumber === undefined;
+  const refreshStarted = useRef(false);
 
   useEffect(() => {
-    if (automatic && video && !state) {
+    if (!video) return;
+    if (automatic && !state) {
       void startShotAnalysis(sessionId, video, undefined, isGuest).catch(() => undefined);
+    } else if (!refreshStarted.current && state?.phase === 'complete' && result &&
+        result.pose.frameCount <= result.pose.releaseIndex + result.pose.fps) {
+      refreshStarted.current = true;
+      void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
     }
-  }, [automatic, video, state, sessionId, isGuest]);
+  }, [automatic, video, state, result, sessionId, tag, isGuest]);
 
   function analyze() {
     if (video) void startShotAnalysis(sessionId, video, tag, isGuest).catch(() => undefined);
@@ -97,7 +103,12 @@ function OnDeviceComparisonScreen({ shot, tag, video, isGuest, playerName, backL
       <ScreenHeader backLabel={backLabel} detail="3D COMPARISON" onBack={onBack} />
       <Page>
         <Title title="Your shot vs NBA" subtitle={`${automatic ? 'Catch-and-shoot three' : 'Shot ' + shot.shotNumber}${releaseTime}`} />
-        {result ? <PoseComparison playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} /> : (
+        {result ? (
+          <>
+            {state?.phase !== 'complete' ? <ShotAnalysisProgress sessionId={sessionId} tag={tag} /> : null}
+            <PoseComparison key={result.pose.frameCount} playerPose={result.pose} playerLabel={playerName ?? 'Your shot'} />
+          </>
+        ) : (
           <Panel>
             <ShotAnalysisProgress sessionId={sessionId} tag={tag} />
             {video ? (
@@ -213,9 +224,9 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
   playerPose: Pose; playerLabel: string;
 }) {
   const [reference, setReference] = useState(preferred);
-  const [firstFrame, lastFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
-  const playerPose = useMemo(() => slicePose(fullPose, firstFrame, lastFrame), [fullPose, firstFrame, lastFrame]);
-  const referencePose = useMemo(() => slicePose(reference.pose, firstFrame, lastFrame), [reference, firstFrame, lastFrame]);
+  const [firstFrame, lastMotionFrame] = useMemo(() => shotMotionWindow(fullPose), [fullPose]);
+  const playerPose = useMemo(() => comparisonPlayback(fullPose, firstFrame), [fullPose, firstFrame]);
+  const referencePose = useMemo(() => comparisonPlayback(reference.pose, firstFrame), [reference, firstFrame]);
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(playerPose.frameCount > 1);
   const [angle, setAngle] = useState(0.55);
@@ -237,7 +248,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
 
   useEffect(() => {
     if (!playing) return;
-    // Slow motion makes the release easier to inspect in the 37-frame window.
+    // Play both shots at half speed on the same release-aligned timeline.
     const started = performance.now() - playhead.current * 2000 / playerPose.fps;
     let animation: number;
     const tick = () => {
@@ -311,9 +322,10 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
         <Button label="Change NBA player" kind="secondary" onPress={() => setPicker(true)} disabled={openingAR} style={styles.action} />
       </View>
       {arNotice ? <Notice>{arNotice}</Notice> : null}
-      {playerPose.frameCount === 1 ? (
+      {firstFrame === lastMotionFrame ? (
         <Notice>Only a still pose was tracked near this tag. Tag the ball release in a clip with the shooter in view to see motion.</Notice>
-      ) : <Panel style={styles.playback}>
+      ) : null}
+      <Panel style={styles.playback}>
         <View style={ui.row}>
           <Chip label={playing ? 'Pause' : 'Play at 0.5×'} onPress={() => setPlaying((value) => !value)} />
           <Text accessibilityLiveRegion={playing ? 'none' : 'polite'} style={ui.label}>
@@ -329,7 +341,7 @@ function PoseComparison({ playerPose: fullPose, playerLabel }: {
           <Chip label="Side view" selected={Math.abs(angle - Math.PI / 2) < 0.03} onPress={() => changeAngle(Math.PI / 2)} />
           <Text style={ui.body}>Drag to rotate</Text>
         </View>
-      </Panel>}
+      </Panel>
       <Panel>
         <Text accessibilityRole="header" style={ui.title}>Shooting form</Text>
         <View style={styles.metricsRow}>

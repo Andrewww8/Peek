@@ -16,7 +16,7 @@ import { ApiError } from '../clips.js';
 import type { ClipRepo } from '../deps.js';
 import { createCoachAgent, skillFiles, type CoachAgent } from './agent.js';
 import { COACH_MAX_MESSAGE_CHARS, GUEST_DAILY_LIMIT, GUEST_LIMIT_MESSAGE, type CoachDeps, type TurnUsage } from './deps.js';
-import { toolStatus } from './tools.js';
+import { onDeviceShotSchema, toolStatus } from './tools.js';
 
 const threadId = (userId: string, sessionId: string) => `${userId}:${sessionId}`;
 const utcDay = () => new Date().toISOString().slice(0, 10);
@@ -46,13 +46,14 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
   app.post<{ Params: { sessionId: string } }>('/v1/sessions/:sessionId/coach/messages', async (req, reply) => {
     const c = need();
     const sessionId = sessionParam(req.params.sessionId);
-    const body = req.body as { message?: unknown } | null;
+    const body = req.body as { message?: unknown; onDeviceShot?: unknown } | null;
     const message = typeof body?.message === 'string' ? body.message.trim() : '';
     if (!message || message.length > COACH_MAX_MESSAGE_CHARS) {
       throw new ApiError(400, 'invalid_request', `message must be 1 to ${COACH_MAX_MESSAGE_CHARS} characters`);
     }
+    const localShot = onDeviceShotSchema.optional().safeParse(body?.onDeviceShot);
+    if (!localShot.success) throw new ApiError(400, 'invalid_request', 'onDeviceShot must contain a valid release and shot measurements');
     const userId = req.userId;
-    if (!(await clips.list(userId, sessionId)).length) throw new ApiError(404, 'session_not_found', 'no synced clips for this session');
     const day = (c.today ?? utcDay)();
     const limit = req.isGuest ? Math.min(c.dailyLimit, GUEST_DAILY_LIMIT) : c.dailyLimit;
     const quota = await c.usage.consume(userId, day, limit);
@@ -61,7 +62,10 @@ export function coachRoutes(app: FastifyInstance, opts: { coach?: CoachDeps; cli
       throw new ApiError(429, 'coach_daily_limit', `the coach answers up to ${limit} messages a day`);
     }
 
-    const config = { configurable: { thread_id: threadId(userId, sessionId) }, context: { userId, sessionId } };
+    const config = {
+      configurable: { thread_id: threadId(userId, sessionId) },
+      context: { userId, sessionId, onDeviceShot: localShot.data },
+    };
     const a = getAgent();
     reply.hijack();
     const res = reply.raw;

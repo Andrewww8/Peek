@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { guestPoseFromVision, type VisionFrame } from '../src/guest-pose-motion.ts';
-import { posePoint, shotMotionWindow, slicePose } from '../src/pose-3d.ts';
+import { comparisonPlayback, coordinatesPerFrame, posePoint, shotMotionWindow } from '../src/pose-3d.ts';
 
 const body = [
   [0, 1, -3],
@@ -22,7 +22,7 @@ function shot(wristRise: number): VisionFrame[] {
 test('guest motion follows the selected recording and stays aligned to the release', () => {
   const low = guestPoseFromVision(shot(0.2));
   const high = guestPoseFromVision(shot(0.5));
-  assert.deepEqual([high.fps, high.releaseIndex, high.frameCount], [30, 24, 37]);
+  assert.deepEqual([high.fps, high.releaseIndex, high.frameCount], [30, 24, 55]);
   assert.deepEqual(posePoint(high, 24, 0), [0, 0, 0]);
   assert.notDeepEqual(posePoint(high, 24, 16), posePoint(low, 24, 16));
   assert.notDeepEqual(posePoint(high, 24, 16), posePoint(high, 28, 16));
@@ -30,9 +30,24 @@ test('guest motion follows the selected recording and stays aligned to the relea
   assert.equal(high.shootingHand, 'right');
   const [first, last] = shotMotionWindow(high);
   assert.deepEqual([first, last], [18, 30]);
-  const playback = slicePose(high, first, last);
+  const playback = comparisonPlayback(high, first);
   assert.equal(playback.releaseIndex, 6);
+  assert.equal(playback.frameCount - 1 - playback.releaseIndex, playback.fps);
+  assert.deepEqual(posePoint(playback, playback.frameCount - 1, 16), posePoint(high, last, 16));
   assert.notDeepEqual(posePoint(playback, 0, 16), posePoint(playback, 1, 16));
+});
+
+test('legacy comparisons hold the previous pose across a gap and through the full tail', () => {
+  const pose = guestPoseFromVision(shot(0.5));
+  const blank = (frame: number, end = frame + 1) =>
+    pose.joints.fill(null, frame * coordinatesPerFrame, end * coordinatesPerFrame);
+  blank(25);
+  blank(31, 37);
+  const playback = comparisonPlayback({ ...pose, frameCount: 37 });
+  assert.equal(playback.frameCount, 55);
+  assert.deepEqual(posePoint(playback, 25, 16), posePoint(pose, 24, 16));
+  assert.deepEqual(posePoint(playback, 26, 16), posePoint(pose, 26, 16));
+  assert.deepEqual(posePoint(playback, 54, 16), posePoint(pose, 30, 16));
 });
 
 test('guest analysis rejects footage without a pose instead of providing sample motion', () => {

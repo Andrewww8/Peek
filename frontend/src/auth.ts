@@ -4,6 +4,7 @@ import { AESEncryptionKey, aesDecryptAsync, aesEncryptAsync, AESSealedData } fro
 import * as SecureStore from 'expo-secure-store';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 import type { RecentChat } from './coach';
+import { connectDeviceGuest, guestUserId } from './device-guest';
 
 const storage = new SQLiteStorage('perspective-auth');
 const keychain = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY };
@@ -125,16 +126,9 @@ export function startGuestSession() {
 }
 
 async function connectGuest() {
-  if (!supabase) throw new Error('Sign-in is unavailable in this build.');
-  const { data: current } = await supabase.auth.getSession();
-  if (current.session) return current.session.user.id;
-  const { data, error } = await supabase.auth.signInAnonymously();
-  if (error?.code === 'anonymous_provider_disabled') {
-    throw new Error('Guest mode is disabled on the server. Sign in to continue.');
-  }
-  if (error) throw error;
-  if (!data.session?.user.is_anonymous) throw new Error('A guest session could not be started.');
-  return data.session.user.id;
+  if (savedSession?.user.id) return savedSession.user.id;
+  const current = await supabase?.auth.getSession();
+  return current?.data.session?.user.id ?? (await connectDeviceGuest()).userId;
 }
 
 export function passwordRecoveryCode(url: string) {
@@ -188,6 +182,10 @@ export function storedSession() {
 }
 
 export async function accessToken(userId: string, refresh: boolean) {
+  if (!savedSession && guestUserId() === userId) {
+    const guest = await connectDeviceGuest(refresh);
+    return !savedSession && guest.userId === userId ? guest.accessToken : null;
+  }
   if (!supabase || savedSession?.user.id !== userId) return null;
   const { data, error } = refresh ? await supabase.auth.refreshSession() : await supabase.auth.getSession();
   if (error) {

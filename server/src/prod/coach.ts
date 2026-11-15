@@ -6,9 +6,9 @@ import type { RunnableConfig } from '@langchain/core/runnables';
 import type { CheckpointListOptions } from '@langchain/langgraph-checkpoint';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import pg from 'pg';
 import { anthropicModelFactory } from '../coach/agent.js';
 import { COACH_DAILY_LIMIT, COACH_MODEL, COACH_RECURSION_LIMIT, type CoachDeps, type CoachUsageRepo, type ReferenceClipRow, type ReferenceRepo, type ReferenceShotRow, type TemplateRow } from '../coach/deps.js';
+import { createPostgresPool } from './postgres.js';
 
 /**
  * PostgresSaver that runs `setup()` (creating its own tables) once, on first use.
@@ -46,13 +46,7 @@ export class LazyPostgresSaver extends PostgresSaver {
 }
 
 export function createPostgresCheckpointer(url: string): LazyPostgresSaver {
-  // Supabase's pooler presents a certificate node-postgres does not chain to a public root,
-  // so `sslmode` in the URL is replaced by TLS without certificate verification.
-  const u = new URL(url);
-  const wantsSsl = u.searchParams.has('sslmode') || /supabase/.test(u.hostname);
-  for (const k of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'supa', 'pgbouncer']) u.searchParams.delete(k);
-  const pool = new pg.Pool({ connectionString: u.toString(), max: 2, idleTimeoutMillis: 10_000, ...(wantsSsl ? { ssl: { rejectUnauthorized: false } } : {}) });
-  return new LazyPostgresSaver(pool);
+  return new LazyPostgresSaver(createPostgresPool(url));
 }
 
 function check<T>(res: { data: T; error: { message: string; code?: string } | null }, what: string): T {

@@ -65,10 +65,14 @@ enum ShotPoseAnalyzer {
 
     var frames: [[String: Any]] = []
     var lastTime: CMTime?
-    for index in stride(from: 0, through: 36, by: 2) {
+    let releaseIndex = 24
+    let fps = 30
+    // Sample every other comparison frame through a full second after release.
+    let lastIndex = releaseIndex + fps
+    for index in stride(from: 0, through: lastIndex, by: 2) {
       try Task.checkCancellation()
-      defer { progress(Double(index / 2 + 1) / 19) }
-      let seconds = release + Double(index - 24) / 30
+      defer { progress(Double(index / 2 + 1) / Double(lastIndex / 2 + 1)) }
+      let seconds = release + Double(index - releaseIndex) / Double(fps)
       guard seconds >= 0, seconds < duration else { continue }
       let requestedTime = CMTime(seconds: seconds, preferredTimescale: 600)
       guard let frame = try? await generator.image(at: requestedTime),

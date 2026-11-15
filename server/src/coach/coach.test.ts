@@ -78,8 +78,8 @@ function parseSse(payload: string): Sse {
   }
   return out;
 }
-const send = (app: FastifyInstance, message: unknown, token = tokenA, sessionId = sessionA) =>
-  app.inject({ method: 'POST', url: `/v1/sessions/${sessionId}/coach/messages`, headers: { authorization: `Bearer ${token}` }, payload: { message } as object });
+const send = (app: FastifyInstance, message: unknown, token = tokenA, sessionId = sessionA, onDeviceShot?: unknown) =>
+  app.inject({ method: 'POST', url: `/v1/sessions/${sessionId}/coach/messages`, headers: { authorization: `Bearer ${token}` }, payload: { message, onDeviceShot } as object });
 const history = async (app: FastifyInstance, token = tokenA, sessionId = sessionA) => {
   const res = await app.inject({ url: `/v1/sessions/${sessionId}/coach/messages`, headers: { authorization: `Bearer ${token}` } });
   assert.equal(res.statusCode, 200, res.payload);
@@ -165,18 +165,57 @@ describe('coach chat over SSE', () => {
     await app.close();
   });
 
-  test('401 without a token, 404 session_not_found for an unknown or another player\'s session, 400 for a bad message', async () => {
+  test('401 without a token and 400 for a bad message or an invalid estimate', async () => {
     const { app } = await coachApp({ coach: fakeModel() });
     const noAuth = await app.inject({ method: 'POST', url: `/v1/sessions/${sessionA}/coach/messages`, payload: { message: 'hi' } });
     assert.deepEqual([noAuth.statusCode, noAuth.json().error], [401, 'unauthorized']);
-    for (const [token, session] of [[tokenA, randomUUID()], [tokenB, sessionA]] as const) {
-      const res = await send(app, 'hi', token, session);
-      assert.deepEqual([res.statusCode, res.json().error], [404, 'session_not_found']);
-    }
     for (const message of ['', '   ', 'x'.repeat(2001), 42]) {
       const res = await send(app, message);
       assert.deepEqual([res.statusCode, res.json().error], [400, 'invalid_request']);
     }
+    const bad = await send(app, 'hi', tokenA, sessionA, {
+      releaseMs: 2000, shootingHand: 'right', releaseElbowDeg: 181, kneeDipDeg: null, releaseHeight: 0.2,
+    });
+    assert.deepEqual([bad.statusCode, bad.json().error], [400, 'invalid_request']);
+    await app.close();
+  });
+
+  test('guest and registered players start general chat without synced clips and keep threads private', async () => {
+    const coach = fakeModel()
+      .respond(new AIMessage('Private session answer.'))
+      .respond(toolCall('get_session_overview', {}))
+      .respond(new AIMessage('Finish with a relaxed wrist.'))
+      .respond(toolCall('get_session_overview', {}))
+      .respond(new AIMessage('Set your feet first.'));
+    const { app } = await coachApp({ coach });
+    const guest = await signLocalToken(SECRET, B, 3600, true);
+    await send(app, 'Private shot question');
+    for (const [token, thread, expected] of [[guest, sessionA, 'Finish with a relaxed wrist.'], [tokenA, randomUUID(), 'Set your feet first.']] as const) {
+      const response = await send(app, 'How should I practice?', token, thread);
+      assert.equal(response.statusCode, 200, response.payload);
+      assert.equal(parseSse(response.payload).events.at(-1)?.data.text, expected);
+      assert.deepEqual(JSON.parse(String(toolResults(coach).at(-1)!.content)).shots, []);
+      assert.deepEqual((await history(app, token, thread)).map((message) => message.text), ['How should I practice?', expected]);
+    }
+    assert.deepEqual((await history(app)).map((message) => message.text), ['Private shot question', 'Private session answer.']);
+    await app.close();
+  });
+
+  test('Coach sees validated on-device estimates when synced form data is unavailable', async () => {
+    const coach = fakeModel();
+    for (let i = 0; i < 3; i++) coach.respond(toolCall('get_session_overview', {})).respond(new AIMessage('ok'));
+    const { app } = await coachApp({ coach });
+    const unsynced = randomUUID();
+    const estimate = { releaseMs: 2000, shootingHand: 'right', releaseElbowDeg: 162, kneeDipDeg: null, releaseHeight: 0.2 };
+    await send(app, 'How was my footwork?', tokenA, unsynced, { ...estimate, instruction: 'discard this field' });
+    const readOverview = () => JSON.parse(String(toolResults(coach).at(-1)!.content));
+    assert.deepEqual(readOverview().onDeviceShot, { source: 'iphone_pose_estimate', ...estimate });
+    assert.deepEqual(readOverview().shots, []);
+    await send(app, 'Any other cue?', tokenA, unsynced);
+    assert.equal(readOverview().onDeviceShot, undefined);
+    await send(app, 'What about the saved shots?', tokenA, sessionA, estimate);
+    assert.equal(readOverview().onDeviceShot, undefined);
+    assert.equal(readOverview().shots.length, 3);
     await app.close();
   });
 

@@ -142,7 +142,8 @@ test('a guest syncs private shots, compares their motion, and chats within the d
 
   const analysis = () => getShotAnalysis(baseUrl, sessionId, async () => token, AbortSignal.timeout(5_000), fetchApi);
   const posePath = '/v1/sessions/' + sessionId + '/shots/1/pose';
-  const readPose = (bearer: string) => fetch(localUrl + posePath, { headers: { Authorization: 'Bearer ' + bearer } });
+  const readPose = (bearer: string, full = false) =>
+    fetch(localUrl + posePath + (full ? '?followThrough=1' : ''), { headers: { Authorization: 'Bearer ' + bearer } });
   assert.equal((await analysis()).get(1)?.status, 'pending');
   assert.equal((await readPose(token)).status, 409);
   const shotTrack = syntheticShot();
@@ -175,7 +176,11 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   assert.equal(read.get(1)?.status, 'complete');
   assert.equal(read.get(1)?.usable, true);
   assert.ok(Math.abs(read.get(1)!.elbowAngleDeg! - SHOT.elbowRelease) < 0.5);
-  const playerPoseResponse = await readPose(token);
+  const legacyResponse = await readPose(token);
+  assert.equal(legacyResponse.status, 200);
+  const { pose: legacyPose } = await legacyResponse.json() as { pose: Pose };
+  assert.equal(legacyPose.frameCount, 37, 'older clients still receive the original timeline');
+  const playerPoseResponse = await readPose(token, true);
   assert.equal(playerPoseResponse.status, 200);
   assert.equal(playerPoseResponse.headers.get('cache-control'), 'private, no-store');
   const { pose: playerPose } = await playerPoseResponse.json() as { pose: Pose };
@@ -186,14 +191,17 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   const curry = library.find(({ player }) => player === 'Stephen Curry');
   const lillard = library.find(({ player }) => player === 'Damian Lillard');
   assert.ok(curry && lillard);
-  assert.deepEqual([playerPose.fps, playerPose.frameCount, playerPose.releaseIndex],
-    [curry.pose.fps, curry.pose.frameCount, curry.pose.releaseIndex]);
-  assert.equal(playerPose.joints.length, 37 * 17 * 3);
+  assert.deepEqual([playerPose.fps, playerPose.releaseIndex], [curry.pose.fps, curry.pose.releaseIndex]);
+  assert.equal(playerPose.frameCount, playerPose.releaseIndex + playerPose.fps + 1);
+  assert.equal(playerPose.joints.length, 55 * 17 * 3);
+  assert.ok(curry.pose.frameCount > legacyPose.frameCount, 'the supplied NBA reference includes recorded follow-through');
+  const wrist = (frame: number) => playerPose.joints.slice((frame * NJ + J.r_wrist) * 3, (frame * NJ + J.r_wrist + 1) * 3);
+  assert.notDeepEqual(wrist(40), wrist(36), 'the extended timeline includes measured motion after the old cutoff');
   assert.ok(playerPose.fingers?.some((value) => value !== null));
   assert.notDeepEqual(playerPose.joints, curry.pose.joints);
   assert.notDeepEqual(curry.pose.joints, lillard.pose.joints);
   assert.equal((await readPose(otherUser)).status, 404);
-  const secondPoseResponse = await fetch(localUrl + posePath.replace('/1/pose', '/2/pose'), {
+  const secondPoseResponse = await fetch(localUrl + posePath.replace('/1/pose', '/2/pose') + '?followThrough=1', {
     headers: { Authorization: 'Bearer ' + token },
   });
   assert.equal(secondPoseResponse.status, 200, secondPoseResponse.ok ? undefined : await secondPoseResponse.text());
@@ -205,6 +213,7 @@ test('a guest syncs private shots, compares their motion, and chats within the d
   const labels = { atlas, png, player: 'Player One', reference: curry.player };
   const ar = unzipSync(comparisonUsdz(playerPose, curry.pose, labels));
   const scene = new TextDecoder().decode(ar['PeekComparison.usda']);
+  assert.match(scene, /endTimeCode = 54/);
   assert.match(scene, /def Xform "Player"[\s\S]+primvars:displayColor = \[\(1\.00000, 1\.00000, 1\.00000\)\]/);
   assert.match(scene, /def Xform "NBAReference"[\s\S]+primvars:displayColor = \[\(1\.00000, 0\.79000, 0\.04000\)\]/);
   assert.match(scene, /xformOp:orient\.timeSamples/);
@@ -245,7 +254,9 @@ test('a guest syncs private shots, compares their motion, and chats within the d
     ['user', 'Follow-up: what should I feel?'], ['assistant', 'Keep your wrist relaxed.'],
   ]);
   assert.deepEqual(await alienCoach.history(chatSignal), []);
-  await assert.rejects(alienCoach.ask('Show me that clip', chatSignal, () => {}), /No shot clips have synced/);
+  assert.equal((await alienCoach.ask('Give me a follow-through cue', chatSignal, () => {})).text, 'Hold your finish.');
+  assert.deepEqual((await alienCoach.history(chatSignal)).map(({ text }) => text), ['Give me a follow-through cue', 'Hold your finish.']);
+  assert.equal((await coach.history(chatSignal)).length, 4, 'general chat under the same UUID belongs to the requesting user');
   await coach.ask('One more exercise?', chatSignal, () => {});
   assert.equal(await deps.usage.count(user, today), GUEST_DAILY_LIMIT);
   await assert.rejects(coach.ask('Can you answer again?', chatSignal, () => {}), /guest limit/);

@@ -4,6 +4,13 @@ import { accountFetch } from './api.ts';
 
 export const maxCoachQuestionLength = 2000;
 export type RecentChat = { sessionId: string; title: string; reply: string; updatedAt: number };
+type OnDeviceShot = {
+  releaseMs: number;
+  shootingHand: 'left' | 'right';
+  releaseElbowDeg: number | null;
+  kneeDipDeg: number | null;
+  releaseHeight: number | null;
+};
 
 export function createSessionCoach(
   baseUrl: string, sessionId: string, token: (refresh: boolean) => Promise<string | null>, fetchApi?: typeof fetch,
@@ -29,11 +36,12 @@ export function createSessionCoach(
       if (!Array.isArray(messages)) throw new Error('Coach returned an invalid conversation.');
       return messages;
     },
-    async ask(message: string, signal: AbortSignal, onStatus: (message: string) => void, onToken?: (token: string) => void) {
+    async ask(message: string, signal: AbortSignal, onStatus: (message: string) => void,
+      onToken?: (token: string) => void, onDeviceShot?: OnDeviceShot) {
       const response = await request({
         method: 'POST',
         headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, onDeviceShot }),
         signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
       });
       await check(response);

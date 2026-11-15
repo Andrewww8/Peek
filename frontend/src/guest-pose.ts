@@ -76,24 +76,25 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
   const key = analysisKey(sessionId, tag);
   const existing = pending.get(key);
   if (existing) return existing;
-  const saved = getShotAnalysisState(sessionId, tag)?.result;
-  if (saved) return Promise.resolve(saved);
+  const previous = getShotAnalysisState(sessionId, tag);
+  const saved = previous?.result;
+  if (saved && saved.pose.frameCount > saved.pose.releaseIndex + saved.pose.fps) return Promise.resolve(saved);
 
   const startedAt = Date.now();
-  update(key, { phase: 'queued', progress: 0, startedAt });
+  update(key, { phase: 'queued', progress: 0, startedAt, result: saved });
   const operation = queue.then(async () => {
     if (!native?.isAvailable()) throw new Error('On-device shot analysis requires iOS 17 or later.');
-    if (!tag && !hasAutomaticAnalysis()) throw new Error('Install the latest Peek build to find the release automatically.');
+    if (!tag && !saved && !hasAutomaticAnalysis()) throw new Error('Install the latest Peek build to find the release automatically.');
 
     const day = new Date().toISOString().slice(0, 10);
     const [lastDay, lastCount] = (cache.getItemSync(usageKey) ?? '').split(':');
     const used = lastDay === day ? Number(lastCount) || 0 : 0;
-    if (isGuest && used >= dailyLimit) {
+    if (isGuest && !saved && used >= dailyLimit) {
       throw new Error('You’ve reached the limit of five new guest analyses on this iPhone today. Try again after midnight UTC.');
     }
 
     const requestId = String(++requestSequence);
-    const scanShare = tag ? 0 : 0.7;
+    const scanShare = tag || saved ? 0 : 0.7;
     const subscription = native.addListener?.('onShotPoseProgress', (event) => {
       if (event.requestId !== requestId || !Number.isFinite(event.progress)) return;
       const fraction = Math.min(1, Math.max(0, event.progress));
@@ -102,18 +103,18 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       const phase = detecting ? 'detecting' : 'tracking';
       if (previous?.phase !== phase) return;
       const work = detecting ? fraction * scanShare : scanShare + fraction * (1 - scanShare);
-      update(key, { phase, progress: Math.max(previous.progress, Math.min(0.99, work)), startedAt });
+      update(key, { phase, progress: Math.max(previous.progress, Math.min(0.99, work)), startedAt, result: saved });
     });
 
     try {
-      if (!tag) update(key, { phase: 'detecting', progress: 0, startedAt });
-      const releaseMs = tag?.releaseMs ?? await native.detectRelease(uri, requestId);
-      update(key, { phase: 'tracking', progress: scanShare, startedAt });
+      if (!tag && !saved) update(key, { phase: 'detecting', progress: 0, startedAt });
+      const releaseMs = saved?.releaseMs ?? tag?.releaseMs ?? await native.detectRelease(uri, requestId);
+      update(key, { phase: 'tracking', progress: scanShare, startedAt, result: saved });
       const { frames } = await native.analyze(uri, releaseMs, requestId);
       const result = { pose: guestPoseFromVision(frames), releaseMs };
       const state: ShotAnalysisState = { phase: 'complete', progress: 1, result, startedAt, finishedAt: Date.now() };
       const writes: [string, string][] = [[key, JSON.stringify(state)]];
-      if (isGuest) writes.push([usageKey, day + ':' + (used + 1)]);
+      if (isGuest && !saved) writes.push([usageKey, day + ':' + (used + 1)]);
       await cache.multiSet(writes);
       update(key, state);
       return result;
@@ -121,9 +122,13 @@ export function startShotAnalysis(sessionId: string, uri: string, tag?: ShotAnal
       subscription?.remove();
     }
   }).catch((error: unknown) => {
-    const previous = states.get(key);
+    if (previous && saved) {
+      update(key, previous);
+      return saved;
+    }
+    const lastState = states.get(key);
     update(key, {
-      phase: 'failed', progress: previous?.progress ?? 0, startedAt, finishedAt: Date.now(),
+      phase: 'failed', progress: lastState?.progress ?? 0, startedAt, finishedAt: Date.now(),
       error: error instanceof Error ? error.message : 'This recording could not be analyzed.',
     });
     throw error;
